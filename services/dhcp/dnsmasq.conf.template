@@ -1,0 +1,25 @@
+
+interface=${PXE_IFACE}
+bind-interfaces
+dhcp-authoritative
+port=0
+log-dhcp
+log-facility=-
+
+dhcp-range=${PXE_RANGE_START},${PXE_RANGE_END},${PXE_NETMASK},12h
+dhcp-option=option:router,${PXE_ROUTER_IP}
+dhcp-option=option:dns-server,${DNS_SERVER}
+
+enable-tftp
+tftp-root=/srv/tftp
+dhcp-option=option:tftp-server,${TFTP_SERVER_IP}
+
+dhcp-match=set:efi-x86_64,option:client-arch,7
+dhcp-match=set:efi-x86,option:client-arch,6
+dhcp-match=set:efi-arm64,option:client-arch,11
+dhcp-userclass=set:ipxe,iPXE
+
+pxe-service=tag:!ipxe,x86PC,"Boot iPXE (BIOS)",undionly.kpxe
+pxe-service=tag:!ipxe,BC_EFI,"Boot iPXE (UEFI)",ipxe.efi
+
+dhcp-boot=tag:ipxe,http://${WEBFS_HOST_IP}:${WEBFS_PORT}/ipxe/default.ipxe

@@ -1,0 +1,62 @@
+
+version: "3.9"
+
+services:
+  webfs:
+    build: ./services/webfs
+    container_name: sit_webfs
+    ports:
+      - "${WEBFS_PORT}:8080"
+    volumes:
+      - ./services/webfs/htdocs:/var/www/htdocs:rw
+      - ./ipxe:/var/www/htdocs/ipxe:ro
+      - ./data/webfs_share:/var/www/htdocs/files:rw
+    restart: unless-stopped
+
+  tftp:
+    build: ./services/tftp
+    container_name: sit_tftp
+    network_mode: host
+    volumes:
+      - ./services/tftp/tftpboot:/srv/tftp:rw
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+
+  dhcp:
+    build: ./services/dhcp
+    container_name: sit_dhcp
+    network_mode: host
+    environment:
+      - PXE_IFACE=${PXE_IFACE}
+      - PXE_RANGE_START=${PXE_RANGE_START}
+      - PXE_RANGE_END=${PXE_RANGE_END}
+      - PXE_NETMASK=${PXE_NETMASK}
+      - PXE_ROUTER_IP=${PXE_ROUTER_IP}
+      - DNS_SERVER=${DNS_SERVER}
+      - WEBFS_HOST_IP=${WEBFS_HOST_IP}
+      - WEBFS_PORT=${WEBFS_PORT}
+      - TFTP_SERVER_IP=${TFTP_SERVER_IP}
+      - ISO_FILE=${ISO_FILE}
+    volumes:
+      - ./services/dhcp/dnsmasq.conf.template:/etc/dnsmasq.conf.template:ro
+      - ./services/tftp/tftpboot:/srv/tftp:ro
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+
+  jenkins:
+    build: ./services/jenkins
+    container_name: sit_jenkins
+    user: "0:0"
+    ports:
+      - "${JENKINS_HTTP_PORT}:8080"
+      - "${JENKINS_AGENT_PORT}:50000"
+    volumes:
+      - ./data/jenkins_home:/var/jenkins_home
+      - ./Jenkinsfile:/var/jenkins_home/workspace/sit/Jenkinsfile:ro
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+    restart: unless-stopped
+
+volumes:

@@ -1,0 +1,22 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Python/venv
+__pycache__/
+*.pyc
+
+# Docker artifacts
+*.log
+
+# Local data (persisted at runtime)
+data/jenkins_home/
+# Keep the folder but ignore its contents
+!data/jenkins_home/.keep
+
+data/webfs_share/
+!data/webfs_share/.keep
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,21 @@
+
+#!ipxe
+set base http://${WEBFS_HOST_IP}:${WEBFS_PORT}
+menu Linux Boot Menu
+item kinitrd   Boot Linux (kernel + initrd)
+item iso       Boot ISO via sanboot (BIOS)
+item shell     iPXE shell
+choose target && goto ${target}
+
+:kinitrd
+chain ${base}/ipxe/linux-kernel-initrd.ipxe || goto failed
+
+:iso
+chain ${base}/ipxe/boot-iso.ipxe || goto failed
+
+:shell
+shell
+
+:failed
+echo Failed. Returning to shell.
+shell

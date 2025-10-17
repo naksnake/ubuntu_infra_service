@@ -1,0 +1,10 @@
+
+#!ipxe
+# BIOS-oriented ISO sanboot (works for many Linux Live ISOs)
+isset ${ISO_FILE} || set ISO_FILE example.iso
+set base http://${WEBFS_HOST_IP}:${WEBFS_PORT}
+set iso ${base}/files/${ISO_FILE}
+sanboot --no-describe ${iso} || goto failed
+:failed
+echo ISO sanboot failed or UEFI detected. Prefer kernel+initrd.
+shell

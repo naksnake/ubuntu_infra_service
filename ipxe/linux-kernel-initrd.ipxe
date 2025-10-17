@@ -1,0 +1,8 @@
+
+#!ipxe
+# Linux via kernel + initrd (UEFI‑friendly)
+set base http://${WEBFS_HOST_IP}:${WEBFS_PORT}
+# Add your kernel parameters: root=, ip=dhcp, console=...
+kernel ${base}/linux/vmlinuz initrd=initrd.magic ip=dhcp console=tty0
+initrd ${base}/linux/initrd.img
+boot
