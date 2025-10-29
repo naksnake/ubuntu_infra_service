@@ -55,6 +55,7 @@ services:
     volumes:
       - ./data/jenkins_home:/var/jenkins_home
       - ./Jenkinsfile:/var/jenkins_home/workspace/sit/Jenkinsfile:ro
+      - ./services/jenkins/.vimrc:/root/.vim/.vimrc:ro  # Vim config for root
     environment:
       - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
     restart: unless-stopped
