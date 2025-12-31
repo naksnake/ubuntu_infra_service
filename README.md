@@ -11,6 +11,22 @@ A ready-to-run SIT environment focused on **Linux** only. It includes a fixed We
 
 ---
 
+
+## Quickstart (One command)
+
+```bash
+git clone <repo-url>
+cd ubuntu_infra_service
+chmod +x deploy.sh
+./deploy.sh
+
+# Stop/Cleanup
+#Stop services
+docker compose down
+#Persistent data is stored under ./data/* as bind mounts.
+sudo rm -rf data/jenkins_home data/webfs_share
+```
+
 ## Zero-to-Ready: From a Clean Server (Ubuntu/Debian)
 
 ### 1) Install Docker + Compose
@@ -129,58 +145,37 @@ Put a Live ISO into `./data/webfs_share` and set `ISO_FILE` in `.env`. Use `ipxe
 
 ## Project Structure
 ```
-
-sit-services-linux-only-plus/
-├─ .env
+ubuntu_infra_service/
+├─ deploy.sh
+├─ .env.example
 ├─ .gitignore
 ├─ docker-compose.yml
-├─ README.md
+├─ README.md                  # update quickstart section
 ├─ LICENSE
 ├─ CHANGELOG.md
-├─ Jenkinsfile
+├─ Jenkinsfile                # keep if you want; not required for deploy.sh
+│
 ├─ ipxe/
 │  ├─ default.ipxe
 │  ├─ linux-kernel-initrd.ipxe
 │  ├─ boot-iso.ipxe
 │  └─ menu.ipxe
-├─ scripts/
-│  ├─ get-ipxe-binaries.sh
-│  ├─ enable-nat.sh
-│  ├─ persist-nat-nftables.sh
-│  ├─ persist-nat-iptables.sh
-│  └─ check-services.sh
-├─ systemd/
-│  └─ sit-nat.service
-└─ services/
-   ├─ webfs/
-   │  ├─ Dockerfile
-   │  ├─ webfs.conf
-   │  └─ htdocs/
-   │     ├─ index.html
-   │     ├─ ipxe/
-   │     ├─ files/        # bound to ./data/webfs_share
-   │     └─ linux/
-   │        ├─ vmlinuz
-   │        └─ initrd.img
-   ├─ tftp/
-   │  ├─ Dockerfile
-   │  ├─ tftpd-hpa.conf
-   │  └─ tftpboot/
-   ├─ dhcp/
-   │  ├─ Dockerfile
-   │  ├─ entrypoint.sh
-   │  └─ dnsmasq.conf.template
-   └─ jenkins/
-      └─ Dockerfile
+│
+├─ services/
+│  ├─ webfs/...
+│  ├─ tftp/...
+│  ├─ dhcp/...
+│  └─ jenkins/...
+│
+├─ data/                      # runtime only (gitignored)
+│  ├─ jenkins_home/
+│  └─ webfs_share/
+│
+└─ .github/
+   └─ workflows/
+      └─ ci.yml
 
 ```
-
-## Scripts Reference
-- `get-ipxe-binaries.sh` → downloads `undionly.kpxe`, `ipxe.efi` into `services/tftp/tftpboot/`
-- `enable-nat.sh` → **temporary** NAT (iptables); cleared on reboot
-- `persist-nat-nftables.sh` → **persistent** NAT via nftables + systemd
-- `persist-nat-iptables.sh` → **persistent** NAT via iptables-persistent
-- `check-services.sh` → list containers, listening ports, recent DHCP logs, and key folders
 
 ## Notes & Good Practices
 - Target host: **Linux**. Docker Desktop (Win/Mac) may behave differently for `host` networking and DHCP.

@@ -1,4 +1,3 @@
-
 version: "3.9"
 
 services:
@@ -55,9 +54,7 @@ services:
     volumes:
       - ./data/jenkins_home:/var/jenkins_home
       - ./Jenkinsfile:/var/jenkins_home/workspace/sit/Jenkinsfile:ro
-      - ./services/jenkins/.vimrc:/root/.vim/.vimrc:ro  # Vim config for root
+      - ./services/jenkins/.vimrc:/root/.vim/.vimrc:ro
     environment:
       - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
     restart: unless-stopped
-
-volumes:

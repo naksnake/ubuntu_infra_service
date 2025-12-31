@@ -9,14 +9,15 @@ __pycache__/
 # Docker artifacts
 *.log
 
-# Local data (persisted at runtime)
-data/jenkins_home/
-# Keep the folder but ignore its contents
-!data/jenkins_home/.keep
-
-data/webfs_share/
-!data/webfs_share/.keep
-
 # IDE
 .vscode/
 .idea/
+
+
+# Local runtime configuration
+.env
+
+# Persistent runtime data
+data/jenkins_home/
+data/webfs_share/
+
