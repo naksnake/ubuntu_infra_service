@@ -332,6 +332,36 @@ nat_wizard() {
   fi
 }
 
+enable_autostart() {
+  local unit="/etc/systemd/system/sit-stack.service"
+  local repo_dir="$ROOT_DIR"
+
+  log "Creating systemd autostart unit: $unit"
+  sudo_run bash -c "cat > '$unit' <<EOF
+[Unit]
+Description=SIT Lab Stack (docker compose)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${repo_dir}
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+
+  sudo_run systemctl daemon-reload
+  sudo_run systemctl enable sit-stack.service
+  log "sit-stack.service enabled — stack will start automatically after reboot."
+}
+
 check_stack() {
   log "=== Status ==="
   docker ps || true
@@ -371,6 +401,11 @@ main() {
   fetch_ipxe_binaries
   compose_up
   nat_wizard
+  if prompt_yesno "Enable autostart on boot (systemd sit-stack.service)?"; then
+    enable_autostart
+  else
+    log "Autostart skipped. Run 'sudo systemctl enable sit-stack.service' later if needed."
+  fi
   check_stack
 
   echo
