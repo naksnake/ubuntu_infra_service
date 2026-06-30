@@ -114,7 +114,7 @@ services:
       - ./services/awx/credentials.py:/etc/tower/conf.d/credentials.py:ro
       - ./data/awx_projects:/var/lib/awx/projects:rw
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8052/api/v2/ping/ >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "curl -fsSo /dev/null http://127.0.0.1:8052/api/v2/ping/ 2>/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5

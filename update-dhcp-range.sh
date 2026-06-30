@@ -3,6 +3,7 @@
 # Usage:
 #   ./update-dhcp-range.sh <start-ip> <end-ip>
 #   ./update-dhcp-range.sh 192.168.100.50 192.168.100.150
+#   ./update-dhcp-range.sh           (interactive)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +30,6 @@ NEW_START="${1:-}"
 NEW_END="${2:-}"
 
 if [[ -z "$NEW_START" || -z "$NEW_END" ]]; then
-  # Interactive mode: show current values and prompt
   # shellcheck disable=SC1091
   set -a; . ./.env; set +a
   log "Current range: ${PXE_RANGE_START} – ${PXE_RANGE_END}"
@@ -43,14 +43,15 @@ validate_ip "$NEW_START"
 validate_ip "$NEW_END"
 
 log "Updating .env: $NEW_START – $NEW_END"
-local tmp
-tmp="$(mktemp .env.XXXXXX)"
-sed "s|^PXE_RANGE_START=.*|PXE_RANGE_START=${NEW_START}|" .env \
-  | sed "s|^PXE_RANGE_END=.*|PXE_RANGE_END=${NEW_END}|" > "$tmp"
-mv "$tmp" .env
+_tmp="$(mktemp "${ROOT_DIR}/.env.XXXXXX")"
+sed \
+  -e "s|^PXE_RANGE_START=.*|PXE_RANGE_START=${NEW_START}|" \
+  -e "s|^PXE_RANGE_END=.*|PXE_RANGE_END=${NEW_END}|" \
+  .env > "$_tmp"
+mv "$_tmp" .env
 
-log "Restarting dhcp container..."
+log "Restarting DHCP container..."
 docker compose up -d --no-deps --force-recreate dhcp
 
 log "Done. New DHCP range: ${NEW_START} – ${NEW_END}"
-log "Verify: docker logs sit_dhcp | head -30"
+log "Verify: docker logs sit_dhcp | head -40"
