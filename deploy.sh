@@ -14,7 +14,7 @@ set -euo pipefail
 # - Renders services/awx/credentials.py from template
 # - docker compose up -d --build
 # - Optional persistent NAT (nftables recommended) via systemd unit
-# - Optional systemd autostart (sit-stack.service)
+# - Optional systemd autostart (lab-stack.service)
 # - Basic verification (containers + webfs /files/ check)
 # ==========================================================
 
@@ -277,7 +277,7 @@ compose_up() {
 
 enable_ip_forwarding() {
   log "Enabling IPv4 forwarding permanently..."
-  sudo_run bash -c 'echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-sit-nat.conf'
+  sudo_run bash -c 'echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-lab-nat.conf'
   sudo_run sysctl --system >/dev/null
 }
 
@@ -286,8 +286,8 @@ enable_nat_nftables() {
   sudo_run apt-get update -y >/dev/null 2>&1 || true
   sudo_run apt-get install -y nftables >/dev/null 2>&1 || true
 
-  local unit="/etc/systemd/system/sit-nat.service"
-  local script="/usr/local/sbin/sit-nat.sh"
+  local unit="/etc/systemd/system/lab-nat.service"
+  local script="/usr/local/sbin/lab-nat.sh"
 
   log "Creating NAT script: $script"
   sudo_run bash -c "cat > '$script' <<'EOS'
@@ -296,16 +296,16 @@ set -euo pipefail
 WAN_IFACE=\"${WAN_IFACE}\"
 PXE_IFACE=\"${PXE_IFACE}\"
 
-nft list table ip sit_nat >/dev/null 2>&1 || nft add table ip sit_nat
-nft list chain ip sit_nat postrouting >/dev/null 2>&1 || nft 'add chain ip sit_nat postrouting { type nat hook postrouting priority 100; }'
-nft list chain ip sit_nat forward >/dev/null 2>&1     || nft 'add chain ip sit_nat forward { type filter hook forward priority 0; policy accept; }'
+nft list table ip lab_nat >/dev/null 2>&1 || nft add table ip lab_nat
+nft list chain ip lab_nat postrouting >/dev/null 2>&1 || nft 'add chain ip lab_nat postrouting { type nat hook postrouting priority 100; }'
+nft list chain ip lab_nat forward >/dev/null 2>&1     || nft 'add chain ip lab_nat forward { type filter hook forward priority 0; policy accept; }'
 
-nft flush chain ip sit_nat postrouting || true
-nft flush chain ip sit_nat forward     || true
+nft flush chain ip lab_nat postrouting || true
+nft flush chain ip lab_nat forward     || true
 
-nft add rule ip sit_nat forward iifname \"${PXE_IFACE}\" oifname \"${WAN_IFACE}\" accept
-nft add rule ip sit_nat forward iifname \"${WAN_IFACE}\" oifname \"${PXE_IFACE}\" ct state established,related accept
-nft add rule ip sit_nat postrouting oifname \"${WAN_IFACE}\" masquerade
+nft add rule ip lab_nat forward iifname \"${PXE_IFACE}\" oifname \"${WAN_IFACE}\" accept
+nft add rule ip lab_nat forward iifname \"${WAN_IFACE}\" oifname \"${PXE_IFACE}\" ct state established,related accept
+nft add rule ip lab_nat postrouting oifname \"${WAN_IFACE}\" masquerade
 EOS
 chmod +x '$script'"
 
@@ -321,15 +321,15 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=$script
 ExecReload=$script
-ExecStop=/usr/sbin/nft delete table ip sit_nat
+ExecStop=/usr/sbin/nft delete table ip lab_nat
 
 [Install]
 WantedBy=multi-user.target
 EOF"
 
   sudo_run systemctl daemon-reload
-  sudo_run systemctl enable --now sit-nat.service
-  log "NAT enabled (nftables). Verify: sudo nft list ruleset | grep sit_nat"
+  sudo_run systemctl enable --now lab-nat.service
+  log "NAT enabled (nftables). Verify: sudo nft list ruleset | grep lab_nat"
 }
 
 enable_nat_iptables() {
@@ -364,7 +364,7 @@ nat_wizard() {
 }
 
 enable_autostart() {
-  local unit="/etc/systemd/system/sit-stack.service"
+  local unit="/etc/systemd/system/lab-stack.service"
   local repo_dir="$ROOT_DIR"
 
   log "Creating systemd autostart unit: $unit"
@@ -389,8 +389,8 @@ WantedBy=multi-user.target
 EOF"
 
   sudo_run systemctl daemon-reload
-  sudo_run systemctl enable sit-stack.service
-  log "sit-stack.service enabled — stack will auto-start after reboot."
+  sudo_run systemctl enable lab-stack.service
+  log "lab-stack.service enabled — stack will auto-start after reboot."
 }
 
 check_stack() {
@@ -446,10 +446,10 @@ main() {
   compose_up
   nat_wizard
 
-  if prompt_yesno "Enable autostart on boot (systemd sit-stack.service)?"; then
+  if prompt_yesno "Enable autostart on boot (systemd lab-stack.service)?"; then
     enable_autostart
   else
-    log "Autostart skipped. Run 'sudo systemctl enable sit-stack.service' later if needed."
+    log "Autostart skipped. Run 'sudo systemctl enable lab-stack.service' later if needed."
   fi
 
   check_stack

@@ -54,4 +54,4 @@ log "Restarting DHCP container..."
 docker compose up -d --no-deps --force-recreate dhcp
 
 log "Done. New DHCP range: ${NEW_START} – ${NEW_END}"
-log "Verify: docker logs sit_dhcp | head -40"
+log "Verify: docker logs lab_dhcp | head -40"

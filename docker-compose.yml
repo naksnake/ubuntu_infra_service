@@ -3,7 +3,7 @@ services:
   # ── Web file server (iPXE scripts + ISO/kernel share) ──────────────────────
   webfs:
     build: ./services/webfs
-    container_name: sit_webfs
+    container_name: lab_webfs
     ports:
       - "${WEBFS_PORT:-8080}:8080"
     volumes:
@@ -21,7 +21,7 @@ services:
   # ── TFTP server (bootloader delivery) ──────────────────────────────────────
   tftp:
     build: ./services/tftp
-    container_name: sit_tftp
+    container_name: lab_tftp
     network_mode: host
     volumes:
       - ./services/tftp/tftpboot:/srv/tftp:rw
@@ -35,7 +35,7 @@ services:
   # ── DHCP + PXE (dnsmasq, host network required) ────────────────────────────
   dhcp:
     build: ./services/dhcp
-    container_name: sit_dhcp
+    container_name: lab_dhcp
     network_mode: host
     environment:
       - PXE_IFACE=${PXE_IFACE}
@@ -64,7 +64,7 @@ services:
   # ── AWX: PostgreSQL database ────────────────────────────────────────────────
   awx-postgres:
     image: postgres:15-alpine
-    container_name: sit_awx_postgres
+    container_name: lab_awx_postgres
     environment:
       POSTGRES_USER: awx
       POSTGRES_PASSWORD: ${AWX_DB_PASSWORD}
@@ -82,7 +82,7 @@ services:
   # ── AWX: Redis (channel layers + cache) ────────────────────────────────────
   awx-redis:
     image: redis:7-alpine
-    container_name: sit_awx_redis
+    container_name: lab_awx_redis
     command: redis-server --save "" --appendonly no --loglevel warning
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -94,7 +94,7 @@ services:
   # ── AWX: Web (nginx + daphne, runs migrations + creates admin) ─────────────
   awx-web:
     image: ghcr.io/ansible/awx:${AWX_VERSION:-23.9.0}
-    container_name: sit_awx_web
+    container_name: lab_awx_web
     depends_on:
       awx-postgres:
         condition: service_healthy
@@ -124,7 +124,7 @@ services:
   # ── AWX: Task worker (Ansible dispatcher + receptor) ──────────────────────
   awx-task:
     image: ghcr.io/ansible/awx:${AWX_VERSION:-23.9.0}
-    container_name: sit_awx_task
+    container_name: lab_awx_task
     depends_on:
       awx-postgres:
         condition: service_healthy

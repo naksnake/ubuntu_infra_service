@@ -9,13 +9,13 @@ Run `./deploy.sh` once — DHCP, TFTP, NAT, a file server, and Ansible AWX all s
 
 | Service | Container | Purpose |
 |---|---|---|
-| DHCP + PXE | `sit_dhcp` | Assigns IPs to lab clients, serves iPXE bootloaders |
-| TFTP | `sit_tftp` | Delivers bootloader files to PXE clients |
-| File server | `sit_webfs` | HTTP share for ISO images, kernels, initrds |
-| Ansible AWX | `sit_awx_web` + `sit_awx_task` | Web UI for running Ansible playbooks |
-| AWX database | `sit_awx_postgres` | PostgreSQL for AWX |
-| AWX cache | `sit_awx_redis` | Redis for AWX |
-| NAT | systemd `sit-nat` | Lets lab clients reach the internet via the host |
+| DHCP + PXE | `lab_dhcp` | Assigns IPs to lab clients, serves iPXE bootloaders |
+| TFTP | `lab_tftp` | Delivers bootloader files to PXE clients |
+| File server | `lab_webfs` | HTTP share for ISO images, kernels, initrds |
+| Ansible AWX | `lab_awx_web` + `lab_awx_task` | Web UI for running Ansible playbooks |
+| AWX database | `lab_awx_postgres` | PostgreSQL for AWX |
+| AWX cache | `lab_awx_redis` | Redis for AWX |
+| NAT | systemd `lab-nat` | Lets lab clients reach the internet via the host |
 
 ---
 
@@ -139,8 +139,8 @@ The wizard will ask you to confirm each setting, then it will:
 4. Render `services/awx/credentials.py` from the template
 5. Offer to download iPXE boot binaries (`undionly.kpxe`, `ipxe.efi`)
 6. Build and start all containers with `docker compose up -d --build`
-7. Offer to enable persistent NAT via a systemd unit (`sit-nat.service`)
-8. Offer to enable stack autostart on reboot via `sit-stack.service`
+7. Offer to enable persistent NAT via a systemd unit (`lab-nat.service`)
+8. Offer to enable stack autostart on reboot via `lab-stack.service`
 
 **Answer yes to both the NAT and autostart prompts** to get a fully persistent lab.
 
@@ -157,13 +157,13 @@ docker ps
 Expected output — all six containers should show `Up`:
 ```
 CONTAINER ID   IMAGE                          STATUS
-...            ghcr.io/ansible/awx:23.9.0    Up X minutes (healthy)   sit_awx_web
-...            ghcr.io/ansible/awx:23.9.0    Up X minutes             sit_awx_task
-...            postgres:15-alpine             Up X minutes (healthy)   sit_awx_postgres
-...            redis:7-alpine                 Up X minutes (healthy)   sit_awx_redis
-...            sit_webfs                      Up X minutes (healthy)   sit_webfs
-...            sit_dhcp                       Up X minutes (healthy)   sit_dhcp
-...            sit_tftp                       Up X minutes (healthy)   sit_tftp
+...            ghcr.io/ansible/awx:23.9.0    Up X minutes (healthy)   lab_awx_web
+...            ghcr.io/ansible/awx:23.9.0    Up X minutes             lab_awx_task
+...            postgres:15-alpine             Up X minutes (healthy)   lab_awx_postgres
+...            redis:7-alpine                 Up X minutes (healthy)   lab_awx_redis
+...            lab_webfs                      Up X minutes (healthy)   lab_webfs
+...            lab_dhcp                       Up X minutes (healthy)   lab_dhcp
+...            lab_tftp                       Up X minutes (healthy)   lab_tftp
 ```
 
 ### Verify DHCP
@@ -176,7 +176,7 @@ ip addr show
 
 Check dnsmasq logs to see leases being issued:
 ```bash
-docker logs sit_dhcp | grep -i DHCP
+docker logs lab_dhcp | grep -i DHCP
 # Example: DHCP, offered 192.168.100.25, eth1 ...
 ```
 
@@ -189,8 +189,8 @@ curl -s https://example.com  # should return HTML
 
 If clients can ping the lab gateway (`192.168.100.1`) but not the internet, check NAT:
 ```bash
-sudo systemctl status sit-nat.service
-sudo nft list ruleset | grep sit_nat
+sudo systemctl status lab-nat.service
+sudo nft list ruleset | grep lab_nat
 ```
 
 ### Verify the file server
@@ -208,7 +208,7 @@ Log in with `AWX_ADMIN_USER` / `AWX_ADMIN_PASSWORD` from your `.env`.
 
 If AWX is not ready yet, watch it start:
 ```bash
-docker logs -f sit_awx_web
+docker logs -f lab_awx_web
 # Wait for "supervisord started" in the output
 ```
 
@@ -257,9 +257,9 @@ Existing leases are not affected until they expire.
 docker ps
 
 # Follow logs for a specific service
-docker logs -f sit_dhcp
-docker logs -f sit_awx_web
-docker logs -f sit_awx_task
+docker logs -f lab_dhcp
+docker logs -f lab_awx_web
+docker logs -f lab_awx_task
 
 # Restart a single service
 docker compose restart dhcp
@@ -282,16 +282,16 @@ After running `deploy.sh` with autostart and NAT enabled:
 
 ```bash
 # Check autostart is enabled
-sudo systemctl status sit-stack.service
+sudo systemctl status lab-stack.service
 
 # Check NAT is enabled
-sudo systemctl status sit-nat.service
+sudo systemctl status lab-nat.service
 ```
 
 Both units start automatically at boot. To enable them manually if you skipped the prompts:
 ```bash
-sudo systemctl enable --now sit-stack.service
-sudo systemctl enable --now sit-nat.service
+sudo systemctl enable --now lab-stack.service
+sudo systemctl enable --now lab-nat.service
 ```
 
 ---
@@ -300,21 +300,21 @@ sudo systemctl enable --now sit-nat.service
 
 **DHCP clients get no IP**
 - Confirm `PXE_IFACE` has the static IP: `ip addr show eth1`
-- Check dnsmasq started: `docker logs sit_dhcp | head -20`
+- Check dnsmasq started: `docker logs lab_dhcp | head -20`
 - Confirm no other DHCP server is on the lab segment: `sudo nmap --script broadcast-dhcp-discover`
 
 **NAT not working (clients can ping gateway but not internet)**
 - Check IP forwarding is on: `cat /proc/sys/net/ipv4/ip_forward` (must be `1`)
-- Check nftables rules: `sudo nft list ruleset | grep sit_nat`
-- Restart NAT service: `sudo systemctl restart sit-nat.service`
+- Check nftables rules: `sudo nft list ruleset | grep lab_nat`
+- Restart NAT service: `sudo systemctl restart lab-nat.service`
 
 **AWX UI shows 502 / not reachable after 5 minutes**
 - Check all AWX containers are running: `docker ps | grep awx`
-- Check postgres is healthy: `docker inspect sit_awx_postgres | grep Health -A5`
-- Check AWX logs: `docker logs sit_awx_web 2>&1 | tail -30`
+- Check postgres is healthy: `docker inspect lab_awx_postgres | grep Health -A5`
+- Check AWX logs: `docker logs lab_awx_web 2>&1 | tail -30`
 
 **Containers restart repeatedly**
-- Check for missing `.env` values: `docker logs sit_dhcp | head -5`
+- Check for missing `.env` values: `docker logs lab_dhcp | head -5`
 - Confirm `services/awx/credentials.py` exists: `ls -la services/awx/`  
   If missing, re-run: `./deploy.sh` (it will skip the config wizard if `.env` exists)
 
