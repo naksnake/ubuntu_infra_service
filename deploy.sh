@@ -266,8 +266,8 @@ fetch_ipxe_binaries() {
     sudo_run apt-get update -y >/dev/null 2>&1 || true
     sudo_run apt-get install -y curl ca-certificates >/dev/null 2>&1 || true
 
-    curl -fsSL "http://boot.ipxe.org/undionly.kpxe" -o "$dst/undionly.kpxe"
-    curl -fsSL "http://boot.ipxe.org/ipxe.efi"     -o "$dst/ipxe.efi"
+    curl -fsSL "https://boot.ipxe.org/undionly.kpxe" -o "$dst/undionly.kpxe"
+    curl -fsSL "https://boot.ipxe.org/ipxe.efi"     -o "$dst/ipxe.efi"
     log "Downloaded: $dst/undionly.kpxe, $dst/ipxe.efi"
   else
     warn "Skipped iPXE binaries download."
@@ -434,13 +434,23 @@ main() {
       warn "AWX_DB_PASSWORD was empty — generated new value."
       # Patch in-place atomically
       local tmp; tmp="$(mktemp .env.XXXXXX)"
-      sed "s|^AWX_DB_PASSWORD=.*|AWX_DB_PASSWORD=${AWX_DB_PASSWORD}|" .env > "$tmp" && mv "$tmp" .env
+      if grep -q '^AWX_DB_PASSWORD=' .env; then
+        sed "s|^AWX_DB_PASSWORD=.*|AWX_DB_PASSWORD=${AWX_DB_PASSWORD}|" .env > "$tmp"
+      else
+        { cat .env; echo "AWX_DB_PASSWORD=${AWX_DB_PASSWORD}"; } > "$tmp"
+      fi
+      mv "$tmp" .env
     fi
     if [[ -z "${AWX_SECRET_KEY:-}" ]]; then
       AWX_SECRET_KEY="$(gen_secret)"
       warn "AWX_SECRET_KEY was empty — generated new value."
       local tmp; tmp="$(mktemp .env.XXXXXX)"
-      sed "s|^AWX_SECRET_KEY=.*|AWX_SECRET_KEY=${AWX_SECRET_KEY}|" .env > "$tmp" && mv "$tmp" .env
+      if grep -q '^AWX_SECRET_KEY=' .env; then
+        sed "s|^AWX_SECRET_KEY=.*|AWX_SECRET_KEY=${AWX_SECRET_KEY}|" .env > "$tmp"
+      else
+        { cat .env; echo "AWX_SECRET_KEY=${AWX_SECRET_KEY}"; } > "$tmp"
+      fi
+      mv "$tmp" .env
     fi
     load_env
     log "Using existing .env as-is."

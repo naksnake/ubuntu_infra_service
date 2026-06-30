@@ -152,7 +152,7 @@ services:
       awx-redis:
         condition: service_healthy
       awx-web:
-        condition: service_started
+        condition: service_healthy
     hostname: awx
     user: root
     environment:

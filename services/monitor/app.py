@@ -45,7 +45,8 @@ def get_containers():
                 'health':   health,
                 'uptime':   _uptime_str(state.get('StartedAt', '')),
                 'restarts': c.attrs.get('RestartCount', 0),
-                'image':    c.image.tags[0] if c.image.tags else c.image.short_id,
+                'image':    (c.image.tags[0] if c.image and c.image.tags else
+                             c.image.short_id if c.image else '(unknown)'),
             })
         result.sort(key=lambda x: (0 if x['status'] == 'running' else 1, x['name']))
         return result, None
@@ -64,7 +65,10 @@ def get_leases():
                 parts = line.strip().split()
                 if len(parts) < 4:
                     continue
-                expiry_ts = int(parts[0])
+                try:
+                    expiry_ts = int(parts[0])
+                except ValueError:
+                    continue
                 mac       = parts[1].upper()
                 ip        = parts[2]
                 hostname  = parts[3] if parts[3] != '*' else '(unknown)'
@@ -118,4 +122,5 @@ def api_status():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8090, debug=False)
+    import subprocess, sys
+    subprocess.execvp('gunicorn', ['gunicorn', '-w', '2', '-b', '0.0.0.0:8090', 'app:app'])

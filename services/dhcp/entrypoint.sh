@@ -12,16 +12,14 @@ attempt=0
 
 while true; do
     attempt=$((attempt + 1))
-    echo "==== Starting dnsmasq (attempt $attempt) ===="
-    dnsmasq --no-daemon || true
-
-    echo "==== dnsmasq exited ===="
+    echo "==== Starting dnsmasq (attempt $attempt / $MAX_RETRIES) ===="
+    dnsmasq --no-daemon
+    rc=$?
+    echo "==== dnsmasq exited (rc=$rc) ===="
     if [ "$attempt" -ge "$MAX_RETRIES" ]; then
-        echo "==== Max retries ($MAX_RETRIES) reached. Sleeping 60s before reset. ===="
-        sleep 60
-        attempt=0
-    else
-        echo "==== Retrying in ${RETRY_DELAY}s (attempt $attempt / $MAX_RETRIES) ===="
-        sleep "$RETRY_DELAY"
+        echo "==== Max retries reached — exiting so Docker can apply restart policy ===="
+        exit 1
     fi
+    echo "==== Retrying in ${RETRY_DELAY}s ===="
+    sleep "$RETRY_DELAY"
 done
