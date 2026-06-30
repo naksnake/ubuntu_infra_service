@@ -107,6 +107,8 @@ ensure_dirs() {
   mkdir -p services/webfs/htdocs/linux
   mkdir -p services/tftp/tftpboot
   mkdir -p services/awx
+  # dnsmasq writes leases here; must exist as a file before Docker bind-mounts it
+  touch data/dnsmasq.leases
 }
 
 ensure_docker() {
@@ -160,6 +162,8 @@ DNS_SERVER=${DNS_SERVER}
 # ==== Ports ====
 WEBFS_PORT=${WEBFS_PORT}
 AWX_HTTP_PORT=${AWX_HTTP_PORT}
+MONITOR_PORT=${MONITOR_PORT}
+MONITOR_REFRESH=30
 
 # ==== AWX settings ====
 AWX_VERSION=${AWX_VERSION}
@@ -212,6 +216,7 @@ env_wizard() {
 
   WEBFS_PORT="$(prompt "WEBFS_PORT" "${WEBFS_PORT:-8080}")"
   AWX_HTTP_PORT="$(prompt "AWX_HTTP_PORT" "${AWX_HTTP_PORT:-8052}")"
+  MONITOR_PORT="$(prompt "MONITOR_PORT" "${MONITOR_PORT:-8090}")"
 
   # AWX version
   AWX_VERSION="$(prompt "AWX_VERSION (see github.com/ansible/awx/releases)" "${AWX_VERSION:-23.9.0}")"
@@ -457,6 +462,7 @@ main() {
   echo
   log "DONE."
   echo "Webfs:   http://${WEBFS_HOST_IP:-<WEBFS_HOST_IP>}:${WEBFS_PORT:-8080}/"
+  echo "Monitor: http://<host-ip>:${MONITOR_PORT:-8090}/   (service health + DHCP leases)"
   echo "AWX:     http://<host-ip>:${AWX_HTTP_PORT:-8052}/   (admin: ${AWX_ADMIN_USER:-admin})"
   echo
   warn "AWX first boot runs DB migrations — allow ~2 minutes before the UI is ready."

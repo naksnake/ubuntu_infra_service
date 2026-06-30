@@ -23,3 +23,6 @@ data/webfs_share/
 
 # Rendered AWX credentials (contains secrets — never commit)
 services/awx/credentials.py
+
+# DHCP lease database (runtime data)
+data/dnsmasq.leases

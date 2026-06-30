@@ -51,6 +51,7 @@ services:
     volumes:
       - ./services/dhcp/dnsmasq.conf.template:/etc/dnsmasq.conf.template:ro
       - ./services/tftp/tftpboot:/srv/tftp:ro
+      - ./data/dnsmasq.leases:/data/dnsmasq.leases:rw
     cap_add:
       - NET_ADMIN
     healthcheck:
@@ -58,6 +59,26 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── Monitor dashboard (service health + DHCP lookup) ──────────────────────
+  monitor:
+    build: ./services/monitor
+    container_name: lab_monitor
+    ports:
+      - "${MONITOR_PORT:-8090}:8090"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data/dnsmasq.leases:/data/dnsmasq.leases:ro
+    environment:
+      - LEASES_FILE=/data/dnsmasq.leases
+      - REFRESH_INTERVAL=${MONITOR_REFRESH:-30}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/status')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
       start_period: 10s
     restart: unless-stopped
 

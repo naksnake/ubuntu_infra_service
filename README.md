@@ -16,6 +16,7 @@ Run `./deploy.sh` once — DHCP, TFTP, NAT, a file server, and Ansible AWX all s
 | AWX database | `lab_awx_postgres` | PostgreSQL for AWX |
 | AWX cache | `lab_awx_redis` | Redis for AWX |
 | NAT | systemd `lab-nat` | Lets lab clients reach the internet via the host |
+| Monitor | `lab_monitor` | Web dashboard: service health + DHCP lease lookup |
 
 ---
 
@@ -108,6 +109,7 @@ DNS_SERVER=8.8.8.8
 # ---- Ports ----
 WEBFS_PORT=8080
 AWX_HTTP_PORT=8052
+MONITOR_PORT=8090
 
 # ---- AWX ----
 AWX_VERSION=23.9.0
@@ -157,6 +159,7 @@ docker ps
 Expected output — all six containers should show `Up`:
 ```
 CONTAINER ID   IMAGE                          STATUS
+...            lab_monitor                    Up X minutes (healthy)   lab_monitor
 ...            ghcr.io/ansible/awx:23.9.0    Up X minutes (healthy)   lab_awx_web
 ...            ghcr.io/ansible/awx:23.9.0    Up X minutes             lab_awx_task
 ...            postgres:15-alpine             Up X minutes (healthy)   lab_awx_postgres
@@ -198,6 +201,18 @@ sudo nft list ruleset | grep lab_nat
 curl -fsS "http://192.168.100.1:8080/files/"
 # Should return an HTML directory listing (empty until you copy files in)
 ```
+
+### Verify the monitor dashboard
+Open a browser and go to:
+```
+http://192.168.100.1:8090/
+```
+You will see:
+- **Services** — all container names, status (running/exited), health check result, uptime, restart count
+- **DHCP Leases** — IP address, MAC address, hostname, lease expiry, and time remaining for every active lease
+
+Use the search box to quickly find a host by IP, MAC, or hostname.  
+The page auto-refreshes every 30 seconds. A JSON API is also available at `/api/status`.
 
 ### Verify AWX
 Open a browser and go to:
@@ -258,6 +273,7 @@ docker ps
 
 # Follow logs for a specific service
 docker logs -f lab_dhcp
+docker logs -f lab_monitor
 docker logs -f lab_awx_web
 docker logs -f lab_awx_task
 
@@ -339,6 +355,7 @@ ubuntu_infra_service/
 │   ├── dhcp/                    # dnsmasq DHCP+TFTP container
 │   ├── tftp/                    # tftpd-hpa bootloader delivery container
 │   ├── webfs/                   # HTTP file server container
+│   ├── monitor/                 # Flask dashboard (service health + DHCP leases)
 │   └── awx/
 │       ├── credentials.py.template   # AWX DB+Redis config (rendered by deploy.sh)
 │       └── environment.sh            # AWX admin user init helper
@@ -346,7 +363,8 @@ ubuntu_infra_service/
 └── data/                        # Runtime data — back this up
     ├── awx_postgres/            # AWX database files
     ├── awx_projects/            # Ansible playbook directories (mount into AWX)
-    └── webfs_share/             # ISO images and other large files
+    ├── webfs_share/             # ISO images and other large files
+    └── dnsmasq.leases           # Live DHCP lease database (read by monitor)
 ```
 
 ---

@@ -6,6 +6,7 @@ port=0
 log-dhcp
 log-facility=-
 
+dhcp-leasefile=/data/dnsmasq.leases
 dhcp-range=${PXE_RANGE_START},${PXE_RANGE_END},${PXE_NETMASK},12h
 dhcp-option=option:router,${PXE_ROUTER_IP}
 dhcp-option=option:dns-server,${DNS_SERVER}
