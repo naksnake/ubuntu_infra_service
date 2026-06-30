@@ -13,11 +13,13 @@ __pycache__/
 .vscode/
 .idea/
 
-
 # Local runtime configuration
 .env
 
-# Persistent runtime data
-data/jenkins_home/
+# Persistent runtime data (bind mounts — never commit)
+data/awx_postgres/
+data/awx_projects/
 data/webfs_share/
 
+# Rendered AWX credentials (contains secrets — never commit)
+services/awx/credentials.py

@@ -43,8 +43,11 @@ validate_ip "$NEW_START"
 validate_ip "$NEW_END"
 
 log "Updating .env: $NEW_START – $NEW_END"
-sed -i "s|^PXE_RANGE_START=.*|PXE_RANGE_START=${NEW_START}|" .env
-sed -i "s|^PXE_RANGE_END=.*|PXE_RANGE_END=${NEW_END}|" .env
+local tmp
+tmp="$(mktemp .env.XXXXXX)"
+sed "s|^PXE_RANGE_START=.*|PXE_RANGE_START=${NEW_START}|" .env \
+  | sed "s|^PXE_RANGE_END=.*|PXE_RANGE_END=${NEW_END}|" > "$tmp"
+mv "$tmp" .env
 
 log "Restarting dhcp container..."
 docker compose up -d --no-deps --force-recreate dhcp

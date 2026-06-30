@@ -17,12 +17,19 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y shellcheck docker-compose-plugin
 
-      - name: Shellcheck deploy.sh
+      - name: Shellcheck scripts
         run: |
           shellcheck -x deploy.sh
+          shellcheck -x update-dhcp-range.sh
+          shellcheck -x services/dhcp/entrypoint.sh
+          shellcheck -x services/awx/environment.sh
 
       - name: Validate docker compose config
         run: |
+          cp .env.example .env
+          # AWX_DB_PASSWORD and AWX_SECRET_KEY must be non-empty for compose config
+          sed -i 's/^AWX_DB_PASSWORD=$/AWX_DB_PASSWORD=ci_db_password/' .env
+          sed -i 's/^AWX_SECRET_KEY=$/AWX_SECRET_KEY=ci_secret_key_placeholder/' .env
           docker compose version
           docker compose config >/dev/null
 
@@ -42,7 +49,6 @@ jobs:
           docker build -t sit_webfs_ci ./services/webfs
           docker build -t sit_tftp_ci ./services/tftp
           docker build -t sit_dhcp_ci ./services/dhcp
-          docker build -t sit_jenkins_ci ./services/jenkins
 
       - name: Smoke test webfs /files/
         run: |
@@ -56,6 +62,5 @@ jobs:
             -v "$PWD/data/webfs_share:/var/www/htdocs/files:rw" \
             sit_webfs_ci
 
-          sleep 2
+          sleep 3
           curl -fsS "http://127.0.0.1:18080/files/example.iso" | grep -q "hello"
-

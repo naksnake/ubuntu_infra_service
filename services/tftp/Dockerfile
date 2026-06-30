@@ -1,18 +1,16 @@
 FROM debian:bookworm-slim
 
-# Install tftpd-hpa
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends tftpd-hpa && \
+    apt-get install -y --no-install-recommends tftpd-hpa procps && \
     rm -rf /var/lib/apt/lists/*
 
-# Create TFTP root directory
 RUN mkdir -p /srv/tftp
 
-# Copy configuration file
 COPY tftpd-hpa.conf /etc/default/tftpd-hpa
 
-# Expose TFTP port
 EXPOSE 69/udp
 
-# Run TFTP server in foreground
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD pgrep in.tftpd >/dev/null || exit 1
+
 CMD ["/usr/sbin/in.tftpd", "--foreground", "--secure", "/srv/tftp"]
