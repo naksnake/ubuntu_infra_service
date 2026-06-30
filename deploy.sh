@@ -9,10 +9,12 @@ set -euo pipefail
 # What it does:
 # - Ensures Docker + docker compose plugin
 # - Creates required host dirs (data/*, linux assets path)
-# - Interactive .env creation
+# - Interactive .env creation with auto-generated secrets
 # - Downloads iPXE binaries into services/tftp/tftpboot/
+# - Renders services/awx/credentials.py from template
 # - docker compose up -d --build
 # - Optional persistent NAT (nftables recommended) via systemd unit
+# - Optional systemd autostart (lab-stack.service)
 # - Basic verification (containers + webfs /files/ check)
 # ==========================================================
 
@@ -30,9 +32,7 @@ sudo_run() {
   if [[ $EUID -eq 0 ]]; then
     "$@"
   else
-    if ! have sudo; then
-      die "sudo is required (or run as root)."
-    fi
+    have sudo || die "sudo is required (or run as root)."
     sudo "$@"
   fi
 }
@@ -68,7 +68,6 @@ prompt_yesno() {
 }
 
 list_ifaces() {
-  # exclude lo and typical virtual interfaces
   ls /sys/class/net | grep -vE '^(lo|docker|br-|veth|virbr|vmnet|zt|wg)' || true
 }
 
@@ -91,13 +90,25 @@ choose_iface() {
   echo "${ifs[$((idx-1))]}"
 }
 
+gen_secret() {
+  # Generate a URL-safe random secret; falls back to /dev/urandom if openssl unavailable.
+  if have openssl; then
+    openssl rand -base64 48 | tr -d '\n/+=' | head -c 50
+  else
+    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 50
+  fi
+}
+
 ensure_dirs() {
-  # Your README requires these host paths. [1](https://github.com/naksnake/ubuntu_infra_service/blob/main/.env)
   log "Creating required directories..."
-  mkdir -p data/jenkins_home
+  mkdir -p data/awx_postgres
+  mkdir -p data/awx_projects
   mkdir -p data/webfs_share
   mkdir -p services/webfs/htdocs/linux
   mkdir -p services/tftp/tftpboot
+  mkdir -p services/awx
+  # dnsmasq writes leases here; must exist as a file before Docker bind-mounts it
+  touch data/dnsmasq.leases
 }
 
 ensure_docker() {
@@ -150,8 +161,16 @@ DNS_SERVER=${DNS_SERVER}
 
 # ==== Ports ====
 WEBFS_PORT=${WEBFS_PORT}
-JENKINS_HTTP_PORT=${JENKINS_HTTP_PORT}
-JENKINS_AGENT_PORT=${JENKINS_AGENT_PORT}
+AWX_HTTP_PORT=${AWX_HTTP_PORT}
+MONITOR_PORT=${MONITOR_PORT}
+MONITOR_REFRESH=30
+
+# ==== AWX settings ====
+AWX_VERSION=${AWX_VERSION}
+AWX_ADMIN_USER=${AWX_ADMIN_USER}
+AWX_ADMIN_PASSWORD=${AWX_ADMIN_PASSWORD}
+AWX_DB_PASSWORD=${AWX_DB_PASSWORD}
+AWX_SECRET_KEY=${AWX_SECRET_KEY}
 
 # Optional: ISO name for BIOS-only sanboot (Linux Live ISO)
 ISO_FILE=${ISO_FILE}
@@ -161,7 +180,7 @@ EOF
 
 env_wizard() {
   log "=== Interactive configuration (.env) ==="
-  warn "DHCP will run on PXE_IFACE. Ensure there is NO other DHCP server on that PXE/LAB segment." # [1](https://github.com/naksnake/ubuntu_infra_service/blob/main/.env)
+  warn "DHCP will run on PXE_IFACE. Ensure there is NO other DHCP server on that PXE/LAB segment."
 
   load_env
 
@@ -196,8 +215,29 @@ env_wizard() {
   DNS_SERVER="$(prompt "DNS_SERVER" "${DNS_SERVER:-8.8.8.8}")"
 
   WEBFS_PORT="$(prompt "WEBFS_PORT" "${WEBFS_PORT:-8080}")"
-  JENKINS_HTTP_PORT="$(prompt "JENKINS_HTTP_PORT" "${JENKINS_HTTP_PORT:-8081}")"
-  JENKINS_AGENT_PORT="$(prompt "JENKINS_AGENT_PORT" "${JENKINS_AGENT_PORT:-50000}")"
+  AWX_HTTP_PORT="$(prompt "AWX_HTTP_PORT" "${AWX_HTTP_PORT:-8052}")"
+  MONITOR_PORT="$(prompt "MONITOR_PORT" "${MONITOR_PORT:-8090}")"
+
+  # AWX version
+  AWX_VERSION="$(prompt "AWX_VERSION (see github.com/ansible/awx/releases)" "${AWX_VERSION:-23.9.0}")"
+
+  # AWX admin credentials
+  AWX_ADMIN_USER="$(prompt "AWX_ADMIN_USER" "${AWX_ADMIN_USER:-admin}")"
+  while true; do
+    AWX_ADMIN_PASSWORD="$(prompt "AWX_ADMIN_PASSWORD (min 8 chars)")"
+    [[ "${#AWX_ADMIN_PASSWORD}" -ge 8 ]] && break
+    warn "Password must be at least 8 characters."
+  done
+
+  # Auto-generate secrets if not already set
+  if [[ -z "${AWX_DB_PASSWORD:-}" ]]; then
+    AWX_DB_PASSWORD="$(gen_secret)"
+    log "Generated AWX_DB_PASSWORD."
+  fi
+  if [[ -z "${AWX_SECRET_KEY:-}" ]]; then
+    AWX_SECRET_KEY="$(gen_secret)"
+    log "Generated AWX_SECRET_KEY."
+  fi
 
   ISO_FILE="$(prompt "ISO_FILE (optional BIOS sanboot)" "${ISO_FILE:-example.iso}")"
 
@@ -205,18 +245,29 @@ env_wizard() {
   load_env
 }
 
+render_awx_credentials() {
+  local template="services/awx/credentials.py.template"
+  local output="services/awx/credentials.py"
+
+  [[ -f "$template" ]] || die "AWX credentials template not found: $template"
+
+  log "Rendering $output from template..."
+  # shellcheck disable=SC2016
+  AWX_DB_PASSWORD="${AWX_DB_PASSWORD}" envsubst '${AWX_DB_PASSWORD}' < "$template" > "$output"
+  log "Rendered $output"
+}
+
 fetch_ipxe_binaries() {
-  # iPXE official docs recommend downloading these prebuilt binaries for chainloading. [3](https://ipxe.org/howto/chainloading)
   local dst="services/tftp/tftpboot"
   mkdir -p "$dst"
 
-  if prompt_yesno "Download iPXE binaries into $dst now?"; then
-    log "Downloading undionly.kpxe and ipxe.efi from boot.ipxe.org..."
+  if prompt_yesno "Download iPXE binaries (undionly.kpxe, ipxe.efi) into $dst now?"; then
+    log "Downloading from boot.ipxe.org..."
     sudo_run apt-get update -y >/dev/null 2>&1 || true
     sudo_run apt-get install -y curl ca-certificates >/dev/null 2>&1 || true
 
-    curl -fsSL "http://boot.ipxe.org/undionly.kpxe" -o "$dst/undionly.kpxe"
-    curl -fsSL "http://boot.ipxe.org/ipxe.efi" -o "$dst/ipxe.efi"
+    curl -fsSL "https://boot.ipxe.org/undionly.kpxe" -o "$dst/undionly.kpxe"
+    curl -fsSL "https://boot.ipxe.org/ipxe.efi"     -o "$dst/ipxe.efi"
     log "Downloaded: $dst/undionly.kpxe, $dst/ipxe.efi"
   else
     warn "Skipped iPXE binaries download."
@@ -226,52 +277,40 @@ fetch_ipxe_binaries() {
 compose_up() {
   log "Starting stack: docker compose up -d --build"
   docker compose up -d --build
-  log "Stack started. (restart: unless-stopped is defined in compose.)" # [2](https://ipxe.org/download)
+  log "Stack started. (restart: unless-stopped is set on all services)"
 }
 
 enable_ip_forwarding() {
   log "Enabling IPv4 forwarding permanently..."
-  sudo_run bash -c 'echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-sit-nat.conf'
+  sudo_run bash -c 'echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-lab-nat.conf'
   sudo_run sysctl --system >/dev/null
 }
 
 enable_nat_nftables() {
-  # Use nftables masquerade in postrouting nat chain as recommended by nftables docs. [4](https://linuxvox.com/blog/linux-tftp-server-ubuntu/)
   enable_ip_forwarding
   sudo_run apt-get update -y >/dev/null 2>&1 || true
   sudo_run apt-get install -y nftables >/dev/null 2>&1 || true
 
-  local unit="/etc/systemd/system/sit-nat.service"
-  local script="/usr/local/sbin/sit-nat.sh"
+  local unit="/etc/systemd/system/lab-nat.service"
+  local script="/usr/local/sbin/lab-nat.sh"
 
   log "Creating NAT script: $script"
   sudo_run bash -c "cat > '$script' <<'EOS'
 #!/usr/bin/env bash
 set -euo pipefail
-
-# Load env from repo if present (optional), but usually we embed env values at install time.
 WAN_IFACE=\"${WAN_IFACE}\"
 PXE_IFACE=\"${PXE_IFACE}\"
 
-# Create dedicated table + chains
-nft list table ip sit_nat >/dev/null 2>&1 || nft add table ip sit_nat
+nft list table ip lab_nat >/dev/null 2>&1 || nft add table ip lab_nat
+nft list chain ip lab_nat postrouting >/dev/null 2>&1 || nft 'add chain ip lab_nat postrouting { type nat hook postrouting priority 100; }'
+nft list chain ip lab_nat forward >/dev/null 2>&1     || nft 'add chain ip lab_nat forward { type filter hook forward priority 0; policy accept; }'
 
-# nat postrouting with masquerade
-nft list chain ip sit_nat postrouting >/dev/null 2>&1 || nft 'add chain ip sit_nat postrouting { type nat hook postrouting priority 100; }'
+nft flush chain ip lab_nat postrouting || true
+nft flush chain ip lab_nat forward     || true
 
-# forward chain for filtering (optional but useful)
-nft list chain ip sit_nat forward >/dev/null 2>&1 || nft 'add chain ip sit_nat forward { type filter hook forward priority 0; policy accept; }'
-
-# Flush previous rules (idempotent apply)
-nft flush chain ip sit_nat postrouting || true
-nft flush chain ip sit_nat forward || true
-
-# Allow forwarding from PXE -> WAN and established back
-nft add rule ip sit_nat forward iifname \"${PXE_IFACE}\" oifname \"${WAN_IFACE}\" accept
-nft add rule ip sit_nat forward iifname \"${WAN_IFACE}\" oifname \"${PXE_IFACE}\" ct state established,related accept
-
-# Masquerade outbound on WAN
-nft add rule ip sit_nat postrouting oifname \"${WAN_IFACE}\" masquerade
+nft add rule ip lab_nat forward iifname \"${PXE_IFACE}\" oifname \"${WAN_IFACE}\" accept
+nft add rule ip lab_nat forward iifname \"${WAN_IFACE}\" oifname \"${PXE_IFACE}\" ct state established,related accept
+nft add rule ip lab_nat postrouting oifname \"${WAN_IFACE}\" masquerade
 EOS
 chmod +x '$script'"
 
@@ -287,17 +326,15 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=$script
 ExecReload=$script
-ExecStop=/usr/sbin/nft delete table ip sit_nat
+ExecStop=/usr/sbin/nft delete table ip lab_nat
 
 [Install]
 WantedBy=multi-user.target
 EOF"
 
-  log "Enabling service..."
   sudo_run systemctl daemon-reload
-  sudo_run systemctl enable --now sit-nat.service
-
-  log "NAT enabled (nftables). Verify: sudo nft list ruleset | grep sit_nat" # [1](https://github.com/naksnake/ubuntu_infra_service/blob/main/.env)
+  sudo_run systemctl enable --now lab-nat.service
+  log "NAT enabled (nftables). Verify: sudo nft list ruleset | grep lab_nat"
 }
 
 enable_nat_iptables() {
@@ -310,7 +347,6 @@ enable_nat_iptables() {
   sudo_run iptables -A FORWARD -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT
   sudo_run iptables -A FORWARD -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
-  log "Saving iptables rules (iptables-persistent)..."
   sudo_run netfilter-persistent save
   sudo_run systemctl enable --now netfilter-persistent
   log "NAT enabled (iptables-persistent)."
@@ -332,17 +368,44 @@ nat_wizard() {
   fi
 }
 
+enable_autostart() {
+  local unit="/etc/systemd/system/lab-stack.service"
+  local repo_dir="$ROOT_DIR"
+
+  log "Creating systemd autostart unit: $unit"
+  sudo_run bash -c "cat > '$unit' <<EOF
+[Unit]
+Description=SIT Lab Stack (docker compose)
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${repo_dir}
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+
+  sudo_run systemctl daemon-reload
+  sudo_run systemctl enable lab-stack.service
+  log "lab-stack.service enabled — stack will auto-start after reboot."
+}
+
 check_stack() {
   log "=== Status ==="
   docker ps || true
 
-  # Smoke-check webfs fixed share (/files/) which is central to your repo design. [1](https://github.com/naksnake/ubuntu_infra_service/blob/main/.env)[2](https://ipxe.org/download)
   if have curl; then
     local url="http://127.0.0.1:${WEBFS_PORT:-8080}/files/"
-    log "Checking Webfs /files/ is reachable: $url"
-    curl -fsSI "$url" >/dev/null || warn "Webfs /files/ not reachable yet (may take a few seconds)."
-  else
-    warn "curl not installed; skipping HTTP checks."
+    log "Checking Webfs /files/ : $url"
+    curl -fsSI "$url" >/dev/null 2>&1 && log "Webfs OK" || warn "Webfs not reachable yet (may take a few seconds)."
   fi
 }
 
@@ -351,7 +414,6 @@ main() {
   ensure_docker
   ensure_dirs
 
-  # Create .env from example if not present
   if [[ ! -f .env ]]; then
     if [[ -f .env.example ]]; then
       log "No .env found. Copying .env.example -> .env"
@@ -365,21 +427,56 @@ main() {
   if prompt_yesno "Run interactive configuration wizard now?" "Y"; then
     env_wizard
   else
+    load_env
+    # Ensure secrets exist even if wizard was skipped
+    if [[ -z "${AWX_DB_PASSWORD:-}" ]]; then
+      AWX_DB_PASSWORD="$(gen_secret)"
+      warn "AWX_DB_PASSWORD was empty — generated new value."
+      # Patch in-place atomically
+      local tmp; tmp="$(mktemp .env.XXXXXX)"
+      if grep -q '^AWX_DB_PASSWORD=' .env; then
+        sed "s|^AWX_DB_PASSWORD=.*|AWX_DB_PASSWORD=${AWX_DB_PASSWORD}|" .env > "$tmp"
+      else
+        { cat .env; echo "AWX_DB_PASSWORD=${AWX_DB_PASSWORD}"; } > "$tmp"
+      fi
+      mv "$tmp" .env
+    fi
+    if [[ -z "${AWX_SECRET_KEY:-}" ]]; then
+      AWX_SECRET_KEY="$(gen_secret)"
+      warn "AWX_SECRET_KEY was empty — generated new value."
+      local tmp; tmp="$(mktemp .env.XXXXXX)"
+      if grep -q '^AWX_SECRET_KEY=' .env; then
+        sed "s|^AWX_SECRET_KEY=.*|AWX_SECRET_KEY=${AWX_SECRET_KEY}|" .env > "$tmp"
+      else
+        { cat .env; echo "AWX_SECRET_KEY=${AWX_SECRET_KEY}"; } > "$tmp"
+      fi
+      mv "$tmp" .env
+    fi
+    load_env
     log "Using existing .env as-is."
   fi
 
+  render_awx_credentials
   fetch_ipxe_binaries
   compose_up
   nat_wizard
+
+  if prompt_yesno "Enable autostart on boot (systemd lab-stack.service)?"; then
+    enable_autostart
+  else
+    log "Autostart skipped. Run 'sudo systemctl enable lab-stack.service' later if needed."
+  fi
+
   check_stack
 
   echo
   log "DONE."
-  echo "Webfs:   http://${WEBFS_HOST_IP:-<WEBFS_HOST_IP>}:${WEBFS_PORT:-8080}/   (fixed share /files/)"  # [1](https://github.com/naksnake/ubuntu_infra_service/blob/main/.env)
-  echo "Jenkins: http://<host-ip>:${JENKINS_HTTP_PORT:-8081}/"                                          # [1](https://github.com/naksnake/ubuntu_infra_service/blob/main/.env)
+  echo "Webfs:   http://${WEBFS_HOST_IP:-<WEBFS_HOST_IP>}:${WEBFS_PORT:-8080}/"
+  echo "Monitor: http://<host-ip>:${MONITOR_PORT:-8090}/   (service health + DHCP leases)"
+  echo "AWX:     http://<host-ip>:${AWX_HTTP_PORT:-8052}/   (admin: ${AWX_ADMIN_USER:-admin})"
   echo
-  warn "Reminder: DHCP is running on PXE_IFACE=${PXE_IFACE}. Ensure no other DHCP server exists on that lab segment." # [1](https://github.com/naksnake/ubuntu_infra_service/blob/main/.env)
+  warn "AWX first boot runs DB migrations — allow ~2 minutes before the UI is ready."
+  warn "Reminder: DHCP is running on PXE_IFACE=${PXE_IFACE:-<PXE_IFACE>}. Ensure no other DHCP server exists on that lab segment."
 }
 
 main "$@"
-

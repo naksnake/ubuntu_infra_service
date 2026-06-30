@@ -1,0 +1,7 @@
+data/
+*.iso
+*.img
+*.qcow2
+.git/
+.env
+.env.local

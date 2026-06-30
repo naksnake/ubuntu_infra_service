@@ -1,186 +1,372 @@
-# SIT Services (Linux-only) — Webfs/HTTP, DHCP+iPXE, TFTP, Jenkins
+# SIT Lab Services
 
-A ready-to-run SIT environment focused on **Linux** only. It includes a fixed Webfs path for downloads, DHCP+iPXE, TFTP, Jenkins (persistent data), and **persistent NAT** options using **nftables** (recommended) or legacy iptables.
-
-- **Fixed download path**: host `./data/webfs_share` → `http://<WEBFS_HOST_IP>:<WEBFS_PORT>/files/`
-- **Linux-only iPXE**: UEFI‑friendly **kernel+initrd** flow, plus BIOS‑oriented ISO **sanboot** for quick tests.
-- **DHCP/TFTP**: provided by dnsmasq and tftpd-hpa (containers run with `network_mode: host`).
-- **Jenkins LTS**: persistent home at `./data/jenkins_home`.
-
-> ⚠️ Make sure your PXE/LAB segment has **no other DHCP server**.
+A single-command PXE lab environment for Ubuntu/Debian servers.  
+Run `./deploy.sh` once — DHCP, TFTP, NAT, a file server, and Ansible AWX all start automatically and survive reboots.
 
 ---
 
+## What you get
 
-## Quickstart (One command)
+| Service | Container | Purpose |
+|---|---|---|
+| DHCP + PXE | `lab_dhcp` | Assigns IPs to lab clients, serves iPXE bootloaders |
+| TFTP | `lab_tftp` | Delivers bootloader files to PXE clients |
+| File server | `lab_webfs` | HTTP share for ISO images, kernels, initrds |
+| Ansible AWX | `lab_awx_web` + `lab_awx_task` | Web UI for running Ansible playbooks |
+| AWX database | `lab_awx_postgres` | PostgreSQL for AWX |
+| AWX cache | `lab_awx_redis` | Redis for AWX |
+| NAT | systemd `lab-nat` | Lets lab clients reach the internet via the host |
+| Monitor | `lab_monitor` | Web dashboard: service health + DHCP lease lookup |
+
+---
+
+## Requirements
+
+- **OS**: Ubuntu 22.04 / 24.04 or Debian 12 (Linux only — Docker Desktop on Mac/Windows does not support host networking)
+- **NICs**: Two network interfaces
+  - `PXE_IFACE` — connected to your lab switch (DHCP + TFTP will bind here)
+  - `WAN_IFACE` — connected to the internet (used for NAT)
+- **Root / sudo**: required for Docker install, IP forwarding, NAT setup, and systemd unit
+- **Disk**: ~5 GB free (AWX image is ~1.5 GB)
+
+---
+
+## Step 1 — Assign a static IP to the PXE interface
+
+The host's PXE interface must have a static IP **before** you start the stack.  
+This is the IP that DHCP clients will use as their gateway (`PXE_ROUTER_IP`).
+
+**Ubuntu 22.04 / 24.04 (netplan):**
+
+Find your interface name first:
+```bash
+ip addr show
+```
+
+Edit `/etc/netplan/01-lab.yaml` (create it if it doesn't exist):
+```yaml
+network:
+  version: 2
+  ethernets:
+    eth1:                       # replace with your actual PXE_IFACE name
+      dhcp4: false
+      addresses: [192.168.100.1/24]
+```
+
+Apply:
+```bash
+sudo netplan apply
+ip addr show eth1               # confirm 192.168.100.1 is shown
+```
+
+**Debian 12 (`/etc/network/interfaces`):**
+```
+auto eth1
+iface eth1 inet static
+    address 192.168.100.1
+    netmask 255.255.255.0
+```
+```bash
+sudo ifdown eth1 && sudo ifup eth1
+```
+
+> The exact IP (`192.168.100.1`) is the value you will enter for `PXE_ROUTER_IP`, `WEBFS_HOST_IP`, and `TFTP_SERVER_IP` in step 3.
+
+---
+
+## Step 2 — Clone the repo
 
 ```bash
 git clone <repo-url>
 cd ubuntu_infra_service
-chmod +x deploy.sh
-./deploy.sh
-
-# Stop/Cleanup
-#Stop services
-docker compose down
-#Persistent data is stored under ./data/* as bind mounts.
-sudo rm -rf data/jenkins_home data/webfs_share
+chmod +x deploy.sh update-dhcp-range.sh
 ```
 
-## Zero-to-Ready: From a Clean Server (Ubuntu/Debian)
+---
 
-### 1) Install Docker + Compose
+## Step 3 — Configure `.env`
+
+Copy the example file:
 ```bash
-sudo apt-get update
-sudo apt-get install -y docker.io docker-compose-plugin
-sudo systemctl enable --now docker
-
-docker --version && docker compose version
+cp .env.example .env
 ```
 
-### 2) Identify NICs
-Use `ip addr` (or `nmcli device status`) to find:
-- `PXE_IFACE` → NIC connected to your PXE/LAB
-- `WAN_IFACE` → NIC connected to the Internet (only if you need NAT)
-
-### 3) Enable IPv4 forwarding (host)
-```bash
-echo "net.ipv4.ip_forward=1" | sudo tee /etc/sysctl.d/99-sit-nat.conf
-sudo sysctl --system
-```
-
-### 4) Get the project and create required paths
-```bash
-unzip sit-services-linux-only-plus.zip
-cd sit-services-linux-only-plus
-
-# Required host paths
-mkdir -p data/jenkins_home
-mkdir -p data/webfs_share
-mkdir -p services/webfs/htdocs/linux
-```
-
-### 5) Configure `.env`
-Edit the following variables at minimum:
+Open `.env` and fill in **your values**:
 ```ini
-PXE_IFACE=eth1
-WAN_IFACE=eth0
-PXE_RANGE_START=192.168.100.10
-PXE_RANGE_END=192.168.100.200
+# ---- Interfaces ----
+PXE_IFACE=eth1          # your lab NIC (from Step 1)
+WAN_IFACE=eth0          # your internet NIC
+
+# ---- IP addressing ----
+PXE_RANGE_START=192.168.100.10   # first IP to hand out to lab clients
+PXE_RANGE_END=192.168.100.200    # last IP to hand out to lab clients
 PXE_NETMASK=255.255.255.0
-PXE_ROUTER_IP=192.168.100.1
-WEBFS_HOST_IP=192.168.100.1
-TFTP_SERVER_IP=192.168.100.1
+PXE_ROUTER_IP=192.168.100.1      # host's PXE_IFACE IP (from Step 1)
+WEBFS_HOST_IP=192.168.100.1      # same as PXE_ROUTER_IP
+TFTP_SERVER_IP=192.168.100.1     # same as PXE_ROUTER_IP
 DNS_SERVER=8.8.8.8
+
+# ---- Ports ----
 WEBFS_PORT=8080
-JENKINS_HTTP_PORT=8081
-JENKINS_AGENT_PORT=50000
-ISO_FILE=ubuntu-live.iso   # only if testing BIOS ISO sanboot
-```
+AWX_HTTP_PORT=8052
+MONITOR_PORT=8090
 
-### 6) Fetch iPXE binaries (BIOS/UEFI)
-```bash
-./scripts/get-ipxe-binaries.sh
-ls services/tftp/tftpboot/
-# expect: undionly.kpxe, ipxe.efi
-```
+# ---- AWX ----
+AWX_VERSION=23.9.0
+AWX_ADMIN_USER=admin
+AWX_ADMIN_PASSWORD=YourPassword123   # at least 8 characters
 
-### 7) Provide Linux boot assets
-- **UEFI friendly (recommended):**
-  ```bash
-  cp vmlinuz services/webfs/htdocs/linux/
-  cp initrd.img services/webfs/htdocs/linux/
-  ```
-  Adjust kernel parameters in `ipxe/linux-kernel-initrd.ipxe` (e.g., `root=`, `ip=dhcp`).
+# AWX_DB_PASSWORD and AWX_SECRET_KEY are auto-generated by deploy.sh.
+# Leave them blank — deploy.sh fills them in.
+AWX_DB_PASSWORD=
+AWX_SECRET_KEY=
 
-- **Optional BIOS ISO sanboot:**
-  ```bash
-  cp ubuntu-live.iso data/webfs_share/
-  ```
-
-### 8) Start services
-```bash
-docker compose up -d --build
-```
-
-### 9) Persistent NAT (if PXE/LAB needs Internet)
-- **Recommended (nftables + systemd):**
-  ```bash
-  sudo ./scripts/persist-nat-nftables.sh
-  sudo nft list ruleset | grep sit_nat
-  sudo systemctl status sit-nat.service
-  ```
-- **Legacy (iptables-persistent):**
-  ```bash
-  sudo ./scripts/persist-nat-iptables.sh
-  ```
-
-### 10) Verify
-```bash
-./scripts/check-services.sh
-# Webfs:   http://<WEBFS_HOST_IP>:8080/   (fixed share /files/)
-# Jenkins: http://<host-ip>:8081/
+# ---- Optional ----
+ISO_FILE=ubuntu-24.04-live-server-amd64.iso   # only needed for BIOS ISO sanboot
 ```
 
 ---
 
-## Linux Boot Flows (iPXE)
+## Step 4 — Run the deploy wizard
 
-### A) Kernel + initrd (UEFI‑friendly)
-Place kernel/initrd under `services/webfs/htdocs/linux/` and tune `ipxe/linux-kernel-initrd.ipxe`:
-```ipxe
-#!ipxe
-set base http://${WEBFS_HOST_IP}:${WEBFS_PORT}
-# Add your kernel parameters: root=, ip=dhcp, console=...
-kernel ${base}/linux/vmlinuz initrd=initrd.magic ip=dhcp console=tty0
-initrd ${base}/linux/initrd.img
-boot
+```bash
+./deploy.sh
 ```
-> For older kernels (< 5.7) on UEFI, `initrd=initrd.magic` ensures the injected initrd works.
 
-### B) ISO sanboot (BIOS‑oriented quick test)
-Put a Live ISO into `./data/webfs_share` and set `ISO_FILE` in `.env`. Use `ipxe/boot-iso.ipxe`.
+The wizard will ask you to confirm each setting, then it will:
+
+1. Install Docker + Compose plugin (if not present)
+2. Create the required data directories
+3. Auto-generate `AWX_DB_PASSWORD` and `AWX_SECRET_KEY` and save them to `.env`
+4. Render `services/awx/credentials.py` from the template
+5. Offer to download iPXE boot binaries (`undionly.kpxe`, `ipxe.efi`)
+6. Build and start all containers with `docker compose up -d --build`
+7. Offer to enable persistent NAT via a systemd unit (`lab-nat.service`)
+8. Offer to enable stack autostart on reboot via `lab-stack.service`
+
+**Answer yes to both the NAT and autostart prompts** to get a fully persistent lab.
+
+> **AWX first-boot**: AWX runs database migrations on its first start. The UI will not be available for **3–5 minutes** after the containers start. This is normal.
 
 ---
 
-## Project Structure
+## Step 5 — Verify everything is running
+
+### Check containers
+```bash
+docker ps
+```
+Expected output — all six containers should show `Up`:
+```
+CONTAINER ID   IMAGE                          STATUS
+...            lab_monitor                    Up X minutes (healthy)   lab_monitor
+...            ghcr.io/ansible/awx:23.9.0    Up X minutes (healthy)   lab_awx_web
+...            ghcr.io/ansible/awx:23.9.0    Up X minutes             lab_awx_task
+...            postgres:15-alpine             Up X minutes (healthy)   lab_awx_postgres
+...            redis:7-alpine                 Up X minutes (healthy)   lab_awx_redis
+...            lab_webfs                      Up X minutes (healthy)   lab_webfs
+...            lab_dhcp                       Up X minutes (healthy)   lab_dhcp
+...            lab_tftp                       Up X minutes (healthy)   lab_tftp
+```
+
+### Verify DHCP
+From a client on the lab network (or use a VM on the lab segment):
+```bash
+# On the lab client — check it received an IP in the range you configured:
+ip addr show
+# Should show an IP between PXE_RANGE_START and PXE_RANGE_END
+```
+
+Check dnsmasq logs to see leases being issued:
+```bash
+docker logs lab_dhcp | grep -i DHCP
+# Example: DHCP, offered 192.168.100.25, eth1 ...
+```
+
+### Verify NAT
+From a lab client that received a DHCP IP:
+```bash
+ping -c 3 8.8.8.8           # should reach the internet
+curl -s https://example.com  # should return HTML
+```
+
+If clients can ping the lab gateway (`192.168.100.1`) but not the internet, check NAT:
+```bash
+sudo systemctl status lab-nat.service
+sudo nft list ruleset | grep lab_nat
+```
+
+### Verify the file server
+```bash
+curl -fsS "http://192.168.100.1:8080/files/"
+# Should return an HTML directory listing (empty until you copy files in)
+```
+
+### Verify the monitor dashboard
+Open a browser and go to:
+```
+http://192.168.100.1:8090/
+```
+You will see:
+- **Services** — all container names, status (running/exited), health check result, uptime, restart count
+- **DHCP Leases** — IP address, MAC address, hostname, lease expiry, and time remaining for every active lease
+
+Use the search box to quickly find a host by IP, MAC, or hostname.  
+The page auto-refreshes every 30 seconds. A JSON API is also available at `/api/status`.
+
+### Verify AWX
+Open a browser and go to:
+```
+http://192.168.100.1:8052/
+```
+Log in with `AWX_ADMIN_USER` / `AWX_ADMIN_PASSWORD` from your `.env`.
+
+If AWX is not ready yet, watch it start:
+```bash
+docker logs -f lab_awx_web
+# Wait for "supervisord started" in the output
+```
+
+---
+
+## Adding boot assets
+
+For PXE clients to boot a Linux system, copy the kernel and initrd into the webfs linux directory:
+
+```bash
+# Example: Ubuntu 24.04 live server
+cp /path/to/ubuntu-server.iso   ./data/webfs_share/
+cp /path/to/vmlinuz             ./services/webfs/htdocs/linux/
+cp /path/to/initrd              ./services/webfs/htdocs/linux/
+```
+
+Clients can then reach them at:
+- `http://192.168.100.1:8080/linux/vmlinuz`
+- `http://192.168.100.1:8080/linux/initrd`
+- `http://192.168.100.1:8080/files/ubuntu-server.iso`
+
+Adjust kernel parameters in `ipxe/linux-kernel-initrd.ipxe` to match your OS.
+
+---
+
+## Changing the DHCP range
+
+You do not need to restart the full stack — only the DHCP container is recycled:
+
+```bash
+# With arguments:
+./update-dhcp-range.sh 192.168.100.50 192.168.100.150
+
+# Interactive:
+./update-dhcp-range.sh
+```
+
+Existing leases are not affected until they expire.
+
+---
+
+## Day-to-day operations
+
+```bash
+# View all container statuses and health
+docker ps
+
+# Follow logs for a specific service
+docker logs -f lab_dhcp
+docker logs -f lab_monitor
+docker logs -f lab_awx_web
+docker logs -f lab_awx_task
+
+# Restart a single service
+docker compose restart dhcp
+
+# Stop the entire stack
+docker compose down
+
+# Start the entire stack
+docker compose up -d
+
+# Rebuild after changing a Dockerfile
+docker compose up -d --build dhcp
+```
+
+---
+
+## Autostart and NAT after reboot
+
+After running `deploy.sh` with autostart and NAT enabled:
+
+```bash
+# Check autostart is enabled
+sudo systemctl status lab-stack.service
+
+# Check NAT is enabled
+sudo systemctl status lab-nat.service
+```
+
+Both units start automatically at boot. To enable them manually if you skipped the prompts:
+```bash
+sudo systemctl enable --now lab-stack.service
+sudo systemctl enable --now lab-nat.service
+```
+
+---
+
+## Troubleshooting
+
+**DHCP clients get no IP**
+- Confirm `PXE_IFACE` has the static IP: `ip addr show eth1`
+- Check dnsmasq started: `docker logs lab_dhcp | head -20`
+- Confirm no other DHCP server is on the lab segment: `sudo nmap --script broadcast-dhcp-discover`
+
+**NAT not working (clients can ping gateway but not internet)**
+- Check IP forwarding is on: `cat /proc/sys/net/ipv4/ip_forward` (must be `1`)
+- Check nftables rules: `sudo nft list ruleset | grep lab_nat`
+- Restart NAT service: `sudo systemctl restart lab-nat.service`
+
+**AWX UI shows 502 / not reachable after 5 minutes**
+- Check all AWX containers are running: `docker ps | grep awx`
+- Check postgres is healthy: `docker inspect lab_awx_postgres | grep Health -A5`
+- Check AWX logs: `docker logs lab_awx_web 2>&1 | tail -30`
+
+**Containers restart repeatedly**
+- Check for missing `.env` values: `docker logs lab_dhcp | head -5`
+- Confirm `services/awx/credentials.py` exists: `ls -la services/awx/`  
+  If missing, re-run: `./deploy.sh` (it will skip the config wizard if `.env` exists)
+
+---
+
+## File layout
+
 ```
 ubuntu_infra_service/
-├─ deploy.sh
-├─ .env.example
-├─ .gitignore
-├─ docker-compose.yml
-├─ README.md                  # update quickstart section
-├─ LICENSE
-├─ CHANGELOG.md
-├─ Jenkinsfile                # keep if you want; not required for deploy.sh
+├── deploy.sh                    # Run this once to set everything up
+├── update-dhcp-range.sh         # Change DHCP pool without restarting the stack
+├── docker-compose.yml
+├── .env.example                 # Copy to .env and edit before running deploy.sh
 │
-├─ ipxe/
-│  ├─ default.ipxe
-│  ├─ linux-kernel-initrd.ipxe
-│  ├─ boot-iso.ipxe
-│  └─ menu.ipxe
+├── ipxe/                        # iPXE boot scripts (served by webfs)
+│   ├── default.ipxe             # Entry point — chains to linux-kernel-initrd.ipxe
+│   ├── linux-kernel-initrd.ipxe # UEFI-friendly kernel+initrd boot
+│   ├── boot-iso.ipxe            # BIOS ISO sanboot
+│   └── menu.ipxe                # Interactive boot menu
 │
-├─ services/
-│  ├─ webfs/...
-│  ├─ tftp/...
-│  ├─ dhcp/...
-│  └─ jenkins/...
+├── services/
+│   ├── dhcp/                    # dnsmasq DHCP+TFTP container
+│   ├── tftp/                    # tftpd-hpa bootloader delivery container
+│   ├── webfs/                   # HTTP file server container
+│   ├── monitor/                 # Flask dashboard (service health + DHCP leases)
+│   └── awx/
+│       ├── credentials.py.template   # AWX DB+Redis config (rendered by deploy.sh)
+│       └── environment.sh            # AWX admin user init helper
 │
-├─ data/                      # runtime only (gitignored)
-│  ├─ jenkins_home/
-│  └─ webfs_share/
-│
-└─ .github/
-   └─ workflows/
-      └─ ci.yml
-
+└── data/                        # Runtime data — back this up
+    ├── awx_postgres/            # AWX database files
+    ├── awx_projects/            # Ansible playbook directories (mount into AWX)
+    ├── webfs_share/             # ISO images and other large files
+    └── dnsmasq.leases           # Live DHCP lease database (read by monitor)
 ```
 
-## Notes & Good Practices
-- Target host: **Linux**. Docker Desktop (Win/Mac) may behave differently for `host` networking and DHCP.
-- Avoid DHCP conflicts on the PXE/LAB segment.
-- Consider pinning container base images for reproducibility.
-- Back up `data/jenkins_home` and any critical files under `data/webfs_share`.
+---
 
 MIT License. See `LICENSE`.
