@@ -365,8 +365,13 @@ function uploadOne(file) {
     xhr.upload.onprogress = e => { if (e.lengthComputable) fill.style.width = (e.loaded / e.total * 100) + '%'; };
     xhr.onload = () => {
       bar.style.display = 'none';
-      if (xhr.status === 201) toast('Uploaded ' + file.name);
-      else toast('Upload of ' + file.name + ' failed', false);
+      if (xhr.status === 201) {
+        let j = {}; try { j = JSON.parse(xhr.responseText); } catch {}
+        if (j.auto_entry) toast('Uploaded ' + file.name + ' — added a boot entry (disabled)');
+        else toast('Uploaded ' + file.name);
+      } else {
+        toast('Upload of ' + file.name + ' failed', false);
+      }
       resolve();
     };
     xhr.onerror = () => { bar.style.display = 'none'; toast('Upload error: ' + file.name, false); resolve(); };
@@ -386,6 +391,7 @@ async function uploadFiles(list) {
     _uploading = false;
     document.getElementById('fileInput').value = '';
     loadFiles();
+    loadEntries();  // an ISO upload may have auto-created a boot entry
   }
 }
 

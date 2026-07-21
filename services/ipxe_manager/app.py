@@ -219,8 +219,24 @@ def api_upload():
     except Exception as exc:
         tmp.unlink(missing_ok=True)
         return jsonify({'error': f'Upload failed: {exc}'}), 500
+
+    # An ISO maps cleanly to a single sanboot entry, so auto-create one
+    # (disabled, so it never changes the boot menu until you enable it).
+    # Kernels can't be auto-added — they need a matching initrd and cmdline.
+    auto_entry = None
+    if filename.lower().endswith('.iso'):
+        with entries_lock():
+            entries = load_entries()
+            if not any(e.get('type') == 'iso' and e.get('iso') == filename
+                       for e in entries):
+                auto_entry = {'id': 'e' + uuid.uuid4().hex[:7],
+                              'name': pathlib.Path(filename).stem,
+                              'type': 'iso', 'iso': filename, 'enabled': False}
+                entries.append(auto_entry)
+                save_entries(entries)
+
     return jsonify({'name': filename, 'size': dest.stat().st_size,
-                    'url': file_url(filename)}), 201
+                    'url': file_url(filename), 'auto_entry': auto_entry}), 201
 
 @app.route('/api/files/<filename>', methods=['DELETE'])
 def api_delete_file(filename):

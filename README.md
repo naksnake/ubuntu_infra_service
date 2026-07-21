@@ -258,6 +258,12 @@ http://192.168.100.1:8091/
    - **Chainload URL** — point at another `.ipxe` script
 3. Select the uploaded file(s), add kernel parameters if needed, save.
 
+> **ISO shortcut:** uploading a `.iso` automatically creates a matching
+> **sanboot** entry — created **disabled** so it never changes the live menu
+> until you review it. Just flip its toggle on (and rename it) in the Boot
+> Menu tab. Kernels are not auto-added because they need a matching initrd
+> and kernel command line, so add those manually.
+
 The next PXE boot immediately shows the new entry — no container restart
 needed. You can rename, reorder (▲▼), enable/disable, or delete entries at
 any time; the **iPXE Preview** tab shows the exact script clients receive.
