@@ -1,7 +1,36 @@
-# SIT Lab Services
+# Lab Services — PXE lab-in-a-box
 
-A single-command PXE lab environment for Ubuntu/Debian servers.  
-Run `./deploy.sh` once — DHCP, TFTP, NAT, a file server, and Ansible AWX all start automatically and survive reboots.
+A single-command PXE lab environment for Ubuntu/Debian hosts.  
+Run `./deploy.sh` once — DHCP, TFTP, NAT, an HTTP file server, a web-based
+iPXE boot-menu manager, a health dashboard, and Ansible AWX all start
+automatically and survive reboots.
+
+**Demo sample:** this repo is a complete, reproducible reference deployment.
+The [worked example](#worked-example--dual-lan-mini-pc-intel-n97n100-16-gb)
+below runs it on a dual-LAN Intel N97 mini PC with Ubuntu Desktop — follow
+Steps 1–5 top to bottom and you end with a working PXE lab.
+
+## Quickstart (TL;DR)
+
+```bash
+# 0. Two NICs: WAN cabled to your router, PXE cabled to the lab switch.
+# 1. Static IP on the PXE NIC (Desktop example; details in Step 1):
+sudo nmcli con add type ethernet ifname enp2s0 con-name lab-pxe \
+     ipv4.method manual ipv4.addresses 192.168.100.1/24
+sudo nmcli con up lab-pxe
+
+# 2. Get the repo and configure:
+git clone https://github.com/naksnake/ubuntu_infra_service.git
+cd ubuntu_infra_service
+cp .env.example .env          # edit: PXE_IFACE, WAN_IFACE, AWX_ADMIN_PASSWORD
+
+# 3. Deploy (answer yes to the NAT and autostart prompts):
+./deploy.sh
+```
+
+Then open `http://192.168.100.1:8091/` (iPXE Manager) to upload an ISO and
+build your boot menu, and `http://192.168.100.1:8090/` (Monitor) to watch
+service health and DHCP leases. Full details in the steps below.
 
 ---
 
@@ -106,7 +135,7 @@ gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'no
 ## Step 2 — Clone the repo
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/naksnake/ubuntu_infra_service.git
 cd ubuntu_infra_service
 chmod +x deploy.sh update-dhcp-range.sh
 ```
@@ -123,8 +152,8 @@ cp .env.example .env
 Open `.env` and fill in **your values**:
 ```ini
 # ---- Interfaces ----
-PXE_IFACE=eth1          # your lab NIC (from Step 1)
-WAN_IFACE=eth0          # your internet NIC
+PXE_IFACE=enp2s0        # your lab NIC (from Step 1)
+WAN_IFACE=enp1s0        # your internet NIC
 
 # ---- IP addressing ----
 PXE_RANGE_START=192.168.100.10   # first IP to hand out to lab clients
@@ -141,6 +170,11 @@ IPXE_MANAGER_PORT=8091
 AWX_HTTP_PORT=8052
 MONITOR_PORT=8090
 
+# ---- iPXE Manager (optional) ----
+# Set a password to require login for the manager UI/API.
+# Leave blank for no auth. /menu.ipxe always stays open for PXE clients.
+IPXE_MANAGER_PASSWORD=
+
 # ---- AWX ----
 AWX_VERSION=23.9.0
 AWX_ADMIN_USER=admin
@@ -150,9 +184,6 @@ AWX_ADMIN_PASSWORD=YourPassword123   # at least 8 characters
 # Leave them blank — deploy.sh fills them in.
 AWX_DB_PASSWORD=
 AWX_SECRET_KEY=
-
-# ---- Optional ----
-ISO_FILE=ubuntu-24.04-live-server-amd64.iso   # only needed for BIOS ISO sanboot
 ```
 
 ---
@@ -211,7 +242,7 @@ ip addr show
 Check dnsmasq logs to see leases being issued:
 ```bash
 docker logs lab_dhcp | grep -i DHCP
-# Example: DHCP, offered 192.168.100.25, eth1 ...
+# Example: DHCP, offered 192.168.100.25, enp2s0 ...
 ```
 
 ### Verify NAT
@@ -315,10 +346,9 @@ The order in the Boot Menu tab is the order clients see, and the top enabled
 entry (badged **default**) boots automatically after a 30-second timeout.
 Use the ▲▼ arrows to change it; disabled entries are hidden from clients.
 
-The next PXE boot immediately shows the new entry — no container restart
-needed. You can rename, reorder (▲▼), enable/disable, or delete entries at
-any time; the **iPXE Preview** tab shows the exact script clients receive.
-The top enabled entry boots automatically after 30 seconds.
+Every change is live immediately — the next PXE boot picks it up with no
+container restart. You can rename, enable/disable, or delete entries at any
+time; the **iPXE Preview** tab shows the exact script clients receive.
 
 > You can also copy files straight into `data/webfs_share/` from the shell —
 > they appear in the manager's file list and dropdowns automatically.
@@ -428,7 +458,7 @@ downloads, not the CPU. Store ISOs in `data/webfs_share/` on the SSD.
 ## Troubleshooting
 
 **DHCP clients get no IP**
-- Confirm `PXE_IFACE` has the static IP: `ip addr show eth1`
+- Confirm `PXE_IFACE` has the static IP: `ip addr show <PXE_IFACE>`
 - Check dnsmasq started: `docker logs lab_dhcp | head -20`
 - Confirm no other DHCP server is on the lab segment: `sudo nmap --script broadcast-dhcp-discover`
 
@@ -458,11 +488,11 @@ ubuntu_infra_service/
 ├── docker-compose.yml
 ├── .env.example                 # Copy to .env and edit before running deploy.sh
 │
-├── ipxe/                        # iPXE boot scripts (served by webfs)
-│   ├── default.ipxe             # Entry point — chains to linux-kernel-initrd.ipxe
+├── ipxe/                        # Static iPXE scripts (manual fallbacks, served by webfs)
+│   ├── default.ipxe             # Chains to the iPXE Manager's live menu
+│   ├── menu.ipxe                # Static fallback menu
 │   ├── linux-kernel-initrd.ipxe # UEFI-friendly kernel+initrd boot
-│   ├── boot-iso.ipxe            # BIOS ISO sanboot
-│   └── menu.ipxe                # Interactive boot menu
+│   └── boot-iso.ipxe            # BIOS-only ISO sanboot
 │
 ├── services/
 │   ├── dhcp/                    # dnsmasq DHCP container (PXE pointers, no TFTP)

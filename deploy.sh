@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ==========================================================
-# SIT Services deploy wizard (Linux-only)
+# Lab Services deploy wizard (Linux-only)
 # Usage:
 #   ./deploy.sh
 #
@@ -322,7 +322,7 @@ chmod +x '$script'"
   log "Creating systemd unit: $unit"
   sudo_run bash -c "cat > '$unit' <<EOF
 [Unit]
-Description=SIT NAT (nftables) for PXE/LAB
+Description=Lab NAT (nftables) for PXE/LAB
 After=network-online.target
 Wants=network-online.target
 
@@ -380,7 +380,7 @@ enable_autostart() {
   log "Creating systemd autostart unit: $unit"
   sudo_run bash -c "cat > '$unit' <<EOF
 [Unit]
-Description=SIT Lab Stack (docker compose)
+Description=Lab Stack (docker compose)
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target
@@ -415,7 +415,7 @@ check_stack() {
 }
 
 main() {
-  log "SIT deploy wizard starting..."
+  log "Lab deploy wizard starting..."
   ensure_docker
   ensure_dirs
 
