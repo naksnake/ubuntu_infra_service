@@ -340,8 +340,14 @@ function populateFileSelects() {
   function fill(id, blank) {
     const sel = document.getElementById(id);
     const cur = sel.value;
-    sel.innerHTML = `<option value="">${blank}</option>` +
+    let html = `<option value="">${blank}</option>` +
       names.map(n => `<option value="${n}"${n === cur ? ' selected' : ''}>${n}</option>`).join('');
+    // keep a selected-but-missing file visible instead of silently clearing it
+    // (e.g. a background upload refresh while the edit modal is open)
+    if (cur && !names.includes(cur)) {
+      html += `<option value="${cur}" selected>${cur} (missing file)</option>`;
+    }
+    sel.innerHTML = html;
   }
   fill('kernelFile', '— select uploaded file —');
   fill('initrdFile', '— none —');
@@ -368,12 +374,19 @@ function uploadOne(file) {
   });
 }
 
+let _uploading = false;
 async function uploadFiles(list) {
   const files = [...(list || [])];
   if (!files.length) return;
-  for (const f of files) await uploadOne(f);
-  document.getElementById('fileInput').value = '';
-  loadFiles();
+  if (_uploading) { toast('An upload is already in progress', false); return; }
+  _uploading = true;
+  try {
+    for (const f of files) await uploadOne(f);
+  } finally {
+    _uploading = false;
+    document.getElementById('fileInput').value = '';
+    loadFiles();
+  }
 }
 
 async function deleteFile(name) {

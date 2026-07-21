@@ -167,18 +167,19 @@ WEBFS_PORT=${WEBFS_PORT}
 IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT}
 AWX_HTTP_PORT=${AWX_HTTP_PORT}
 MONITOR_PORT=${MONITOR_PORT}
-MONITOR_REFRESH=30
+MONITOR_REFRESH=${MONITOR_REFRESH:-30}
 
 # ==== iPXE Manager ====
-# Optional: set a password to protect the web UI and API (menu.ipxe stays open)
-IPXE_MANAGER_PASSWORD=${IPXE_MANAGER_PASSWORD:-}
+# Optional: set a password to protect the web UI and API (menu.ipxe stays open).
+# Quoted so a password containing spaces survives sourcing and compose parsing.
+IPXE_MANAGER_PASSWORD="${IPXE_MANAGER_PASSWORD:-}"
 
 # ==== AWX settings ====
 AWX_VERSION=${AWX_VERSION}
 AWX_ADMIN_USER=${AWX_ADMIN_USER}
-AWX_ADMIN_PASSWORD=${AWX_ADMIN_PASSWORD}
-AWX_DB_PASSWORD=${AWX_DB_PASSWORD}
-AWX_SECRET_KEY=${AWX_SECRET_KEY}
+AWX_ADMIN_PASSWORD="${AWX_ADMIN_PASSWORD}"
+AWX_DB_PASSWORD="${AWX_DB_PASSWORD}"
+AWX_SECRET_KEY="${AWX_SECRET_KEY}"
 
 # Optional: ISO name for BIOS-only sanboot (Linux Live ISO)
 ISO_FILE=${ISO_FILE}

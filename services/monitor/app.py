@@ -122,5 +122,6 @@ def api_status():
 
 
 if __name__ == '__main__':
-    import subprocess, sys
-    subprocess.execvp('gunicorn', ['gunicorn', '-w', '2', '-b', '0.0.0.0:8090', 'app:app'])
+    # Dev/local convenience only — the container runs gunicorn as its CMD.
+    import os
+    os.execvp('gunicorn', ['gunicorn', '-w', '2', '-b', '0.0.0.0:8090', 'app:app'])
