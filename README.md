@@ -23,12 +23,16 @@ Run `./deploy.sh` once — DHCP, TFTP, NAT, a file server, and Ansible AWX all s
 
 ## Requirements
 
-- **OS**: Ubuntu 22.04 / 24.04 or Debian 12 (Linux only — Docker Desktop on Mac/Windows does not support host networking)
+- **OS**: Ubuntu 22.04 / 24.04 / 26.04 (Server **or** Desktop) or Debian 12
+  (Linux only — Docker Desktop on Mac/Windows does not support host networking)
 - **NICs**: Two network interfaces
   - `PXE_IFACE` — connected to your lab switch (DHCP + TFTP will bind here)
   - `WAN_IFACE` — connected to the internet (used for NAT)
+- **CPU / RAM**: 4 cores and 8 GB RAM minimum (AWX uses ~3–4 GB); a dual-LAN
+  mini PC like an Intel N97/N100 box with 16 GB is a comfortable fit
 - **Root / sudo**: required for Docker install, IP forwarding, NAT setup, and systemd unit
-- **Disk**: ~5 GB free (AWX image is ~1.5 GB)
+- **Disk**: ~5 GB free for the stack (AWX image is ~1.5 GB) plus space for
+  your ISO images in `data/webfs_share/`
 
 ---
 
@@ -37,19 +41,36 @@ Run `./deploy.sh` once — DHCP, TFTP, NAT, a file server, and Ansible AWX all s
 The host's PXE interface must have a static IP **before** you start the stack.  
 This is the IP that DHCP clients will use as their gateway (`PXE_ROUTER_IP`).
 
-**Ubuntu 22.04 / 24.04 (netplan):**
-
-Find your interface name first:
+Find your interface names first:
 ```bash
 ip addr show
+# Modern names look like enp1s0 / enp2s0 (dual-LAN mini PCs) or eno1, eth0…
+# The port with your internet connection (has an IP already) is WAN_IFACE;
+# the other port, cabled to the lab switch, is PXE_IFACE.
 ```
+
+**Ubuntu Desktop (22.04 / 24.04 / 26.04 — NetworkManager):**
+
+Desktop editions manage NICs with NetworkManager, so use `nmcli` (or the
+Settings → Network GUI) instead of editing netplan files:
+
+```bash
+# replace enp2s0 with your actual PXE_IFACE name
+sudo nmcli con add type ethernet ifname enp2s0 con-name lab-pxe \
+     ipv4.method manual ipv4.addresses 192.168.100.1/24
+sudo nmcli con up lab-pxe
+ip addr show enp2s0             # confirm 192.168.100.1 is shown
+```
+This survives reboots. Leave the WAN port on its normal DHCP connection.
+
+**Ubuntu Server (netplan):**
 
 Edit `/etc/netplan/01-lab.yaml` (create it if it doesn't exist):
 ```yaml
 network:
   version: 2
   ethernets:
-    eth1:                       # replace with your actual PXE_IFACE name
+    enp2s0:                     # replace with your actual PXE_IFACE name
       dhcp4: false
       addresses: [192.168.100.1/24]
 ```
@@ -57,7 +78,7 @@ network:
 Apply:
 ```bash
 sudo netplan apply
-ip addr show eth1               # confirm 192.168.100.1 is shown
+ip addr show enp2s0             # confirm 192.168.100.1 is shown
 ```
 
 **Debian 12 (`/etc/network/interfaces`):**
@@ -72,6 +93,13 @@ sudo ifdown eth1 && sudo ifup eth1
 ```
 
 > The exact IP (`192.168.100.1`) is the value you will enter for `PXE_ROUTER_IP`, `WEBFS_HOST_IP`, and `TFTP_SERVER_IP` in step 3.
+
+**Desktop only — disable automatic suspend.** A desktop install may suspend
+the machine after idle time, which takes DHCP/PXE/NAT down with it:
+```bash
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing'
+```
 
 ---
 
@@ -360,6 +388,40 @@ Both units start automatically at boot. To enable them manually if you skipped t
 sudo systemctl enable --now lab-stack.service
 sudo systemctl enable --now lab-nat.service
 ```
+
+---
+
+## Worked example — dual-LAN mini PC (Intel N97/N100, 16 GB)
+
+A fanless dual-LAN mini PC (e.g. Limyee BOX1212: Intel N97, 2× 2.5 GbE,
+16 GB DDR5, 1 TB SSD) running Ubuntu Desktop is an ideal appliance for this
+stack. Complete recipe:
+
+1. **Install Ubuntu Desktop** on the SSD (22.04 / 24.04 / 26.04 all work).
+   The 2.5 GbE ports (Intel i226-class) are supported out of the box.
+2. **Cable it**: LAN port 1 → your office router/internet (`WAN_IFACE`),
+   LAN port 2 → the lab switch where PXE machines live (`PXE_IFACE`).
+   Confirm names with `ip addr show` — typically `enp1s0` / `enp2s0`.
+3. **Static IP on the lab port** with `nmcli` and **disable auto-suspend**
+   (both shown in Step 1 above).
+4. **Clone + configure + deploy** (Steps 2–4). In `.env`:
+   `WAN_IFACE=enp1s0`, `PXE_IFACE=enp2s0`, everything else default.
+   Answer **yes** to the NAT and autostart prompts.
+5. **BIOS tip**: enable *Restore on AC Power Loss* so the box comes back up
+   after an outage — the systemd units restart the whole stack on boot.
+
+Resource fit on 16 GB / 4 cores:
+
+| Component | Idle RAM |
+|---|---|
+| AWX (web + task + postgres + redis) | ~3–4 GB |
+| DHCP, TFTP, webfs, monitor, iPXE Manager | < 300 MB combined |
+| Ubuntu Desktop (GNOME) | ~1.5–2 GB |
+| **Headroom** | **~9 GB** for file cache while serving ISOs |
+
+The N97's 4 cores handle the full stack plus several concurrent PXE
+installs; the 2.5 GbE lab port is the practical limit for parallel image
+downloads, not the CPU. Store ISOs in `data/webfs_share/` on the SSD.
 
 ---
 
