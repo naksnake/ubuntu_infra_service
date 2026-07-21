@@ -109,10 +109,9 @@ ensure_dirs() {
   mkdir -p services/awx
   # dnsmasq writes leases here; must exist as a file before Docker bind-mounts it
   touch data/dnsmasq.leases
-  # iPXE Manager boot entries; must exist as a file before Docker bind-mounts it
-  if [ ! -s data/ipxe_entries.json ]; then
-    echo '[]' > data/ipxe_entries.json
-  fi
+  # iPXE Manager state (entries.json lives inside; directory mount keeps
+  # the manager's atomic tmp+rename writes working)
+  mkdir -p data/ipxe_manager
 }
 
 ensure_docker() {
@@ -165,9 +164,14 @@ DNS_SERVER=${DNS_SERVER}
 
 # ==== Ports ====
 WEBFS_PORT=${WEBFS_PORT}
+IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT}
 AWX_HTTP_PORT=${AWX_HTTP_PORT}
 MONITOR_PORT=${MONITOR_PORT}
 MONITOR_REFRESH=30
+
+# ==== iPXE Manager ====
+# Optional: set a password to protect the web UI and API (menu.ipxe stays open)
+IPXE_MANAGER_PASSWORD=${IPXE_MANAGER_PASSWORD:-}
 
 # ==== AWX settings ====
 AWX_VERSION=${AWX_VERSION}
@@ -219,6 +223,7 @@ env_wizard() {
   DNS_SERVER="$(prompt "DNS_SERVER" "${DNS_SERVER:-8.8.8.8}")"
 
   WEBFS_PORT="$(prompt "WEBFS_PORT" "${WEBFS_PORT:-8080}")"
+  IPXE_MANAGER_PORT="$(prompt "IPXE_MANAGER_PORT" "${IPXE_MANAGER_PORT:-8091}")"
   AWX_HTTP_PORT="$(prompt "AWX_HTTP_PORT" "${AWX_HTTP_PORT:-8052}")"
   MONITOR_PORT="$(prompt "MONITOR_PORT" "${MONITOR_PORT:-8090}")"
 

@@ -1,8 +1,11 @@
 #!ipxe
-# Chain to the iPXE Manager dynamic boot menu.
-# ${next-server} is provided by DHCP (TFTP_SERVER_IP / PXE_ROUTER_IP).
+# Manual fallback: DHCP normally points iPXE clients directly at the
+# iPXE Manager menu. This script does the same for hand-chained boots.
+# NOTE: 8091 is the default IPXE_MANAGER_PORT — keep in sync with .env.
 chain http://${next-server}:8091/menu.ipxe || goto fallback
+# the menu returned (user chose Exit) — leave iPXE cleanly
+exit
 :fallback
-echo Failed to reach iPXE Manager at http://${next-server}:8091/menu.ipxe
+echo Could not reach the iPXE Manager at http://${next-server}:8091/menu.ipxe
 echo Dropping to shell — type 'exit' to return to BIOS/UEFI.
 shell

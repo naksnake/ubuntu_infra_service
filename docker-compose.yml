@@ -47,10 +47,10 @@ services:
       - WEBFS_HOST_IP=${WEBFS_HOST_IP}
       - WEBFS_PORT=${WEBFS_PORT:-8080}
       - TFTP_SERVER_IP=${TFTP_SERVER_IP}
+      - IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT:-8091}
       - ISO_FILE=${ISO_FILE:-}
     volumes:
       - ./services/dhcp/dnsmasq.conf.template:/etc/dnsmasq.conf.template:ro
-      - ./services/tftp/tftpboot:/srv/tftp:ro
       - ./data/dnsmasq.leases:/data/dnsmasq.leases:rw
     cap_add:
       - NET_ADMIN
@@ -70,14 +70,18 @@ services:
       - "${IPXE_MANAGER_PORT:-8091}:8091"
     volumes:
       - ./data/webfs_share:/data/uploads:rw
-      - ./data/ipxe_entries.json:/data/entries.json:rw
+      # directory mount, NOT a single-file mount — save_entries() renames a
+      # temp file over entries.json, which fails with EBUSY on a file mount
+      - ./data/ipxe_manager:/data/state:rw
     environment:
       - UPLOAD_DIR=/data/uploads
-      - ENTRIES_FILE=/data/entries.json
-      - WEBFS_BASE=http://${WEBFS_HOST_IP}:${WEBFS_PORT:-8080}
-      - SERVER_IP=${WEBFS_HOST_IP}
+      - ENTRIES_FILE=/data/state/entries.json
+      - WEBFS_BASE=http://${WEBFS_HOST_IP:-192.168.100.1}:${WEBFS_PORT:-8080}
+      - SERVER_IP=${WEBFS_HOST_IP:-192.168.100.1}
+      - AUTH_PASSWORD=${IPXE_MANAGER_PASSWORD:-}
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/api/entries')\""]
+      # /menu.ipxe stays reachable even when IPXE_MANAGER_PASSWORD is set
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/menu.ipxe')\""]
       interval: 30s
       timeout: 5s
       retries: 3

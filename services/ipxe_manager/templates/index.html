@@ -139,7 +139,7 @@ header span { color: var(--muted); font-size: 12px; }
   <h1>&#9729; iPXE Manager</h1>
   <span>{{ server_ip }}</span>
   <span style="margin-left:auto;color:var(--muted);font-size:11px;">
-    Menu endpoint: <code style="font-family:var(--mono);color:var(--accent)">http://{{ server_ip }}:8091/menu.ipxe</code>
+    Menu endpoint: <code id="menuUrl" style="font-family:var(--mono);color:var(--accent)"></code>
   </span>
 </header>
 
@@ -159,7 +159,7 @@ header span { color: var(--muted); font-size: 12px; }
           <span class="icon">&#128190;</span>
           <strong>Click to browse</strong> or drag &amp; drop
           <p>ISO images, kernels (vmlinuz), initrd — any size</p>
-          <input type="file" id="fileInput" onchange="uploadFile(this.files[0])">
+          <input type="file" id="fileInput" multiple onchange="uploadFiles(this.files)">
         </div>
         <div class="progress-bar" id="progress"><div class="fill" id="progressFill"></div></div>
       </div>
@@ -348,23 +348,32 @@ function populateFileSelects() {
   fill('isoFile',    '— select uploaded file —');
 }
 
-async function uploadFile(file) {
-  if (!file) return;
-  const bar = document.getElementById('progress');
-  const fill = document.getElementById('progressFill');
-  bar.style.display = 'block'; fill.style.width = '0%';
-  const fd = new FormData(); fd.append('file', file);
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/api/files');
-  xhr.upload.onprogress = e => { if (e.lengthComputable) fill.style.width = (e.loaded / e.total * 100) + '%'; };
-  xhr.onload = () => {
-    bar.style.display = 'none';
-    document.getElementById('fileInput').value = '';
-    if (xhr.status === 201) { toast('Uploaded ' + file.name); loadFiles(); }
-    else toast('Upload failed', false);
-  };
-  xhr.onerror = () => { bar.style.display = 'none'; toast('Upload error', false); };
-  xhr.send(fd);
+function uploadOne(file) {
+  return new Promise(resolve => {
+    const bar = document.getElementById('progress');
+    const fill = document.getElementById('progressFill');
+    bar.style.display = 'block'; fill.style.width = '0%';
+    const fd = new FormData(); fd.append('file', file);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/files');
+    xhr.upload.onprogress = e => { if (e.lengthComputable) fill.style.width = (e.loaded / e.total * 100) + '%'; };
+    xhr.onload = () => {
+      bar.style.display = 'none';
+      if (xhr.status === 201) toast('Uploaded ' + file.name);
+      else toast('Upload of ' + file.name + ' failed', false);
+      resolve();
+    };
+    xhr.onerror = () => { bar.style.display = 'none'; toast('Upload error: ' + file.name, false); resolve(); };
+    xhr.send(fd);
+  });
+}
+
+async function uploadFiles(list) {
+  const files = [...(list || [])];
+  if (!files.length) return;
+  for (const f of files) await uploadOne(f);
+  document.getElementById('fileInput').value = '';
+  loadFiles();
 }
 
 async function deleteFile(name) {
@@ -378,7 +387,7 @@ async function deleteFile(name) {
 const dz = document.getElementById('dropZone');
 dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
 dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
-dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag'); uploadFile(e.dataTransfer.files[0]); });
+dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag'); uploadFiles(e.dataTransfer.files); });
 
 // ── entries ────────────────────────────────────────────────────────────────
 async function loadEntries() {
@@ -422,29 +431,54 @@ function renderEntries() {
     </div>`).join('');
 }
 
+async function apiError(res, fallback) {
+  try { const j = await res.json(); return j.error || fallback; } catch { return fallback; }
+}
+
 async function toggleEntry(id, enabled) {
-  await fetch('/api/entries/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled}) });
+  const r = await fetch('/api/entries/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled}) });
+  if (!r.ok) toast(await apiError(r, 'Update failed'), false);
   loadEntries();
 }
 
 async function deleteEntry(id) {
   const e = _entries.find(x => x.id === id);
   if (!confirm(`Delete "${e?.name}"?`)) return;
-  await fetch('/api/entries/' + id, { method: 'DELETE' });
-  toast('Entry deleted'); loadEntries();
-}
-
-async function moveEntry(id, dir) {
-  const idx = _entries.findIndex(e => e.id === id);
-  const newIdx = idx + dir;
-  if (newIdx < 0 || newIdx >= _entries.length) return;
-  const arr = [..._entries];
-  [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
-  await fetch('/api/entries/reorder', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({order: arr.map(e => e.id)}) });
+  const r = await fetch('/api/entries/' + id, { method: 'DELETE' });
+  if (r.ok) toast('Entry deleted'); else toast(await apiError(r, 'Delete failed'), false);
   loadEntries();
 }
 
+let _moving = false;
+async function moveEntry(id, dir) {
+  if (_moving) return;
+  const idx = _entries.findIndex(e => e.id === id);
+  const newIdx = idx + dir;
+  if (newIdx < 0 || newIdx >= _entries.length) return;
+  _moving = true;
+  try {
+    const arr = [..._entries];
+    [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+    const r = await fetch('/api/entries/reorder', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({order: arr.map(e => e.id)}) });
+    if (!r.ok) toast(await apiError(r, 'Reorder failed'), false);
+    await loadEntries();
+  } finally {
+    _moving = false;
+  }
+}
+
 // ── modal ──────────────────────────────────────────────────────────────────
+function setFileSelect(id, val) {
+  // keep a stored filename visible (marked missing) instead of blanking it
+  const sel = document.getElementById(id);
+  if (val && ![...sel.options].some(o => o.value === val)) {
+    const o = document.createElement('option');
+    o.value = val; o.textContent = val + ' (missing file)';
+    sel.appendChild(o);
+  }
+  sel.value = val || '';
+}
+
 function openModal(id) {
   populateFileSelects();
   const e = id ? _entries.find(x => x.id === id) : null;
@@ -452,10 +486,10 @@ function openModal(id) {
   document.getElementById('editId').value = id || '';
   document.getElementById('entryName').value = e?.name || '';
   document.getElementById('entryType').value = e?.type || 'kernel';
-  document.getElementById('kernelFile').value = e?.kernel || '';
-  document.getElementById('initrdFile').value  = e?.initrd  || '';
+  setFileSelect('kernelFile', e?.kernel || '');
+  setFileSelect('initrdFile', e?.initrd || '');
   document.getElementById('cmdline').value     = e?.cmdline || '';
-  document.getElementById('isoFile').value     = e?.iso     || '';
+  setFileSelect('isoFile', e?.iso || '');
   document.getElementById('chainUrl').value    = e?.url     || '';
   switchType();
   document.getElementById('modal').classList.add('open');
@@ -489,15 +523,16 @@ async function saveEntry() {
     body.url = document.getElementById('chainUrl').value.trim();
     if (!body.url) { toast('Enter a chainload URL', false); return; }
   }
+  let r;
   if (id) {
     const e = _entries.find(x => x.id === id);
     body.enabled = e?.enabled ?? true;
-    await fetch('/api/entries/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast('Entry updated');
+    r = await fetch('/api/entries/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   } else {
-    await fetch('/api/entries', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    toast('Entry added');
+    r = await fetch('/api/entries', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
   }
+  if (!r.ok) { toast(await apiError(r, 'Save failed'), false); return; }
+  toast(id ? 'Entry updated' : 'Entry added');
   closeModal(); loadEntries();
 }
 
@@ -519,6 +554,7 @@ document.getElementById('modal').addEventListener('click', e => { if (e.target =
 document.getElementById('entryName').addEventListener('keydown', e => { if (e.key === 'Enter') saveEntry(); });
 
 // init
+document.getElementById('menuUrl').textContent = location.origin + '/menu.ipxe';
 loadFiles(); loadEntries();
 </script>
 </body>

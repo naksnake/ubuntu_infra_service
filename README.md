@@ -12,6 +12,7 @@ Run `./deploy.sh` once — DHCP, TFTP, NAT, a file server, and Ansible AWX all s
 | DHCP + PXE | `lab_dhcp` | Assigns IPs to lab clients, serves iPXE bootloaders |
 | TFTP | `lab_tftp` | Delivers bootloader files to PXE clients |
 | File server | `lab_webfs` | HTTP share for ISO images, kernels, initrds |
+| iPXE Manager | `lab_ipxe_manager` | Web UI: upload boot files, edit the PXE boot menu |
 | Ansible AWX | `lab_awx_web` + `lab_awx_task` | Web UI for running Ansible playbooks |
 | AWX database | `lab_awx_postgres` | PostgreSQL for AWX |
 | AWX cache | `lab_awx_redis` | Redis for AWX |
@@ -108,6 +109,7 @@ DNS_SERVER=8.8.8.8
 
 # ---- Ports ----
 WEBFS_PORT=8080
+IPXE_MANAGER_PORT=8091
 AWX_HTTP_PORT=8052
 MONITOR_PORT=8090
 
@@ -156,9 +158,10 @@ The wizard will ask you to confirm each setting, then it will:
 ```bash
 docker ps
 ```
-Expected output — all six containers should show `Up`:
+Expected output — all nine containers should show `Up`:
 ```
 CONTAINER ID   IMAGE                          STATUS
+...            lab_ipxe_manager               Up X minutes (healthy)   lab_ipxe_manager
 ...            lab_monitor                    Up X minutes (healthy)   lab_monitor
 ...            ghcr.io/ansible/awx:23.9.0    Up X minutes (healthy)   lab_awx_web
 ...            ghcr.io/ansible/awx:23.9.0    Up X minutes             lab_awx_task
@@ -202,6 +205,15 @@ curl -fsS "http://192.168.100.1:8080/files/"
 # Should return an HTML directory listing (empty until you copy files in)
 ```
 
+### Verify the iPXE Manager
+Open a browser and go to:
+```
+http://192.168.100.1:8091/
+```
+You should see the Files / Boot Menu / iPXE Preview tabs. PXE clients fetch
+their boot menu from `http://192.168.100.1:8091/menu.ipxe` — see
+[Adding boot images](#adding-boot-images-ipxe-manager) below.
+
 ### Verify the monitor dashboard
 Open a browser and go to:
 ```
@@ -229,23 +241,33 @@ docker logs -f lab_awx_web
 
 ---
 
-## Adding boot assets
+## Adding boot images (iPXE Manager)
 
-For PXE clients to boot a Linux system, copy the kernel and initrd into the webfs linux directory:
-
-```bash
-# Example: Ubuntu 24.04 live server
-cp /path/to/ubuntu-server.iso   ./data/webfs_share/
-cp /path/to/vmlinuz             ./services/webfs/htdocs/linux/
-cp /path/to/initrd              ./services/webfs/htdocs/linux/
+Open the iPXE Manager in a browser:
+```
+http://192.168.100.1:8091/
 ```
 
-Clients can then reach them at:
-- `http://192.168.100.1:8080/linux/vmlinuz`
-- `http://192.168.100.1:8080/linux/initrd`
-- `http://192.168.100.1:8080/files/ubuntu-server.iso`
+**To make a new OS bootable over the network:**
 
-Adjust kernel parameters in `ipxe/linux-kernel-initrd.ipxe` to match your OS.
+1. **Files tab** — upload your ISO, kernel (`vmlinuz`), or initrd
+   (drag & drop or click to browse; files are stored in `data/webfs_share/`).
+2. **Boot Menu tab** — click **+ Add Entry**, give it a name, pick the boot type:
+   - **Kernel + initrd** — works for BIOS and UEFI clients (recommended)
+   - **ISO sanboot** — BIOS clients only
+   - **Chainload URL** — point at another `.ipxe` script
+3. Select the uploaded file(s), add kernel parameters if needed, save.
+
+The next PXE boot immediately shows the new entry — no container restart
+needed. You can rename, reorder (▲▼), enable/disable, or delete entries at
+any time; the **iPXE Preview** tab shows the exact script clients receive.
+The top enabled entry boots automatically after 30 seconds.
+
+> You can also copy files straight into `data/webfs_share/` from the shell —
+> they appear in the manager's file list and dropdowns automatically.
+
+To password-protect the manager, set `IPXE_MANAGER_PASSWORD` in `.env`
+(PXE clients can always fetch `/menu.ipxe` without a password).
 
 ---
 
@@ -352,9 +374,10 @@ ubuntu_infra_service/
 │   └── menu.ipxe                # Interactive boot menu
 │
 ├── services/
-│   ├── dhcp/                    # dnsmasq DHCP+TFTP container
+│   ├── dhcp/                    # dnsmasq DHCP container (PXE pointers, no TFTP)
 │   ├── tftp/                    # tftpd-hpa bootloader delivery container
 │   ├── webfs/                   # HTTP file server container
+│   ├── ipxe_manager/            # Web UI: file uploads + PXE boot menu editor
 │   ├── monitor/                 # Flask dashboard (service health + DHCP leases)
 │   └── awx/
 │       ├── credentials.py.template   # AWX DB+Redis config (rendered by deploy.sh)
@@ -363,7 +386,8 @@ ubuntu_infra_service/
 └── data/                        # Runtime data — back this up
     ├── awx_postgres/            # AWX database files
     ├── awx_projects/            # Ansible playbook directories (mount into AWX)
-    ├── webfs_share/             # ISO images and other large files
+    ├── webfs_share/             # Uploaded ISOs, kernels, initrds (served at /files/)
+    ├── ipxe_manager/            # Boot menu entries (entries.json)
     └── dnsmasq.leases           # Live DHCP lease database (read by monitor)
 ```
 

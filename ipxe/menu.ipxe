@@ -1,21 +1,23 @@
-
 #!ipxe
-set base http://${WEBFS_HOST_IP}:${WEBFS_PORT}
-menu Linux Boot Menu
+# Static fallback menu — the live menu is served by the iPXE Manager.
+# Assumes webfs runs on port 8080 at the DHCP/TFTP server address.
+set base http://${next-server}:8080
+menu Lab Boot Menu (static fallback)
 item kinitrd   Boot Linux (kernel + initrd)
 item iso       Boot ISO via sanboot (BIOS)
 item shell     iPXE shell
-choose target && goto ${target}
+choose target && goto ${target} || goto shell
 
 :kinitrd
 chain ${base}/ipxe/linux-kernel-initrd.ipxe || goto failed
+goto shell
 
 :iso
 chain ${base}/ipxe/boot-iso.ipxe || goto failed
-
-:shell
-shell
+goto shell
 
 :failed
-echo Failed. Returning to shell.
+echo Chain failed.
+
+:shell
 shell

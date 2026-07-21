@@ -6,9 +6,10 @@ RUN apt-get update && \
 
 RUN mkdir -p /var/www/htdocs && chown -R www-data:www-data /var/www/htdocs
 
-COPY webfs.conf /etc/webfsd.conf
 COPY htdocs/index.html /var/www/htdocs/index.html
 
 EXPOSE 8080
 
-CMD ["webfsd", "-F", "-b", "0.0.0.0", "-p", "8080", "-r", "/var/www/htdocs", "-c", "/etc/webfsd.conf"]
+# webfsd flags: -b is basic-auth (user:pass) and -c is max-connections —
+# neither is a bind address nor a config file. Binds all interfaces by default.
+CMD ["webfsd", "-F", "-p", "8080", "-r", "/var/www/htdocs", "-f", "index.html"]
