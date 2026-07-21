@@ -253,16 +253,39 @@ http://192.168.100.1:8091/
 1. **Files tab** — upload your ISO, kernel (`vmlinuz`), or initrd
    (drag & drop or click to browse; files are stored in `data/webfs_share/`).
 2. **Boot Menu tab** — click **+ Add Entry**, give it a name, pick the boot type:
-   - **Kernel + initrd** — works for BIOS and UEFI clients (recommended)
-   - **ISO sanboot** — BIOS clients only
+   - **Kernel + initrd** — fetched over HTTP; works on **BIOS and UEFI**
+     (this is the modern, recommended path)
+   - **ISO sanboot** — **BIOS firmware only** (UEFI cannot sanboot an ISO)
    - **Chainload URL** — point at another `.ipxe` script
-3. Select the uploaded file(s), add kernel parameters if needed, save.
+3. In each file field the base URL (`http://<server>:8080/files/`) is fixed —
+   you type or pick **only the filename**. A live preview under the form shows
+   both the full URL and the exact iPXE lines the entry will generate.
 
-> **ISO shortcut:** uploading a `.iso` automatically creates a matching
-> **sanboot** entry — created **disabled** so it never changes the live menu
-> until you review it. Just flip its toggle on (and rename it) in the Boot
-> Menu tab. Kernels are not auto-added because they need a matching initrd
-> and kernel command line, so add those manually.
+### UEFI network install from an ISO or rootfs over HTTP
+
+Because UEFI can't sanboot an ISO, boot the installer's **kernel + initrd**
+and hand the OS the HTTP URL of the ISO/rootfs on the kernel command line —
+the exact parameter depends on the distro. The editor lists every uploaded
+file's URL with a copy button so you can paste the right one in. Examples:
+
+```
+# Ubuntu autoinstall (casper fetches the squashfs/ISO over HTTP)
+ip=dhcp url=http://192.168.100.1:8080/files/ubuntu-24.04-live-server-amd64.iso autoinstall
+
+# Debian/Ubuntu with a squashfs rootfs
+boot=live fetch=http://192.168.100.1:8080/files/filesystem.squashfs ip=dhcp
+```
+
+> **ISO shortcut:** uploading a `.iso` still auto-creates a **disabled**
+> sanboot entry (handy for BIOS clients or quick tests). For UEFI, use the
+> Kernel + initrd type as above. Kernels are never auto-added because they
+> need a matching initrd and command line.
+
+### Boot order
+
+The order in the Boot Menu tab is the order clients see, and the top enabled
+entry (badged **default**) boots automatically after a 30-second timeout.
+Use the ▲▼ arrows to change it; disabled entries are hidden from clients.
 
 The next PXE boot immediately shows the new entry — no container restart
 needed. You can rename, reorder (▲▼), enable/disable, or delete entries at

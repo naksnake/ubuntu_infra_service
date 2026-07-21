@@ -126,6 +126,28 @@ def list_files():
 
 # ── iPXE menu generator ───────────────────────────────────────────────────────
 
+def entry_body_lines(e):
+    """The iPXE commands that boot a single entry (no label, no trailing goto).
+    Kernel+initrd over HTTP is the UEFI-friendly path; sanboot is BIOS-only."""
+    t = e.get('type', 'kernel')
+    lines = []
+    if t == 'kernel':
+        kernel  = e.get('kernel', '')
+        initrd  = e.get('initrd', '')
+        cmdline = e.get('cmdline', '')
+        # args go on the kernel line so no imgargs name-matching is needed.
+        # every fetch needs '|| goto failed' — iPXE aborts the whole script
+        # on the first unhandled command failure (e.g. a deleted file 404s)
+        lines.append(f'kernel {file_url(kernel)}' + (f' {cmdline}' if cmdline else '') + ' || goto failed')
+        if initrd:
+            lines.append(f'initrd {file_url(initrd)} || goto failed')
+        lines.append('boot || goto failed')
+    elif t == 'iso':
+        lines.append(f'sanboot {file_url(e.get("iso", ""))} || goto failed')
+    elif t == 'chain':
+        lines.append(f'chain {e.get("url", "")} || goto failed')
+    return lines
+
 def generate_menu(entries):
     enabled = [e for e in entries if e.get('enabled', True)]
     default = enabled[0]['id'] if enabled else 'shell'
@@ -147,22 +169,7 @@ def generate_menu(entries):
 
     for e in enabled:
         lines.append(f'\n:{e["id"]}')
-        t = e.get('type', 'kernel')
-        if t == 'kernel':
-            kernel  = e.get('kernel', '')
-            initrd  = e.get('initrd', '')
-            cmdline = e.get('cmdline', '')
-            # args go on the kernel line so no imgargs name-matching is needed.
-            # every fetch needs '|| goto failed' — iPXE aborts the whole script
-            # on the first unhandled command failure (e.g. a deleted file 404s)
-            lines.append(f'kernel {file_url(kernel)}' + (f' {cmdline}' if cmdline else '') + ' || goto failed')
-            if initrd:
-                lines.append(f'initrd {file_url(initrd)} || goto failed')
-            lines.append('boot || goto failed')
-        elif t == 'iso':
-            lines.append(f'sanboot {file_url(e.get("iso", ""))} || goto failed')
-        elif t == 'chain':
-            lines.append(f'chain {e.get("url", "")} || goto failed')
+        lines += entry_body_lines(e)
         # a returned/failed boot must not fall through into the next section
         lines.append('goto start')
 
@@ -193,6 +200,24 @@ def menu_ipxe():
 @app.route('/api/preview', methods=['GET'])
 def api_preview():
     return Response(generate_menu(load_entries()), mimetype='text/plain')
+
+@app.route('/api/config', methods=['GET'])
+def api_config():
+    # lets the UI show the fixed base URL as a locked prefix so the operator
+    # only ever edits the filename, never the path
+    return jsonify({'webfs_base': WEBFS_BASE, 'files_base': f'{WEBFS_BASE}/files/',
+                    'server_ip': SERVER_IP})
+
+@app.route('/api/preview_entry', methods=['POST'])
+def api_preview_entry():
+    # authoritative single-entry preview: same sanitize + generator the real
+    # menu uses, so the editor shows exactly what a client will receive
+    fields, err = sanitize_fields(request.get_json(force=True) or {})
+    if err:
+        return jsonify({'error': err, 'lines': []}), 200
+    entry = {'id': 'e' + ('0' * 7), 'type': 'kernel', 'enabled': True}
+    entry.update(fields)
+    return jsonify({'lines': entry_body_lines(entry), 'error': None})
 
 # files
 

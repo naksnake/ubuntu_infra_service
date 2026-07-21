@@ -82,6 +82,7 @@ header span { color: var(--muted); font-size: 12px; }
 .badge-kernel { background: rgba(63,185,80,.15); color: var(--green); }
 .badge-iso    { background: rgba(210,153,34,.15); color: var(--amber); }
 .badge-chain  { background: rgba(79,195,247,.15); color: var(--accent); }
+.badge-default { background: rgba(79,195,247,.2); color: var(--accent); margin-left: 6px; }
 .badge-off    { background: #21262d; color: var(--muted); }
 
 /* ── toggle ── */
@@ -116,6 +117,19 @@ header span { color: var(--muted); font-size: 12px; }
 .type-section { display: none; }
 .type-section.active { display: flex; flex-direction: column; gap: 14px; }
 .hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* locked base-URL prefix + editable filename */
+.url-field { display: flex; align-items: stretch; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: #0d1117; }
+.url-field:focus-within { border-color: var(--accent); }
+.url-prefix { display: flex; align-items: center; padding: 7px 8px; background: #010409; color: var(--muted); font-family: var(--mono); font-size: 11px; white-space: nowrap; border-right: 1px solid var(--border); user-select: all; }
+.url-field input { flex: 1; border: none; background: transparent; color: var(--text); font-family: var(--mono); font-size: 12px; padding: 7px 10px; outline: none; min-width: 0; }
+.uefi-note { font-size: 12px; color: var(--green); background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.25); border-radius: var(--radius); padding: 8px 10px; }
+.uefi-note.warn { color: var(--amber); background: rgba(210,153,34,.08); border-color: rgba(210,153,34,.3); }
+.source-list { display: flex; flex-direction: column; gap: 4px; max-height: 120px; overflow-y: auto; }
+.source-list .src { display: flex; align-items: center; gap: 8px; padding: 5px 8px; background: #0d1117; border: 1px solid var(--border); border-radius: 4px; font-family: var(--mono); font-size: 11px; cursor: pointer; }
+.source-list .src:hover { border-color: var(--accent); }
+.source-list .src .u { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.snippet { max-height: 150px; }
 
 /* ── empty states ── */
 .empty { text-align: center; padding: 32px; color: var(--muted); font-size: 13px; }
@@ -188,7 +202,8 @@ header span { color: var(--muted); font-size: 12px; }
       </div>
     </div>
     <p style="color:var(--muted);font-size:11px;padding:0 2px">
-      Use &#8679;&#8681; to reorder. Order here is the order shown in the PXE menu. The top enabled entry is the default.
+      Use &#8679;&#8681; to set the <strong>boot order</strong> — this is the order shown in the PXE menu, and the
+      top enabled entry (marked <span class="badge badge-default">default</span>) boots automatically after the 30&nbsp;s timeout.
     </p>
   </div>
 
@@ -228,29 +243,46 @@ header span { color: var(--muted); font-size: 12px; }
         </select>
       </div>
 
+      <datalist id="uploadedFiles"></datalist>
+
       <!-- kernel type -->
       <div class="type-section active" id="type-kernel">
+        <p class="uefi-note">&#9989; Recommended for UEFI. The kernel and initrd are fetched over HTTP — works on BIOS and UEFI.</p>
         <div class="field">
           <label>Kernel file</label>
-          <select id="kernelFile"><option value="">— select uploaded file —</option></select>
-          <span class="hint">vmlinuz or similar</span>
+          <div class="url-field">
+            <span class="url-prefix" data-prefix></span>
+            <input type="text" id="kernelFile" list="uploadedFiles" placeholder="vmlinuz" oninput="onFieldChange()">
+          </div>
+          <span class="hint">Pick an uploaded file or type a filename — the path stays fixed, you change only the name.</span>
         </div>
         <div class="field">
           <label>initrd file (optional)</label>
-          <select id="initrdFile"><option value="">— none —</option></select>
+          <div class="url-field">
+            <span class="url-prefix" data-prefix></span>
+            <input type="text" id="initrdFile" list="uploadedFiles" placeholder="initrd.img" oninput="onFieldChange()">
+          </div>
         </div>
         <div class="field">
           <label>Kernel command line</label>
-          <textarea id="cmdline" placeholder="root=/dev/ram0 ip=dhcp quiet splash"></textarea>
+          <textarea id="cmdline" placeholder="ip=dhcp url=http://SERVER:8080/files/your.iso autoinstall" oninput="onFieldChange()"></textarea>
+          <span class="hint">For an HTTP ISO/rootfs install, reference its URL here (copy one from the list below).</span>
+        </div>
+        <div class="field" id="httpSources">
+          <label>HTTP sources on the file server (click to copy the URL)</label>
+          <div id="sourceList" class="source-list"></div>
         </div>
       </div>
 
       <!-- iso type -->
       <div class="type-section" id="type-iso">
+        <p class="uefi-note warn">&#9888;&#65039; <strong>sanboot works on BIOS firmware only.</strong> UEFI machines cannot sanboot an ISO — use the Kernel + initrd type and pass the ISO URL on the command line.</p>
         <div class="field">
           <label>ISO file</label>
-          <select id="isoFile"><option value="">— select uploaded file —</option></select>
-          <span class="hint">Requires BIOS-mode client. Uses sanboot.</span>
+          <div class="url-field">
+            <span class="url-prefix" data-prefix></span>
+            <input type="text" id="isoFile" list="uploadedFiles" placeholder="rescue.iso" oninput="onFieldChange()">
+          </div>
         </div>
       </div>
 
@@ -258,9 +290,14 @@ header span { color: var(--muted); font-size: 12px; }
       <div class="type-section" id="type-chain">
         <div class="field">
           <label>Chainload URL</label>
-          <input type="text" id="chainUrl" placeholder="http://192.168.100.1:8080/ipxe/menu.ipxe">
+          <input type="text" id="chainUrl" placeholder="http://SERVER:8080/ipxe/menu.ipxe" oninput="onFieldChange()">
           <span class="hint">Full URL to another .ipxe script</span>
         </div>
+      </div>
+
+      <div class="field">
+        <label>This entry generates (live preview)</label>
+        <pre class="ipxe-preview snippet" id="entrySnippet"># fill in the fields above</pre>
       </div>
     </div>
     <div class="modal-foot">
@@ -302,7 +339,8 @@ async function loadFiles() {
   const r = await fetch('/api/files');
   _files = await r.json();
   renderFiles();
-  populateFileSelects();
+  populateFileDatalist();
+  renderSourceList();
 }
 
 function fmtSize(b) {
@@ -335,23 +373,21 @@ function renderFiles() {
     </div>`).join('');
 }
 
-function populateFileSelects() {
-  const names = _files.map(f => f.name);
-  function fill(id, blank) {
-    const sel = document.getElementById(id);
-    const cur = sel.value;
-    let html = `<option value="">${blank}</option>` +
-      names.map(n => `<option value="${n}"${n === cur ? ' selected' : ''}>${n}</option>`).join('');
-    // keep a selected-but-missing file visible instead of silently clearing it
-    // (e.g. a background upload refresh while the edit modal is open)
-    if (cur && !names.includes(cur)) {
-      html += `<option value="${cur}" selected>${cur} (missing file)</option>`;
-    }
-    sel.innerHTML = html;
-  }
-  fill('kernelFile', '— select uploaded file —');
-  fill('initrdFile', '— none —');
-  fill('isoFile',    '— select uploaded file —');
+function populateFileDatalist() {
+  // one shared suggestion list; the filename inputs stay free-text so a
+  // not-yet-uploaded name is never silently cleared
+  document.getElementById('uploadedFiles').innerHTML =
+    _files.map(f => `<option value="${escHtml(f.name)}"></option>`).join('');
+}
+
+function renderSourceList() {
+  const el = document.getElementById('sourceList');
+  if (!el) return;
+  if (!_files.length) { el.innerHTML = '<span class="hint">Upload files first — their URLs will appear here.</span>'; return; }
+  el.innerHTML = _files.map(f => `
+    <div class="src" onclick="copyText('${escHtml(f.url)}')" title="Copy URL">
+      <span>📋</span><span class="u">${escHtml(f.url)}</span>
+    </div>`).join('');
 }
 
 function uploadOne(file) {
@@ -427,8 +463,11 @@ function entryMeta(e) {
   return e.url || '';
 }
 
+let _defaultId = null;
 function renderEntries() {
   const el = document.getElementById('entryList');
+  // the top enabled entry is what auto-boots after the menu timeout
+  _defaultId = (_entries.find(e => e.enabled) || {}).id || null;
   if (!_entries.length) { el.innerHTML = '<div class="empty"><span class="icon">🔌</span>No boot entries. Add one to build your PXE menu.</div>'; return; }
   el.innerHTML = _entries.map((e, i) => `
     <div class="entry-card${e.enabled ? '' : ' disabled'}" id="ecard-${e.id}">
@@ -437,7 +476,7 @@ function renderEntries() {
         <button class="order-btn" onclick="moveEntry('${e.id}',1)"  title="Move down">&#9660;</button>
       </div>
       <div class="entry-info">
-        <div class="entry-name">${escHtml(e.name)}</div>
+        <div class="entry-name">${escHtml(e.name)}${e.id === _defaultId ? ' <span class="badge badge-default" title="Boots automatically after the timeout">default</span>' : ''}</div>
         <div class="entry-meta">${escHtml(entryMeta(e))}</div>
       </div>
       ${typeBadge(e.type)}
@@ -487,29 +526,51 @@ async function moveEntry(id, dir) {
 }
 
 // ── modal ──────────────────────────────────────────────────────────────────
-function setFileSelect(id, val) {
-  // keep a stored filename visible (marked missing) instead of blanking it
-  const sel = document.getElementById(id);
-  if (val && ![...sel.options].some(o => o.value === val)) {
-    const o = document.createElement('option');
-    o.value = val; o.textContent = val + ' (missing file)';
-    sel.appendChild(o);
+function currentFormEntry() {
+  const type = document.getElementById('entryType').value;
+  const body = { name: document.getElementById('entryName').value.trim(), type };
+  if (type === 'kernel') {
+    body.kernel  = document.getElementById('kernelFile').value.trim();
+    body.initrd  = document.getElementById('initrdFile').value.trim();
+    body.cmdline = document.getElementById('cmdline').value.trim();
+  } else if (type === 'iso') {
+    body.iso = document.getElementById('isoFile').value.trim();
+  } else {
+    body.url = document.getElementById('chainUrl').value.trim();
   }
-  sel.value = val || '';
+  return body;
+}
+
+let _snipTimer;
+function onFieldChange() {
+  clearTimeout(_snipTimer);
+  _snipTimer = setTimeout(renderSnippet, 200);
+}
+
+async function renderSnippet() {
+  const box = document.getElementById('entrySnippet');
+  const body = currentFormEntry();
+  const ready = (body.type === 'kernel' && body.kernel) ||
+                (body.type === 'iso' && body.iso) ||
+                (body.type === 'chain' && body.url);
+  if (!ready) { box.textContent = '# fill in the fields above'; return; }
+  const r = await fetch('/api/preview_entry', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const j = await r.json();
+  box.textContent = j.error ? '# ' + j.error
+                            : `:${body.name || 'entry'}\n` + (j.lines || []).join('\n') + '\ngoto start';
 }
 
 function openModal(id) {
-  populateFileSelects();
   const e = id ? _entries.find(x => x.id === id) : null;
   document.getElementById('modalTitle').textContent = e ? 'Edit Boot Entry' : 'Add Boot Entry';
   document.getElementById('editId').value = id || '';
   document.getElementById('entryName').value = e?.name || '';
   document.getElementById('entryType').value = e?.type || 'kernel';
-  setFileSelect('kernelFile', e?.kernel || '');
-  setFileSelect('initrdFile', e?.initrd || '');
-  document.getElementById('cmdline').value     = e?.cmdline || '';
-  setFileSelect('isoFile', e?.iso || '');
-  document.getElementById('chainUrl').value    = e?.url     || '';
+  document.getElementById('kernelFile').value  = e?.kernel  || '';
+  document.getElementById('initrdFile').value  = e?.initrd  || '';
+  document.getElementById('cmdline').value      = e?.cmdline || '';
+  document.getElementById('isoFile').value      = e?.iso     || '';
+  document.getElementById('chainUrl').value     = e?.url     || '';
   switchType();
   document.getElementById('modal').classList.add('open');
   document.getElementById('entryName').focus();
@@ -522,26 +583,17 @@ function switchType() {
   ['kernel','iso','chain'].forEach(k => {
     document.getElementById('type-' + k).classList.toggle('active', k === t);
   });
+  renderSnippet();
 }
 
 async function saveEntry() {
   const id   = document.getElementById('editId').value;
-  const name = document.getElementById('entryName').value.trim();
-  const type = document.getElementById('entryType').value;
-  if (!name) { toast('Name is required', false); return; }
-  const body = { name, type, enabled: true };
-  if (type === 'kernel') {
-    body.kernel  = document.getElementById('kernelFile').value;
-    body.initrd  = document.getElementById('initrdFile').value;
-    body.cmdline = document.getElementById('cmdline').value.trim();
-    if (!body.kernel) { toast('Select a kernel file', false); return; }
-  } else if (type === 'iso') {
-    body.iso = document.getElementById('isoFile').value;
-    if (!body.iso) { toast('Select an ISO file', false); return; }
-  } else {
-    body.url = document.getElementById('chainUrl').value.trim();
-    if (!body.url) { toast('Enter a chainload URL', false); return; }
-  }
+  const body = currentFormEntry();
+  if (!body.name) { toast('Name is required', false); return; }
+  body.enabled = true;
+  if (body.type === 'kernel' && !body.kernel) { toast('Enter a kernel filename', false); return; }
+  if (body.type === 'iso' && !body.iso)       { toast('Enter an ISO filename', false); return; }
+  if (body.type === 'chain' && !body.url)     { toast('Enter a chainload URL', false); return; }
   let r;
   if (id) {
     const e = _entries.find(x => x.id === id);
@@ -574,6 +626,11 @@ document.getElementById('entryName').addEventListener('keydown', e => { if (e.ke
 
 // init
 document.getElementById('menuUrl').textContent = location.origin + '/menu.ipxe';
+let FILES_BASE = '/files/';
+fetch('/api/config').then(r => r.json()).then(cfg => {
+  FILES_BASE = cfg.files_base;
+  document.querySelectorAll('[data-prefix]').forEach(el => { el.textContent = FILES_BASE; });
+});
 loadFiles(); loadEntries();
 </script>
 </body>
