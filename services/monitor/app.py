@@ -8,6 +8,12 @@ app = Flask(__name__)
 
 LEASES_FILE      = os.environ.get('LEASES_FILE', '/data/dnsmasq.leases')
 REFRESH_INTERVAL = int(os.environ.get('REFRESH_INTERVAL', '30'))
+# ports for the dashboard quick-links (the browser fills in the host)
+LINKS = [
+    {'label': 'iPXE Manager', 'port': os.environ.get('IPXE_MANAGER_PORT', '8091'), 'icon': '☁'},
+    {'label': 'File server',  'port': os.environ.get('WEBFS_PORT', '8080'),         'icon': '\U0001F4C1', 'path': 'files/'},
+    {'label': 'AWX',          'port': os.environ.get('AWX_HTTP_PORT', '8052'),      'icon': '⚙'},
+]
 
 
 def _uptime_str(started_at: str) -> str:
@@ -107,6 +113,7 @@ def index():
         l_err=l_err,
         now=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         refresh=REFRESH_INTERVAL,
+        links=LINKS,
     )
 
 

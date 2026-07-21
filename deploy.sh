@@ -180,9 +180,6 @@ AWX_ADMIN_USER=${AWX_ADMIN_USER}
 AWX_ADMIN_PASSWORD="${AWX_ADMIN_PASSWORD}"
 AWX_DB_PASSWORD="${AWX_DB_PASSWORD}"
 AWX_SECRET_KEY="${AWX_SECRET_KEY}"
-
-# Optional: ISO name for BIOS-only sanboot (Linux Live ISO)
-ISO_FILE=${ISO_FILE}
 EOF
   log "Wrote .env"
 }
@@ -248,8 +245,6 @@ env_wizard() {
     AWX_SECRET_KEY="$(gen_secret)"
     log "Generated AWX_SECRET_KEY."
   fi
-
-  ISO_FILE="$(prompt "ISO_FILE (optional BIOS sanboot)" "${ISO_FILE:-example.iso}")"
 
   write_env
   load_env

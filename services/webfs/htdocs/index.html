@@ -1,20 +1,37 @@
-
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>SIT Webfs (Linux-only)</title>
-  <style>body{font-family:system-ui,Segoe UI,Helvetica,Arial,sans-serif;max-width:900px;margin:40px auto;padding:0 16px}code{background:#f5f5f5;padding:2px 6px;border-radius:4px}</style>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Lab File Server</title>
+  <style>
+    body { font-family: system-ui, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 16px; color: #1f2328; }
+    h1 { font-size: 1.5rem; }
+    code { background: #f0f3f6; padding: 2px 6px; border-radius: 4px; font-size: .9em; }
+    a { color: #0969da; }
+    .note { background: #f0f6fc; border: 1px solid #d0e2f2; border-radius: 6px; padding: 12px 14px; font-size: .92rem; }
+    ul { line-height: 1.8; }
+  </style>
 </head>
 <body>
-  <h1>SIT Webfs (Linux-only)</h1>
-  <p>Fixed download path: <a href="/files/">/files/</a> (host: <code>./data/webfs_share</code>)</p>
-  <h2>iPXE scripts</h2>
+  <h1>Lab File Server</h1>
+  <p>HTTP share for PXE boot assets — ISO images, kernels, initrds and root filesystems.</p>
+
+  <p>Download path: <a href="/files/">/files/</a> &nbsp;(host directory: <code>./data/webfs_share</code>)</p>
+
+  <div class="note">
+    <strong>Boot menus are managed by the iPXE Manager</strong>, not from this page.
+    Upload files and build boot entries there — the live menu is served at
+    <code>http://&lt;this-host&gt;:8091/menu.ipxe</code>, and PXE clients are pointed
+    at it automatically by DHCP.
+  </div>
+
+  <h2>Static iPXE scripts (manual fallback)</h2>
   <ul>
-    <li><a href="/ipxe/default.ipxe">/ipxe/default.ipxe</a></li>
-    <li><a href="/ipxe/linux-kernel-initrd.ipxe">/ipxe/linux-kernel-initrd.ipxe</a></li>
-    <li><a href="/ipxe/boot-iso.ipxe">/ipxe/boot-iso.ipxe</a></li>
-    <li><a href="/ipxe/menu.ipxe">/ipxe/menu.ipxe</a></li>
+    <li><a href="/ipxe/default.ipxe">/ipxe/default.ipxe</a> — chains to the iPXE Manager menu</li>
+    <li><a href="/ipxe/menu.ipxe">/ipxe/menu.ipxe</a> — static fallback menu</li>
+    <li><a href="/ipxe/linux-kernel-initrd.ipxe">/ipxe/linux-kernel-initrd.ipxe</a> — kernel + initrd over HTTP (UEFI-friendly)</li>
+    <li><a href="/ipxe/boot-iso.ipxe">/ipxe/boot-iso.ipxe</a> — ISO sanboot (BIOS only)</li>
   </ul>
 </body>
 </html>

@@ -48,7 +48,6 @@ services:
       - WEBFS_PORT=${WEBFS_PORT:-8080}
       - TFTP_SERVER_IP=${TFTP_SERVER_IP}
       - IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT:-8091}
-      - ISO_FILE=${ISO_FILE:-}
     volumes:
       - ./services/dhcp/dnsmasq.conf.template:/etc/dnsmasq.conf.template:ro
       - ./data/dnsmasq.leases:/data/dnsmasq.leases:rw
@@ -100,6 +99,10 @@ services:
     environment:
       - LEASES_FILE=/data/dnsmasq.leases
       - REFRESH_INTERVAL=${MONITOR_REFRESH:-30}
+      # ports for the dashboard quick-links (host-relative in the browser)
+      - WEBFS_PORT=${WEBFS_PORT:-8080}
+      - IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT:-8091}
+      - AWX_HTTP_PORT=${AWX_HTTP_PORT:-8052}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/status')\""]
       interval: 30s
