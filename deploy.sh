@@ -109,6 +109,10 @@ ensure_dirs() {
   mkdir -p services/awx
   # dnsmasq writes leases here; must exist as a file before Docker bind-mounts it
   touch data/dnsmasq.leases
+  # iPXE Manager boot entries; must exist as a file before Docker bind-mounts it
+  if [ ! -s data/ipxe_entries.json ]; then
+    echo '[]' > data/ipxe_entries.json
+  fi
 }
 
 ensure_docker() {
@@ -471,9 +475,10 @@ main() {
 
   echo
   log "DONE."
-  echo "Webfs:   http://${WEBFS_HOST_IP:-<WEBFS_HOST_IP>}:${WEBFS_PORT:-8080}/"
-  echo "Monitor: http://<host-ip>:${MONITOR_PORT:-8090}/   (service health + DHCP leases)"
-  echo "AWX:     http://<host-ip>:${AWX_HTTP_PORT:-8052}/   (admin: ${AWX_ADMIN_USER:-admin})"
+  echo "Webfs:        http://${WEBFS_HOST_IP:-<host>}:${WEBFS_PORT:-8080}/"
+  echo "iPXE Manager: http://${WEBFS_HOST_IP:-<host>}:${IPXE_MANAGER_PORT:-8091}/   (upload files, manage boot menu)"
+  echo "Monitor:      http://${WEBFS_HOST_IP:-<host>}:${MONITOR_PORT:-8090}/   (service health + DHCP leases)"
+  echo "AWX:          http://${WEBFS_HOST_IP:-<host>}:${AWX_HTTP_PORT:-8052}/   (admin: ${AWX_ADMIN_USER:-admin})"
   echo
   warn "AWX first boot runs DB migrations — allow ~2 minutes before the UI is ready."
   warn "Reminder: DHCP is running on PXE_IFACE=${PXE_IFACE:-<PXE_IFACE>}. Ensure no other DHCP server exists on that lab segment."

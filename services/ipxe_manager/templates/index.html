@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>iPXE Manager</title>
+<style>
+:root {
+  --bg:      #0d1117;
+  --surface: #161b22;
+  --border:  #30363d;
+  --text:    #e6edf3;
+  --muted:   #8b949e;
+  --accent:  #4fc3f7;
+  --green:   #3fb950;
+  --amber:   #d29922;
+  --red:     #f85149;
+  --radius:  6px;
+  --font:    -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono:    "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; min-height: 100vh; }
+
+/* ── layout ── */
+header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; gap: 16px; height: 52px; }
+header h1 { font-size: 15px; font-weight: 600; letter-spacing: .02em; color: var(--accent); }
+header span { color: var(--muted); font-size: 12px; }
+.main { max-width: 1100px; margin: 0 auto; padding: 24px 20px; }
+
+/* ── tabs ── */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+.tab { padding: 8px 18px; font-size: 13px; font-weight: 500; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: color .15s; background: none; border-top: none; border-left: none; border-right: none; }
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.panel { display: none; } .panel.active { display: block; }
+
+/* ── cards / sections ── */
+.section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 20px; }
+.section-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.section-head h2 { font-size: 13px; font-weight: 600; }
+.section-body { padding: 18px; }
+
+/* ── buttons ── */
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: var(--radius); font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid transparent; transition: opacity .15s; white-space: nowrap; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn-primary { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+.btn-primary:hover:not(:disabled) { opacity: .85; }
+.btn-ghost { background: transparent; color: var(--text); border-color: var(--border); }
+.btn-ghost:hover:not(:disabled) { background: #21262d; }
+.btn-danger { background: transparent; color: var(--red); border-color: var(--border); }
+.btn-danger:hover:not(:disabled) { background: rgba(248,81,73,.1); border-color: var(--red); }
+.btn-sm { padding: 3px 8px; font-size: 11px; }
+
+/* ── upload zone ── */
+.upload-zone { border: 2px dashed var(--border); border-radius: var(--radius); padding: 32px; text-align: center; transition: border-color .2s, background .2s; cursor: pointer; }
+.upload-zone.drag { border-color: var(--accent); background: rgba(79,195,247,.05); }
+.upload-zone input[type=file] { display: none; }
+.upload-zone p { color: var(--muted); font-size: 13px; margin-top: 8px; }
+.upload-zone .icon { font-size: 28px; }
+.progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 10px; display: none; }
+.progress-bar .fill { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+
+/* ── file list ── */
+.file-list { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+.file-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: #0d1117; border: 1px solid var(--border); border-radius: var(--radius); }
+.file-row .file-icon { font-size: 16px; flex-shrink: 0; }
+.file-row .file-name { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row .file-size { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.file-row .file-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+/* ── entry list ── */
+.entry-list { display: flex; flex-direction: column; gap: 8px; }
+.entry-card { background: #0d1117; border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; display: flex; align-items: center; gap: 12px; }
+.entry-card.disabled { opacity: .5; }
+.entry-card .drag-handle { color: var(--muted); cursor: grab; font-size: 16px; flex-shrink: 0; user-select: none; }
+.entry-card .entry-info { flex: 1; min-width: 0; }
+.entry-card .entry-name { font-weight: 600; font-size: 13px; }
+.entry-card .entry-meta { color: var(--muted); font-size: 11px; margin-top: 2px; font-family: var(--mono); }
+.entry-card .entry-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.badge-kernel { background: rgba(63,185,80,.15); color: var(--green); }
+.badge-iso    { background: rgba(210,153,34,.15); color: var(--amber); }
+.badge-chain  { background: rgba(79,195,247,.15); color: var(--accent); }
+.badge-off    { background: #21262d; color: var(--muted); }
+
+/* ── toggle ── */
+.toggle { position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 18px; cursor: pointer; transition: background .2s; }
+.toggle-slider:before { content: ''; position: absolute; width: 12px; height: 12px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: transform .2s; }
+.toggle input:checked + .toggle-slider { background: var(--accent); }
+.toggle input:checked + .toggle-slider:before { transform: translateX(14px); }
+
+/* ── iPXE preview ── */
+.ipxe-preview { background: #010409; border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; font-family: var(--mono); font-size: 12px; line-height: 1.6; color: #79c0ff; white-space: pre; overflow-x: auto; max-height: 320px; overflow-y: auto; }
+
+/* ── modal ── */
+.modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100; align-items: center; justify-content: center; }
+.modal-backdrop.open { display: flex; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; width: 480px; max-width: 95vw; max-height: 90vh; overflow-y: auto; }
+.modal-head { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.modal-head h3 { font-size: 14px; font-weight: 600; }
+.modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; line-height: 1; padding: 0 4px; }
+.modal-close:hover { color: var(--text); }
+.modal-body { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.modal-foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ── form ── */
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-size: 12px; font-weight: 500; color: var(--muted); }
+.field input, .field select, .field textarea { background: #0d1117; border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 13px; font-family: var(--font); padding: 7px 10px; outline: none; transition: border-color .15s; }
+.field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); }
+.field select option { background: #161b22; }
+.field textarea { font-family: var(--mono); font-size: 12px; resize: vertical; min-height: 60px; }
+.type-section { display: none; }
+.type-section.active { display: flex; flex-direction: column; gap: 14px; }
+.hint { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* ── empty states ── */
+.empty { text-align: center; padding: 32px; color: var(--muted); font-size: 13px; }
+.empty .icon { font-size: 28px; display: block; margin-bottom: 8px; }
+
+/* ── toast ── */
+#toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 16px; font-size: 13px; display: none; z-index: 200; max-width: 320px; }
+#toast.ok  { border-color: var(--green); color: var(--green); }
+#toast.err { border-color: var(--red);   color: var(--red); }
+
+/* ── misc ── */
+.row { display: flex; gap: 10px; align-items: center; }
+.order-btns { display: flex; flex-direction: column; gap: 2px; }
+.order-btn { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 4px; width: 22px; height: 18px; font-size: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.order-btn:hover { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#9729; iPXE Manager</h1>
+  <span>{{ server_ip }}</span>
+  <span style="margin-left:auto;color:var(--muted);font-size:11px;">
+    Menu endpoint: <code style="font-family:var(--mono);color:var(--accent)">http://{{ server_ip }}:8091/menu.ipxe</code>
+  </span>
+</header>
+
+<div class="main">
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('files',this)">Files</button>
+    <button class="tab" onclick="switchTab('menu',this)">Boot Menu</button>
+    <button class="tab" onclick="switchTab('preview',this)">iPXE Preview</button>
+  </div>
+
+  <!-- ─── FILES ─── -->
+  <div id="tab-files" class="panel active">
+    <div class="section">
+      <div class="section-head"><h2>Upload File</h2></div>
+      <div class="section-body">
+        <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+          <span class="icon">&#128190;</span>
+          <strong>Click to browse</strong> or drag &amp; drop
+          <p>ISO images, kernels (vmlinuz), initrd — any size</p>
+          <input type="file" id="fileInput" onchange="uploadFile(this.files[0])">
+        </div>
+        <div class="progress-bar" id="progress"><div class="fill" id="progressFill"></div></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <h2>Uploaded Files</h2>
+        <button class="btn btn-ghost btn-sm" onclick="loadFiles()">&#8635; Refresh</button>
+      </div>
+      <div class="section-body" style="padding-top:10px">
+        <div id="fileList"><div class="empty"><span class="icon">&#128193;</span>No files yet</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── BOOT MENU ─── -->
+  <div id="tab-menu" class="panel">
+    <div class="section">
+      <div class="section-head">
+        <h2>Boot Entries</h2>
+        <button class="btn btn-primary btn-sm" onclick="openModal()">+ Add Entry</button>
+      </div>
+      <div class="section-body" style="padding-top:10px">
+        <div id="entryList"><div class="empty"><span class="icon">&#128268;</span>No boot entries yet</div></div>
+      </div>
+    </div>
+    <p style="color:var(--muted);font-size:11px;padding:0 2px">
+      Use &#8679;&#8681; to reorder. Order here is the order shown in the PXE menu. The top enabled entry is the default.
+    </p>
+  </div>
+
+  <!-- ─── PREVIEW ─── -->
+  <div id="tab-preview" class="panel">
+    <div class="section">
+      <div class="section-head">
+        <h2>Generated menu.ipxe</h2>
+        <button class="btn btn-ghost btn-sm" onclick="loadPreview()">&#8635; Refresh</button>
+      </div>
+      <div class="section-body" style="padding:0">
+        <pre class="ipxe-preview" id="previewBox"># loading...</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── MODAL: ADD / EDIT ENTRY ─── -->
+<div class="modal-backdrop" id="modal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="modalTitle">Add Boot Entry</h3>
+      <button class="modal-close" onclick="closeModal()">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="editId">
+      <div class="field">
+        <label>Display Name</label>
+        <input type="text" id="entryName" placeholder="e.g. Ubuntu 24.04 Live Server">
+      </div>
+      <div class="field">
+        <label>Boot Type</label>
+        <select id="entryType" onchange="switchType()">
+          <option value="kernel">Kernel + initrd (UEFI/BIOS)</option>
+          <option value="iso">ISO sanboot (BIOS)</option>
+          <option value="chain">Chainload URL</option>
+        </select>
+      </div>
+
+      <!-- kernel type -->
+      <div class="type-section active" id="type-kernel">
+        <div class="field">
+          <label>Kernel file</label>
+          <select id="kernelFile"><option value="">— select uploaded file —</option></select>
+          <span class="hint">vmlinuz or similar</span>
+        </div>
+        <div class="field">
+          <label>initrd file (optional)</label>
+          <select id="initrdFile"><option value="">— none —</option></select>
+        </div>
+        <div class="field">
+          <label>Kernel command line</label>
+          <textarea id="cmdline" placeholder="root=/dev/ram0 ip=dhcp quiet splash"></textarea>
+        </div>
+      </div>
+
+      <!-- iso type -->
+      <div class="type-section" id="type-iso">
+        <div class="field">
+          <label>ISO file</label>
+          <select id="isoFile"><option value="">— select uploaded file —</option></select>
+          <span class="hint">Requires BIOS-mode client. Uses sanboot.</span>
+        </div>
+      </div>
+
+      <!-- chain type -->
+      <div class="type-section" id="type-chain">
+        <div class="field">
+          <label>Chainload URL</label>
+          <input type="text" id="chainUrl" placeholder="http://192.168.100.1:8080/ipxe/menu.ipxe">
+          <span class="hint">Full URL to another .ipxe script</span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEntry()">Save Entry</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let _files = [];
+let _entries = [];
+
+// ── tab switching ──────────────────────────────────────────────────────────
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'preview') loadPreview();
+  if (name === 'menu') loadEntries();
+  if (name === 'files') loadFiles();
+}
+
+// ── toast ──────────────────────────────────────────────────────────────────
+function toast(msg, ok = true) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = ok ? 'ok' : 'err';
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.display = 'none'; }, 3000);
+}
+
+// ── files ──────────────────────────────────────────────────────────────────
+async function loadFiles() {
+  const r = await fetch('/api/files');
+  _files = await r.json();
+  renderFiles();
+  populateFileSelects();
+}
+
+function fmtSize(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+  if (b < 1024 * 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + ' MB';
+  return (b / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+function fileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  if (ext === 'iso') return '💿';
+  if (['vmlinuz', 'bzimage', 'kernel'].some(k => name.toLowerCase().includes(k))) return '🐧';
+  if (name.toLowerCase().includes('initrd') || name.toLowerCase().includes('initramfs')) return '📦';
+  return '📄';
+}
+
+function renderFiles() {
+  const el = document.getElementById('fileList');
+  if (!_files.length) { el.innerHTML = '<div class="empty"><span class="icon">📁</span>No files uploaded yet</div>'; return; }
+  el.innerHTML = _files.map(f => `
+    <div class="file-row" id="frow-${CSS.escape(f.name)}">
+      <span class="file-icon">${fileIcon(f.name)}</span>
+      <span class="file-name" title="${f.url}">${f.name}</span>
+      <span class="file-size">${fmtSize(f.size)}</span>
+      <div class="file-actions">
+        <button class="btn btn-ghost btn-sm" onclick="copyText('${f.url}')" title="Copy URL">&#128203;</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteFile('${f.name}')">&#128465;</button>
+      </div>
+    </div>`).join('');
+}
+
+function populateFileSelects() {
+  const names = _files.map(f => f.name);
+  function fill(id, blank) {
+    const sel = document.getElementById(id);
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">${blank}</option>` +
+      names.map(n => `<option value="${n}"${n === cur ? ' selected' : ''}>${n}</option>`).join('');
+  }
+  fill('kernelFile', '— select uploaded file —');
+  fill('initrdFile', '— none —');
+  fill('isoFile',    '— select uploaded file —');
+}
+
+async function uploadFile(file) {
+  if (!file) return;
+  const bar = document.getElementById('progress');
+  const fill = document.getElementById('progressFill');
+  bar.style.display = 'block'; fill.style.width = '0%';
+  const fd = new FormData(); fd.append('file', file);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/files');
+  xhr.upload.onprogress = e => { if (e.lengthComputable) fill.style.width = (e.loaded / e.total * 100) + '%'; };
+  xhr.onload = () => {
+    bar.style.display = 'none';
+    document.getElementById('fileInput').value = '';
+    if (xhr.status === 201) { toast('Uploaded ' + file.name); loadFiles(); }
+    else toast('Upload failed', false);
+  };
+  xhr.onerror = () => { bar.style.display = 'none'; toast('Upload error', false); };
+  xhr.send(fd);
+}
+
+async function deleteFile(name) {
+  if (!confirm(`Delete "${name}"?`)) return;
+  const r = await fetch('/api/files/' + encodeURIComponent(name), { method: 'DELETE' });
+  if (r.ok) { toast('Deleted ' + name); loadFiles(); }
+  else toast('Delete failed', false);
+}
+
+// drag-drop
+const dz = document.getElementById('dropZone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag'); uploadFile(e.dataTransfer.files[0]); });
+
+// ── entries ────────────────────────────────────────────────────────────────
+async function loadEntries() {
+  const r = await fetch('/api/entries');
+  _entries = await r.json();
+  renderEntries();
+}
+
+function typeBadge(t) {
+  if (t === 'kernel') return '<span class="badge badge-kernel">kernel</span>';
+  if (t === 'iso')    return '<span class="badge badge-iso">iso</span>';
+  return '<span class="badge badge-chain">chain</span>';
+}
+
+function entryMeta(e) {
+  if (e.type === 'kernel') return [e.kernel, e.initrd].filter(Boolean).join(' + ') + (e.cmdline ? ' · cmdline set' : '');
+  if (e.type === 'iso')    return e.iso || '';
+  return e.url || '';
+}
+
+function renderEntries() {
+  const el = document.getElementById('entryList');
+  if (!_entries.length) { el.innerHTML = '<div class="empty"><span class="icon">🔌</span>No boot entries. Add one to build your PXE menu.</div>'; return; }
+  el.innerHTML = _entries.map((e, i) => `
+    <div class="entry-card${e.enabled ? '' : ' disabled'}" id="ecard-${e.id}">
+      <div class="order-btns">
+        <button class="order-btn" onclick="moveEntry('${e.id}',-1)" title="Move up">&#9650;</button>
+        <button class="order-btn" onclick="moveEntry('${e.id}',1)"  title="Move down">&#9660;</button>
+      </div>
+      <div class="entry-info">
+        <div class="entry-name">${escHtml(e.name)}</div>
+        <div class="entry-meta">${escHtml(entryMeta(e))}</div>
+      </div>
+      ${typeBadge(e.type)}
+      <label class="toggle" title="${e.enabled ? 'Enabled' : 'Disabled'}">
+        <input type="checkbox" ${e.enabled ? 'checked' : ''} onchange="toggleEntry('${e.id}',this.checked)">
+        <span class="toggle-slider"></span>
+      </label>
+      <button class="btn btn-ghost btn-sm" onclick="openModal('${e.id}')">Edit</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteEntry('${e.id}')">&#128465;</button>
+    </div>`).join('');
+}
+
+async function toggleEntry(id, enabled) {
+  await fetch('/api/entries/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled}) });
+  loadEntries();
+}
+
+async function deleteEntry(id) {
+  const e = _entries.find(x => x.id === id);
+  if (!confirm(`Delete "${e?.name}"?`)) return;
+  await fetch('/api/entries/' + id, { method: 'DELETE' });
+  toast('Entry deleted'); loadEntries();
+}
+
+async function moveEntry(id, dir) {
+  const idx = _entries.findIndex(e => e.id === id);
+  const newIdx = idx + dir;
+  if (newIdx < 0 || newIdx >= _entries.length) return;
+  const arr = [..._entries];
+  [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+  await fetch('/api/entries/reorder', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({order: arr.map(e => e.id)}) });
+  loadEntries();
+}
+
+// ── modal ──────────────────────────────────────────────────────────────────
+function openModal(id) {
+  populateFileSelects();
+  const e = id ? _entries.find(x => x.id === id) : null;
+  document.getElementById('modalTitle').textContent = e ? 'Edit Boot Entry' : 'Add Boot Entry';
+  document.getElementById('editId').value = id || '';
+  document.getElementById('entryName').value = e?.name || '';
+  document.getElementById('entryType').value = e?.type || 'kernel';
+  document.getElementById('kernelFile').value = e?.kernel || '';
+  document.getElementById('initrdFile').value  = e?.initrd  || '';
+  document.getElementById('cmdline').value     = e?.cmdline || '';
+  document.getElementById('isoFile').value     = e?.iso     || '';
+  document.getElementById('chainUrl').value    = e?.url     || '';
+  switchType();
+  document.getElementById('modal').classList.add('open');
+  document.getElementById('entryName').focus();
+}
+
+function closeModal() { document.getElementById('modal').classList.remove('open'); }
+
+function switchType() {
+  const t = document.getElementById('entryType').value;
+  ['kernel','iso','chain'].forEach(k => {
+    document.getElementById('type-' + k).classList.toggle('active', k === t);
+  });
+}
+
+async function saveEntry() {
+  const id   = document.getElementById('editId').value;
+  const name = document.getElementById('entryName').value.trim();
+  const type = document.getElementById('entryType').value;
+  if (!name) { toast('Name is required', false); return; }
+  const body = { name, type, enabled: true };
+  if (type === 'kernel') {
+    body.kernel  = document.getElementById('kernelFile').value;
+    body.initrd  = document.getElementById('initrdFile').value;
+    body.cmdline = document.getElementById('cmdline').value.trim();
+    if (!body.kernel) { toast('Select a kernel file', false); return; }
+  } else if (type === 'iso') {
+    body.iso = document.getElementById('isoFile').value;
+    if (!body.iso) { toast('Select an ISO file', false); return; }
+  } else {
+    body.url = document.getElementById('chainUrl').value.trim();
+    if (!body.url) { toast('Enter a chainload URL', false); return; }
+  }
+  if (id) {
+    const e = _entries.find(x => x.id === id);
+    body.enabled = e?.enabled ?? true;
+    await fetch('/api/entries/' + id, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast('Entry updated');
+  } else {
+    await fetch('/api/entries', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast('Entry added');
+  }
+  closeModal(); loadEntries();
+}
+
+// ── preview ────────────────────────────────────────────────────────────────
+async function loadPreview() {
+  const r = await fetch('/api/preview');
+  const text = await r.text();
+  document.getElementById('previewBox').textContent = text;
+}
+
+// ── utils ──────────────────────────────────────────────────────────────────
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function copyText(t) { navigator.clipboard.writeText(t).then(() => toast('Copied')); }
+
+// modal close on backdrop click
+document.getElementById('modal').addEventListener('click', e => { if (e.target === document.getElementById('modal')) closeModal(); });
+
+// Enter key in modal name field
+document.getElementById('entryName').addEventListener('keydown', e => { if (e.key === 'Enter') saveEntry(); });
+
+// init
+loadFiles(); loadEntries();
+</script>
+</body>
+</html>

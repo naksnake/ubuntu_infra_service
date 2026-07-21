@@ -26,3 +26,6 @@ services/awx/credentials.py
 
 # DHCP lease database (runtime data)
 data/dnsmasq.leases
+
+# iPXE Manager boot entries (runtime data)
+data/ipxe_entries.json
