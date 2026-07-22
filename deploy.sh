@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ==========================================================
-# SIT Services deploy wizard (Linux-only)
+# Lab Services deploy wizard (Linux-only)
 # Usage:
 #   ./deploy.sh
 #
@@ -109,6 +109,9 @@ ensure_dirs() {
   mkdir -p services/awx
   # dnsmasq writes leases here; must exist as a file before Docker bind-mounts it
   touch data/dnsmasq.leases
+  # iPXE Manager state (entries.json lives inside; directory mount keeps
+  # the manager's atomic tmp+rename writes working)
+  mkdir -p data/ipxe_manager
 }
 
 ensure_docker() {
@@ -161,19 +164,22 @@ DNS_SERVER=${DNS_SERVER}
 
 # ==== Ports ====
 WEBFS_PORT=${WEBFS_PORT}
+IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT}
 AWX_HTTP_PORT=${AWX_HTTP_PORT}
 MONITOR_PORT=${MONITOR_PORT}
-MONITOR_REFRESH=30
+MONITOR_REFRESH=${MONITOR_REFRESH:-30}
+
+# ==== iPXE Manager ====
+# Optional: set a password to protect the web UI and API (menu.ipxe stays open).
+# Quoted so a password containing spaces survives sourcing and compose parsing.
+IPXE_MANAGER_PASSWORD="${IPXE_MANAGER_PASSWORD:-}"
 
 # ==== AWX settings ====
 AWX_VERSION=${AWX_VERSION}
 AWX_ADMIN_USER=${AWX_ADMIN_USER}
-AWX_ADMIN_PASSWORD=${AWX_ADMIN_PASSWORD}
-AWX_DB_PASSWORD=${AWX_DB_PASSWORD}
-AWX_SECRET_KEY=${AWX_SECRET_KEY}
-
-# Optional: ISO name for BIOS-only sanboot (Linux Live ISO)
-ISO_FILE=${ISO_FILE}
+AWX_ADMIN_PASSWORD="${AWX_ADMIN_PASSWORD}"
+AWX_DB_PASSWORD="${AWX_DB_PASSWORD}"
+AWX_SECRET_KEY="${AWX_SECRET_KEY}"
 EOF
   log "Wrote .env"
 }
@@ -215,6 +221,7 @@ env_wizard() {
   DNS_SERVER="$(prompt "DNS_SERVER" "${DNS_SERVER:-8.8.8.8}")"
 
   WEBFS_PORT="$(prompt "WEBFS_PORT" "${WEBFS_PORT:-8080}")"
+  IPXE_MANAGER_PORT="$(prompt "IPXE_MANAGER_PORT" "${IPXE_MANAGER_PORT:-8091}")"
   AWX_HTTP_PORT="$(prompt "AWX_HTTP_PORT" "${AWX_HTTP_PORT:-8052}")"
   MONITOR_PORT="$(prompt "MONITOR_PORT" "${MONITOR_PORT:-8090}")"
 
@@ -238,8 +245,6 @@ env_wizard() {
     AWX_SECRET_KEY="$(gen_secret)"
     log "Generated AWX_SECRET_KEY."
   fi
-
-  ISO_FILE="$(prompt "ISO_FILE (optional BIOS sanboot)" "${ISO_FILE:-example.iso}")"
 
   write_env
   load_env
@@ -317,7 +322,7 @@ chmod +x '$script'"
   log "Creating systemd unit: $unit"
   sudo_run bash -c "cat > '$unit' <<EOF
 [Unit]
-Description=SIT NAT (nftables) for PXE/LAB
+Description=Lab NAT (nftables) for PXE/LAB
 After=network-online.target
 Wants=network-online.target
 
@@ -375,7 +380,7 @@ enable_autostart() {
   log "Creating systemd autostart unit: $unit"
   sudo_run bash -c "cat > '$unit' <<EOF
 [Unit]
-Description=SIT Lab Stack (docker compose)
+Description=Lab Stack (docker compose)
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target
@@ -410,7 +415,7 @@ check_stack() {
 }
 
 main() {
-  log "SIT deploy wizard starting..."
+  log "Lab deploy wizard starting..."
   ensure_docker
   ensure_dirs
 
@@ -471,9 +476,10 @@ main() {
 
   echo
   log "DONE."
-  echo "Webfs:   http://${WEBFS_HOST_IP:-<WEBFS_HOST_IP>}:${WEBFS_PORT:-8080}/"
-  echo "Monitor: http://<host-ip>:${MONITOR_PORT:-8090}/   (service health + DHCP leases)"
-  echo "AWX:     http://<host-ip>:${AWX_HTTP_PORT:-8052}/   (admin: ${AWX_ADMIN_USER:-admin})"
+  echo "Webfs:        http://${WEBFS_HOST_IP:-<host>}:${WEBFS_PORT:-8080}/"
+  echo "iPXE Manager: http://${WEBFS_HOST_IP:-<host>}:${IPXE_MANAGER_PORT:-8091}/   (upload files, manage boot menu)"
+  echo "Monitor:      http://${WEBFS_HOST_IP:-<host>}:${MONITOR_PORT:-8090}/   (service health + DHCP leases)"
+  echo "AWX:          http://${WEBFS_HOST_IP:-<host>}:${AWX_HTTP_PORT:-8052}/   (admin: ${AWX_ADMIN_USER:-admin})"
   echo
   warn "AWX first boot runs DB migrations — allow ~2 minutes before the UI is ready."
   warn "Reminder: DHCP is running on PXE_IFACE=${PXE_IFACE:-<PXE_IFACE>}. Ensure no other DHCP server exists on that lab segment."

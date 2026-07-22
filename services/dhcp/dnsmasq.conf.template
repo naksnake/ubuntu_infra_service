@@ -1,4 +1,3 @@
-
 interface=${PXE_IFACE}
 bind-interfaces
 dhcp-authoritative
@@ -11,16 +10,19 @@ dhcp-range=${PXE_RANGE_START},${PXE_RANGE_END},${PXE_NETMASK},12h
 dhcp-option=option:router,${PXE_ROUTER_IP}
 dhcp-option=option:dns-server,${DNS_SERVER}
 
-enable-tftp
-tftp-root=/srv/tftp
+# TFTP is served by the lab_tftp container on ${TFTP_SERVER_IP}:69.
+# dnsmasq must NOT enable-tftp here: both containers run on the host network
+# and would race for UDP port 69, killing whichever starts second.
 dhcp-option=option:tftp-server,${TFTP_SERVER_IP}
 
+# Client architecture tags (RFC 4578): both 7 and 9 are used for x86-64 UEFI
 dhcp-match=set:efi-x86_64,option:client-arch,7
-dhcp-match=set:efi-x86,option:client-arch,6
-dhcp-match=set:efi-arm64,option:client-arch,11
+dhcp-match=set:efi-x86_64,option:client-arch,9
 dhcp-userclass=set:ipxe,iPXE
 
-pxe-service=tag:!ipxe,x86PC,"Boot iPXE (BIOS)",undionly.kpxe
-pxe-service=tag:efi-x86_64,tag:!ipxe,x86-64_EFI,"Boot iPXE (UEFI x64)",ipxe.efi
+# Stage 1: plain PXE firmware loads iPXE from the lab_tftp container
+dhcp-boot=tag:!ipxe,tag:efi-x86_64,ipxe.efi,,${TFTP_SERVER_IP}
+dhcp-boot=tag:!ipxe,tag:!efi-x86_64,undionly.kpxe,,${TFTP_SERVER_IP}
 
-dhcp-boot=tag:ipxe,http://${WEBFS_HOST_IP}:${WEBFS_PORT}/ipxe/default.ipxe
+# Stage 2: iPXE fetches the live boot menu from the iPXE Manager
+dhcp-boot=tag:ipxe,http://${WEBFS_HOST_IP}:${IPXE_MANAGER_PORT}/menu.ipxe

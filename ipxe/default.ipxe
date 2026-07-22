@@ -1,8 +1,11 @@
-
 #!ipxe
-# Default to Linux kernel+initrd (UEFI‑friendly)
-set base http://${WEBFS_HOST_IP}:${WEBFS_PORT}
-chain ${base}/ipxe/linux-kernel-initrd.ipxe || goto failed
-:failed
-echo Failed to chain linux-kernel-initrd.ipxe
+# Manual fallback: DHCP normally points iPXE clients directly at the
+# iPXE Manager menu. This script does the same for hand-chained boots.
+# NOTE: 8091 is the default IPXE_MANAGER_PORT — keep in sync with .env.
+chain http://${next-server}:8091/menu.ipxe || goto fallback
+# the menu returned (user chose Exit) — leave iPXE cleanly
+exit
+:fallback
+echo Could not reach the iPXE Manager at http://${next-server}:8091/menu.ipxe
+echo Dropping to shell — type 'exit' to return to BIOS/UEFI.
 shell

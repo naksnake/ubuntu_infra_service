@@ -1,8 +1,11 @@
-
 #!ipxe
-# Linux via kernel + initrd (UEFI‑friendly)
-set base http://${WEBFS_HOST_IP}:${WEBFS_PORT}
+# Linux via kernel + initrd (UEFI-friendly).
+# Copy vmlinuz / initrd.img into services/webfs/htdocs/linux/ first.
+set base http://${next-server}:8080
 # Add your kernel parameters: root=, ip=dhcp, console=...
-kernel ${base}/linux/vmlinuz initrd=initrd.magic ip=dhcp console=tty0
+kernel ${base}/linux/vmlinuz initrd=initrd.img ip=dhcp console=tty0
 initrd ${base}/linux/initrd.img
-boot
+boot || goto failed
+:failed
+echo Kernel boot failed.
+shell
