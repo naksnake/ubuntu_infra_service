@@ -7,6 +7,11 @@ import pathlib
 from contextlib import contextmanager
 from urllib.parse import quote
 
+try:
+    import yaml  # for validating autoinstall user-data on save
+except Exception:  # pragma: no cover - degrade gracefully if PyYAML is absent
+    yaml = None
+
 from flask import Flask, request, jsonify, render_template, Response
 from werkzeug.utils import secure_filename
 
@@ -19,11 +24,23 @@ WEBFS_BASE    = os.environ.get('WEBFS_BASE', 'http://192.168.100.1:8080')
 SERVER_IP     = os.environ.get('SERVER_IP',  '192.168.100.1')
 AUTH_PASSWORD = os.environ.get('AUTH_PASSWORD', '')
 
+# Autoinstall (cloud-init NoCloud) profiles: where they are stored and the base
+# URL PXE clients use to fetch the seed. MANAGER_BASE must point at THIS service
+# (default: the manager's own host:port) because it serves /autoinstall/<id>/.
+AUTOINSTALL_FILE = pathlib.Path(
+    os.environ.get('AUTOINSTALL_FILE', str(ENTRIES_FILE.parent / 'autoinstall.json')))
+MANAGER_PORT = os.environ.get('MANAGER_PORT', '8091')
+MANAGER_BASE = os.environ.get('MANAGER_BASE', f'http://{SERVER_IP}:{MANAGER_PORT}').rstrip('/')
+
 # ── optional auth (everything except the PXE-facing menu endpoint) ──────────
 
 @app.before_request
 def _require_auth():
-    if not AUTH_PASSWORD or request.path == '/menu.ipxe':
+    # PXE clients fetch the menu and the autoinstall seed with no credentials,
+    # so those stay open even when a password protects the manager UI/API.
+    # (Management lives under /api/autoinstall, which is NOT exempted here.)
+    if (not AUTH_PASSWORD or request.path == '/menu.ipxe'
+            or request.path.startswith('/autoinstall/')):
         return None
     auth = request.authorization
     if auth and auth.password == AUTH_PASSWORD:
@@ -39,6 +56,14 @@ def load_entries():
     try:
         return json.loads(ENTRIES_FILE.read_text())
     except Exception:
+        # Corrupt JSON: preserve it instead of silently returning [] (a following
+        # mutation would then persist the empty list and destroy the entries).
+        try:
+            ENTRIES_FILE.replace(ENTRIES_FILE.with_suffix('.json.corrupt'))
+            app.logger.error('entries.json was invalid JSON; moved aside to %s',
+                             ENTRIES_FILE.with_suffix('.json.corrupt'))
+        except Exception:
+            pass
         return []
 
 def save_entries(entries):
@@ -49,6 +74,21 @@ def save_entries(entries):
     tmp = ENTRIES_FILE.with_name(f'.entries.{uuid.uuid4().hex}.tmp')
     tmp.write_text(json.dumps(entries, indent=2))
     tmp.replace(ENTRIES_FILE)
+
+
+def load_profiles():
+    if not AUTOINSTALL_FILE.exists() or AUTOINSTALL_FILE.stat().st_size == 0:
+        return []
+    try:
+        return json.loads(AUTOINSTALL_FILE.read_text())
+    except Exception:
+        return []
+
+def save_profiles(profiles):
+    AUTOINSTALL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = AUTOINSTALL_FILE.with_name(f'.autoinstall.{uuid.uuid4().hex}.tmp')
+    tmp.write_text(json.dumps(profiles, indent=2))
+    tmp.replace(AUTOINSTALL_FILE)
 
 
 @contextmanager
@@ -104,6 +144,14 @@ def sanitize_fields(data):
         if url and not re.fullmatch(r'https?://\S+', url):
             return None, 'url must be http(s):// with no spaces'
         out['url'] = url
+    if 'autoinstall' in data:
+        # reference to an autoinstall profile id (validated against the store at
+        # menu-generation time); the seed string itself is built server-side so
+        # the required ';' in ds=nocloud-net;s=... never passes through _clean
+        ai = str(data['autoinstall'] or '')
+        if ai and not re.fullmatch(r'[A-Za-z0-9]{1,40}', ai):
+            return None, 'invalid autoinstall profile id'
+        out['autoinstall'] = ai
     return out, None
 
 # ── file helpers ─────────────────────────────────────────────────────────────
@@ -136,14 +184,30 @@ def entry_body_lines(e):
         initrd  = e.get('initrd', '')
         cmdline = e.get('cmdline', '')
         # args go on the kernel line so no imgargs name-matching is needed.
+        # modern kernels locate the initrd via an 'initrd=<name>' argument on
+        # the command line (not just the iPXE 'initrd' fetch), so add it — the
+        # basename matches how iPXE registers the downloaded file.
+        args = []
+        if initrd:
+            args.append(f'initrd={pathlib.Path(initrd).name}')
+        if cmdline:
+            args.append(cmdline)
+        # Attach an autoinstall (cloud-init NoCloud) seed when the entry points
+        # at a profile. Built here (not via user input) so the ';' survives.
+        ai = e.get('autoinstall')
+        if ai:
+            args.append(f'autoinstall ds=nocloud-net;s={MANAGER_BASE}/autoinstall/{ai}/')
+        arg_str = (' ' + ' '.join(args)) if args else ''
         # every fetch needs '|| goto failed' — iPXE aborts the whole script
         # on the first unhandled command failure (e.g. a deleted file 404s)
-        lines.append(f'kernel {file_url(kernel)}' + (f' {cmdline}' if cmdline else '') + ' || goto failed')
+        lines.append(f'kernel {file_url(kernel)}{arg_str} || goto failed')
         if initrd:
             lines.append(f'initrd {file_url(initrd)} || goto failed')
         lines.append('boot || goto failed')
     elif t == 'iso':
-        lines.append(f'sanboot {file_url(e.get("iso", ""))} || goto failed')
+        # --no-describe matches the static boot-iso.ipxe and avoids a describe
+        # step some BIOS sanboot paths choke on
+        lines.append(f'sanboot --no-describe {file_url(e.get("iso", ""))} || goto failed')
     elif t == 'chain':
         lines.append(f'chain {e.get("url", "")} || goto failed')
     return lines
@@ -159,7 +223,9 @@ def generate_menu(entries):
         'item --gap -- ---- Boot Options ----',
     ]
     for e in enabled:
-        lines.append(f"item {e['id']:<12} {e['name']}")
+        # flag unattended installs in the visible menu — they wipe the target disk
+        label = e['name'] + ('  [AUTOINSTALL — ERASES DISK]' if e.get('autoinstall') else '')
+        lines.append(f"item {e['id']:<12} {label}")
     lines += [
         'item --gap --',
         'item shell        iPXE Shell',
@@ -312,6 +378,152 @@ def api_delete_entry(eid):
     with entries_lock():
         save_entries([e for e in load_entries() if e['id'] != eid])
     return jsonify({'ok': True})
+
+# ── autoinstall (cloud-init NoCloud) profiles ─────────────────────────────────
+
+DEFAULT_AUTOINSTALL = """\
+#cloud-config
+# ─────────────────────────────────────────────────────────────────────────────
+# Ubuntu Server autoinstall (subiquity). Served to the installer over HTTP as a
+# cloud-init NoCloud seed. ⚠️  THIS PERFORMS AN UNATTENDED INSTALL AND WILL ERASE
+# THE TARGET DISK. Review every value before enabling the boot entry.
+#
+# Pair with a "Kernel + initrd" boot entry whose command line points at the
+# matching live-server ISO, e.g.:
+#   ip=dhcp url=http://SERVER:8080/files/ubuntu-24.04.1-live-server-amd64.iso
+# then attach this profile to that entry (the seed URL is added automatically).
+# ─────────────────────────────────────────────────────────────────────────────
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: ubuntu-lab
+    username: ubuntu
+    # Password is 'ubuntu' — CHANGE THIS. Generate with:  mkpasswd -m sha-512
+    password: "$6$rounds=4096$aReallyBadSalt$Vp8m0Xb3W4o8gk0m1kQ2sT0p9c5r7uY0"
+  ssh:
+    install-server: true
+    allow-pw: true
+  storage:
+    layout:
+      name: direct        # use the whole disk; wipes existing data
+  packages:
+    - openssh-server
+  user-data:
+    disable_root: true
+  late-commands: []
+"""
+
+
+def _validate_user_data(text):
+    """Return an error string if the user-data is unusable, else None."""
+    if not text.strip():
+        return 'user-data must not be empty'
+    if yaml is not None:
+        body = text
+        if body.lstrip().startswith('#cloud-config'):
+            body = body.split('\n', 1)[1] if '\n' in body else ''
+        try:
+            doc = yaml.safe_load(body) if body.strip() else None
+        except yaml.YAMLError as exc:
+            return f'user-data is not valid YAML: {exc}'
+        if doc is not None and not isinstance(doc, dict):
+            return 'user-data must be a YAML mapping (e.g. an autoinstall: block)'
+    return None
+
+
+@app.route('/api/autoinstall', methods=['GET'])
+def api_list_profiles():
+    profiles = load_profiles()
+    listed = [{'id': p['id'], 'name': p.get('name', ''),
+               'hostname': p.get('hostname', ''),
+               'seed_url': f'{MANAGER_BASE}/autoinstall/{p["id"]}/'}
+              for p in profiles]
+    return jsonify({'profiles': listed, 'template': DEFAULT_AUTOINSTALL,
+                    'manager_base': MANAGER_BASE})
+
+
+@app.route('/api/autoinstall/<pid>', methods=['GET'])
+def api_get_profile(pid):
+    for p in load_profiles():
+        if p['id'] == pid:
+            return jsonify({**p, 'seed_url': f'{MANAGER_BASE}/autoinstall/{pid}/'})
+    return jsonify({'error': 'Not found'}), 404
+
+
+@app.route('/api/autoinstall', methods=['POST'])
+def api_save_profile():
+    data = request.get_json(force=True) or {}
+    name = _clean(data.get('name', ''))
+    if not name:
+        return jsonify({'error': 'name is required'}), 400
+    user_data = str(data.get('user_data', ''))
+    err = _validate_user_data(user_data)
+    if err:
+        return jsonify({'error': err}), 400
+    hostname = _clean(data.get('hostname', '') or '', 63)
+    pid = data.get('id') or ''
+    with entries_lock():
+        profiles = load_profiles()
+        if pid:
+            found = next((p for p in profiles if p['id'] == pid), None)
+            if not found:
+                return jsonify({'error': 'Not found'}), 404
+            found.update({'name': name, 'hostname': hostname, 'user_data': user_data})
+        else:
+            pid = 'a' + uuid.uuid4().hex[:7]
+            profiles.append({'id': pid, 'name': name, 'hostname': hostname,
+                             'user_data': user_data})
+        save_profiles(profiles)
+    return jsonify({'id': pid, 'seed_url': f'{MANAGER_BASE}/autoinstall/{pid}/'}), 201
+
+
+@app.route('/api/autoinstall/<pid>', methods=['DELETE'])
+def api_delete_profile(pid):
+    with entries_lock():
+        save_profiles([p for p in load_profiles() if p['id'] != pid])
+    return jsonify({'ok': True})
+
+
+def _profile_or_404(pid):
+    for p in load_profiles():
+        if p['id'] == pid:
+            return p
+    return None
+
+
+# PXE-facing seed endpoints (no auth — the installer has no credentials).
+@app.route('/autoinstall/<pid>/user-data')
+def serve_user_data(pid):
+    p = _profile_or_404(pid)
+    if not p:
+        return Response('# unknown autoinstall profile\n', 404, mimetype='text/plain')
+    return Response(p.get('user_data', ''), mimetype='text/plain')
+
+
+@app.route('/autoinstall/<pid>/meta-data')
+def serve_meta_data(pid):
+    p = _profile_or_404(pid)
+    if not p:
+        return Response('', 404, mimetype='text/plain')
+    hostname = p.get('hostname') or 'ubuntu-lab'
+    return Response(f'instance-id: iid-{pid}\nlocal-hostname: {hostname}\n',
+                    mimetype='text/plain')
+
+
+@app.route('/autoinstall/<pid>/vendor-data')
+def serve_vendor_data(pid):
+    # cloud-init requests vendor-data; an empty 200 keeps it quiet
+    return Response('', mimetype='text/plain')
+
+
+@app.errorhandler(413)
+def _entry_too_large(_e):
+    limit = app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024 * 1024)
+    return jsonify({'error': f'file exceeds the {limit} GB upload limit'}), 413
+
 
 @app.route('/api/entries/reorder', methods=['POST'])
 def api_reorder():

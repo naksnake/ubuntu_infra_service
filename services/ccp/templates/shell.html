@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block heading %}ClusterShell{% endblock %}
+{% block body %}
+{% if not role_ok('operator') %}<div class="warnbox">You have viewer access — running commands requires the operator role.</div>{% endif %}
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Run a command</h2>
+    {% include "_nodesel.html" %}
+    <label>Load from script</label>
+    <select id="script-pick" onchange="loadScript()">
+      <option value="">— none —</option>
+      {% for s in scripts %}<option value="{{ s.id }}" data-content="{{ s.content }}">{{ s.name }}</option>{% endfor %}
+    </select>
+    <label>Command</label>
+    <textarea id="cmd" rows="5" placeholder="uname -a">uname -a</textarea>
+    <div style="margin-top:14px"><button class="btn" id="run-btn" onclick="run()" {{ 'disabled' if not role_ok('operator') }}>❯ Run on selected nodes</button></div>
+  </div>
+  <div class="card">
+    <h2>Output <span id="job-status" class="badge" style="float:right"></span></h2>
+    <div id="console" class="console">Select nodes, type a command, and hit Run.</div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+function loadScript(){
+  const o=document.getElementById('script-pick').selectedOptions[0];
+  if(o&&o.dataset.content!==undefined&&o.value)document.getElementById('cmd').value=o.dataset.content;
+}
+async function run(){
+  const payload=selectedNodePayload();
+  payload.command=document.getElementById('cmd').value.trim();
+  if(!payload.command){toast('Enter a command',true);return;}
+  if(!payload.node_ids.length&&!payload.group){toast('Select at least one node or a group',true);return;}
+  const btn=document.getElementById('run-btn'),con=document.getElementById('console');
+  btn.disabled=true;con.textContent='Launching…';
+  try{
+    const r=await api('POST','/api/run/shell',payload);
+    pollJob(r.job_id,con,document.getElementById('job-status'),()=>{btn.disabled=false;});
+  }catch(e){con.textContent='Error: '+e.message;btn.disabled=false;toast(e.message,true);}
+}
+</script>{% endblock %}

@@ -1,0 +1,5 @@
+Flask==3.0.3
+gunicorn==22.0.0
+ClusterShell==1.10.1
+ansible-core==2.16.14
+PyYAML==6.0.2

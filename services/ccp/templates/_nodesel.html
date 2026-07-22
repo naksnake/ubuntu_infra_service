@@ -1,0 +1,11 @@
+<label>Target nodes</label>
+<div class="nodesel">
+  {% for n in nodes %}
+  <label><input type="checkbox" class="node-cb" value="{{ n.id }}"> {{ n.name }}
+    <small class="mono">({{ n.address }}{% if n.conn=='local' %}, local{% endif %})</small></label>
+  {% else %}
+  <div class="empty">No nodes — add some on the Nodes page.</div>
+  {% endfor %}
+</div>
+<label>…or target a group</label>
+<input class="group-input" placeholder="e.g. web (leave blank to use the checkboxes above)">

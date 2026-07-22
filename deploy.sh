@@ -11,7 +11,6 @@ set -euo pipefail
 # - Creates required host dirs (data/*, linux assets path)
 # - Interactive .env creation with auto-generated secrets
 # - Downloads iPXE binaries into services/tftp/tftpboot/
-# - Renders services/awx/credentials.py from template
 # - docker compose up -d --build
 # - Optional persistent NAT (nftables recommended) via systemd unit
 # - Optional systemd autostart (lab-stack.service)
@@ -27,6 +26,35 @@ warn() { echo -e "${YELLOW}[deploy]${NC} $*" >&2; }
 die()  { echo -e "${RED}[deploy] ERROR:${NC} $*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Run docker as the current user if the daemon is reachable, else via sudo.
+# (A freshly-installed docker.io often isn't usable by a non-root user until
+# they re-login for docker-group membership; sudo bridges that gap.)
+docker_cli() {
+  if docker info >/dev/null 2>&1; then
+    docker "$@"
+  else
+    sudo_run docker "$@"
+  fi
+}
+
+# IPv4 dotted-quad validation (each octet 0-255).
+valid_ipv4() {
+  local ip="$1" o1 o2 o3 o4
+  [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  IFS='.' read -r o1 o2 o3 o4 <<< "$ip"
+  for o in "$o1" "$o2" "$o3" "$o4"; do (( o >= 0 && o <= 255 )) || return 1; done
+  return 0
+}
+
+prompt_ip() {
+  local msg="$1" def="$2" ans
+  while true; do
+    ans="$(prompt "$msg" "$def")"
+    valid_ipv4 "$ans" && { echo "$ans"; return; }
+    warn "Not a valid IPv4 address: $ans"
+  done
+}
 
 sudo_run() {
   if [[ $EUID -eq 0 ]]; then
@@ -60,9 +88,9 @@ prompt() {
 }
 
 prompt_yesno() {
-  local msg="$1" default="${2:-N}"
-  local ans=""
-  read -r -p "$msg (y/N) " ans
+  local msg="$1" default="${2:-N}" hint ans
+  if [[ "$default" =~ ^[Yy]$ ]]; then hint="(Y/n)"; else hint="(y/N)"; fi
+  read -r -p "$msg $hint " ans
   ans="${ans:-$default}"
   [[ "$ans" =~ ^[Yy]$ ]]
 }
@@ -76,10 +104,11 @@ choose_iface() {
   mapfile -t ifs < <(list_ifaces)
   [[ "${#ifs[@]}" -gt 0 ]] || die "No usable network interfaces found."
 
-  log "$title"
+  # menu goes to stderr — stdout is captured as this function's return value
+  printf '%b\n' "${GREEN}[deploy]${NC} $title" >&2
   local i=1
   for n in "${ifs[@]}"; do
-    echo "  [$i] $n"
+    echo "  [$i] $n" >&2
     i=$((i+1))
   done
 
@@ -91,22 +120,23 @@ choose_iface() {
 }
 
 gen_secret() {
-  # Generate a URL-safe random secret; falls back to /dev/urandom if openssl unavailable.
-  if have openssl; then
-    openssl rand -base64 48 | tr -d '\n/+=' | head -c 50
-  else
-    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 50
-  fi
+  # URL-safe random secret. The subshell disables pipefail so `head` closing the
+  # pipe early does not SIGPIPE-kill the upstream command (which would abort the
+  # whole script under `set -o pipefail`).
+  ( set +o pipefail
+    if have openssl; then
+      openssl rand -base64 48 | tr -d '\n/+=' | head -c 50
+    else
+      LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 50
+    fi )
 }
 
 ensure_dirs() {
   log "Creating required directories..."
-  mkdir -p data/awx_postgres
-  mkdir -p data/awx_projects
+  mkdir -p data/ccp
   mkdir -p data/webfs_share
   mkdir -p services/webfs/htdocs/linux
   mkdir -p services/tftp/tftpboot
-  mkdir -p services/awx
   # dnsmasq writes leases here; must exist as a file before Docker bind-mounts it
   touch data/dnsmasq.leases
   # iPXE Manager state (entries.json lives inside; directory mount keeps
@@ -124,7 +154,13 @@ ensure_docker() {
       case "$os" in
         ubuntu|debian)
           sudo_run apt-get update -y
-          sudo_run apt-get install -y docker.io docker-compose-plugin curl ca-certificates
+          sudo_run apt-get install -y docker.io curl ca-certificates
+          # The compose v2 plugin package is named differently across releases
+          # (docker-compose-v2 on newer Ubuntu, docker-compose-plugin elsewhere);
+          # try both, then verify `docker compose` works just below.
+          sudo_run apt-get install -y docker-compose-v2 2>/dev/null \
+            || sudo_run apt-get install -y docker-compose-plugin 2>/dev/null \
+            || warn "No compose plugin package installed via apt — will verify 'docker compose' next."
           sudo_run systemctl enable --now docker || true
           ;;
         *)
@@ -165,7 +201,7 @@ DNS_SERVER=${DNS_SERVER}
 # ==== Ports ====
 WEBFS_PORT=${WEBFS_PORT}
 IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT}
-AWX_HTTP_PORT=${AWX_HTTP_PORT}
+CCP_PORT=${CCP_PORT}
 MONITOR_PORT=${MONITOR_PORT}
 MONITOR_REFRESH=${MONITOR_REFRESH:-30}
 
@@ -174,12 +210,11 @@ MONITOR_REFRESH=${MONITOR_REFRESH:-30}
 # Quoted so a password containing spaces survives sourcing and compose parsing.
 IPXE_MANAGER_PASSWORD="${IPXE_MANAGER_PASSWORD:-}"
 
-# ==== AWX settings ====
-AWX_VERSION=${AWX_VERSION}
-AWX_ADMIN_USER=${AWX_ADMIN_USER}
-AWX_ADMIN_PASSWORD="${AWX_ADMIN_PASSWORD}"
-AWX_DB_PASSWORD="${AWX_DB_PASSWORD}"
-AWX_SECRET_KEY="${AWX_SECRET_KEY}"
+# ==== Cluster Control Panel (CCP) ====
+CCP_ADMIN_USER=${CCP_ADMIN_USER}
+CCP_ADMIN_PASSWORD="${CCP_ADMIN_PASSWORD}"
+CCP_DEMO=${CCP_DEMO:-0}
+CCP_SECRET_KEY="${CCP_SECRET_KEY}"
 EOF
   log "Wrote .env"
 }
@@ -211,62 +246,50 @@ env_wizard() {
 
   [[ "$PXE_IFACE" != "$WAN_IFACE" ]] || die "PXE_IFACE and WAN_IFACE must be different."
 
-  PXE_RANGE_START="$(prompt "PXE_RANGE_START" "${PXE_RANGE_START:-192.168.100.10}")"
-  PXE_RANGE_END="$(prompt "PXE_RANGE_END" "${PXE_RANGE_END:-192.168.100.200}")"
-  PXE_NETMASK="$(prompt "PXE_NETMASK" "${PXE_NETMASK:-255.255.255.0}")"
-  PXE_ROUTER_IP="$(prompt "PXE_ROUTER_IP (gateway for PXE clients)" "${PXE_ROUTER_IP:-192.168.100.1}")"
+  PXE_RANGE_START="$(prompt_ip "PXE_RANGE_START" "${PXE_RANGE_START:-192.168.100.10}")"
+  PXE_RANGE_END="$(prompt_ip "PXE_RANGE_END" "${PXE_RANGE_END:-192.168.100.200}")"
+  PXE_NETMASK="$(prompt_ip "PXE_NETMASK" "${PXE_NETMASK:-255.255.255.0}")"
+  PXE_ROUTER_IP="$(prompt_ip "PXE_ROUTER_IP (gateway for PXE clients)" "${PXE_ROUTER_IP:-192.168.100.1}")"
 
-  WEBFS_HOST_IP="$(prompt "WEBFS_HOST_IP (clients reach webfs here)" "${WEBFS_HOST_IP:-192.168.100.1}")"
-  TFTP_SERVER_IP="$(prompt "TFTP_SERVER_IP" "${TFTP_SERVER_IP:-192.168.100.1}")"
-  DNS_SERVER="$(prompt "DNS_SERVER" "${DNS_SERVER:-8.8.8.8}")"
+  WEBFS_HOST_IP="$(prompt_ip "WEBFS_HOST_IP (clients reach webfs here)" "${WEBFS_HOST_IP:-192.168.100.1}")"
+  TFTP_SERVER_IP="$(prompt_ip "TFTP_SERVER_IP" "${TFTP_SERVER_IP:-192.168.100.1}")"
+  DNS_SERVER="$(prompt_ip "DNS_SERVER" "${DNS_SERVER:-8.8.8.8}")"
 
   WEBFS_PORT="$(prompt "WEBFS_PORT" "${WEBFS_PORT:-8080}")"
   IPXE_MANAGER_PORT="$(prompt "IPXE_MANAGER_PORT" "${IPXE_MANAGER_PORT:-8091}")"
-  AWX_HTTP_PORT="$(prompt "AWX_HTTP_PORT" "${AWX_HTTP_PORT:-8052}")"
+  CCP_PORT="$(prompt "CCP_PORT (Cluster Control Panel)" "${CCP_PORT:-8060}")"
   MONITOR_PORT="$(prompt "MONITOR_PORT" "${MONITOR_PORT:-8090}")"
 
-  # AWX version
-  AWX_VERSION="$(prompt "AWX_VERSION (see github.com/ansible/awx/releases)" "${AWX_VERSION:-23.9.0}")"
-
-  # AWX admin credentials
-  AWX_ADMIN_USER="$(prompt "AWX_ADMIN_USER" "${AWX_ADMIN_USER:-admin}")"
+  # Cluster Control Panel admin credentials
+  CCP_ADMIN_USER="$(prompt "CCP_ADMIN_USER (Control Panel admin login)" "${CCP_ADMIN_USER:-admin}")"
   while true; do
-    AWX_ADMIN_PASSWORD="$(prompt "AWX_ADMIN_PASSWORD (min 8 chars)")"
-    [[ "${#AWX_ADMIN_PASSWORD}" -ge 8 ]] && break
-    warn "Password must be at least 8 characters."
+    CCP_ADMIN_PASSWORD="$(prompt "CCP_ADMIN_PASSWORD (min 8 chars)")"
+    if [[ "${#CCP_ADMIN_PASSWORD}" -lt 8 ]]; then
+      warn "Password must be at least 8 characters."; continue
+    fi
+    # these characters break the double-quoted value in .env / shell sourcing
+    if [[ "$CCP_ADMIN_PASSWORD" == *['"\$`']* ]]; then
+      warn "Please avoid the characters  \"  \\  \$  \`  in the password."; continue
+    fi
+    break
   done
+  CCP_DEMO="${CCP_DEMO:-0}"
 
-  # Auto-generate secrets if not already set
-  if [[ -z "${AWX_DB_PASSWORD:-}" ]]; then
-    AWX_DB_PASSWORD="$(gen_secret)"
-    log "Generated AWX_DB_PASSWORD."
-  fi
-  if [[ -z "${AWX_SECRET_KEY:-}" ]]; then
-    AWX_SECRET_KEY="$(gen_secret)"
-    log "Generated AWX_SECRET_KEY."
+  # Flask session-signing key — generated once, then reused across runs
+  if [[ -z "${CCP_SECRET_KEY:-}" ]]; then
+    CCP_SECRET_KEY="$(gen_secret)"
+    log "Generated CCP_SECRET_KEY."
   fi
 
   write_env
   load_env
 }
 
-render_awx_credentials() {
-  local template="services/awx/credentials.py.template"
-  local output="services/awx/credentials.py"
-
-  [[ -f "$template" ]] || die "AWX credentials template not found: $template"
-
-  log "Rendering $output from template..."
-  # shellcheck disable=SC2016
-  AWX_DB_PASSWORD="${AWX_DB_PASSWORD}" envsubst '${AWX_DB_PASSWORD}' < "$template" > "$output"
-  log "Rendered $output"
-}
-
 fetch_ipxe_binaries() {
   local dst="services/tftp/tftpboot"
   mkdir -p "$dst"
 
-  if prompt_yesno "Download iPXE binaries (undionly.kpxe, ipxe.efi) into $dst now?"; then
+  if prompt_yesno "Download iPXE binaries (undionly.kpxe, ipxe.efi) into $dst now?" "Y"; then
     log "Downloading from boot.ipxe.org..."
     sudo_run apt-get update -y >/dev/null 2>&1 || true
     sudo_run apt-get install -y curl ca-certificates >/dev/null 2>&1 || true
@@ -281,7 +304,7 @@ fetch_ipxe_binaries() {
 
 compose_up() {
   log "Starting stack: docker compose up -d --build"
-  docker compose up -d --build
+  docker_cli compose up -d --build
   log "Stack started. (restart: unless-stopped is set on all services)"
 }
 
@@ -291,83 +314,79 @@ enable_ip_forwarding() {
   sudo_run sysctl --system >/dev/null
 }
 
-enable_nat_nftables() {
+enable_nat() {
   enable_ip_forwarding
   sudo_run apt-get update -y >/dev/null 2>&1 || true
-  sudo_run apt-get install -y nftables >/dev/null 2>&1 || true
+  sudo_run apt-get install -y iptables >/dev/null 2>&1 || true
+
+  # interface names are baked into a tiny config the NAT script sources, so the
+  # script itself is fully static (written from a quoted heredoc, no expansion)
+  log "Writing /etc/lab-nat.conf"
+  sudo_run bash -c "printf 'WAN_IFACE=%s\nPXE_IFACE=%s\n' '${WAN_IFACE}' '${PXE_IFACE}' > /etc/lab-nat.conf"
+
+  local tmp; tmp="$(mktemp)"
+  cat > "$tmp" <<'LABNAT'
+#!/usr/bin/env bash
+# Lab NAT: masquerade PXE/LAB clients out the WAN interface and permit
+# forwarding. Docker forces the filter FORWARD policy to DROP, so an ACCEPT in
+# a private table is not enough — the rules must live in DOCKER-USER, which
+# Docker evaluates (and preserves) ahead of its own rules. If DOCKER-USER is
+# absent (Docker not managing iptables) we fall back to the FORWARD chain.
+# Idempotent; works with both the iptables-legacy and iptables-nft backends.
+set -euo pipefail
+[ -r /etc/lab-nat.conf ] && . /etc/lab-nat.conf
+: "${WAN_IFACE:?WAN_IFACE not set}" ; : "${PXE_IFACE:?PXE_IFACE not set}"
+ACTION="${1:-up}"
+
+if iptables -L DOCKER-USER -n >/dev/null 2>&1; then FCHAIN=DOCKER-USER; else FCHAIN=FORWARD; fi
+
+if [ "$ACTION" = "down" ]; then
+  iptables -t nat -D POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null || true
+  iptables -D "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT 2>/dev/null || true
+  iptables -D "$FCHAIN" -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  exit 0
+fi
+
+iptables -t nat -C POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null \
+  || iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
+iptables -C "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT 2>/dev/null \
+  || iptables -I "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT
+iptables -C "$FCHAIN" -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+  || iptables -I "$FCHAIN" -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
+LABNAT
+  sudo_run install -m 0755 "$tmp" /usr/local/sbin/lab-nat.sh
+  rm -f "$tmp"
 
   local unit="/etc/systemd/system/lab-nat.service"
-  local script="/usr/local/sbin/lab-nat.sh"
-
-  log "Creating NAT script: $script"
-  sudo_run bash -c "cat > '$script' <<'EOS'
-#!/usr/bin/env bash
-set -euo pipefail
-WAN_IFACE=\"${WAN_IFACE}\"
-PXE_IFACE=\"${PXE_IFACE}\"
-
-nft list table ip lab_nat >/dev/null 2>&1 || nft add table ip lab_nat
-nft list chain ip lab_nat postrouting >/dev/null 2>&1 || nft 'add chain ip lab_nat postrouting { type nat hook postrouting priority 100; }'
-nft list chain ip lab_nat forward >/dev/null 2>&1     || nft 'add chain ip lab_nat forward { type filter hook forward priority 0; policy accept; }'
-
-nft flush chain ip lab_nat postrouting || true
-nft flush chain ip lab_nat forward     || true
-
-nft add rule ip lab_nat forward iifname \"${PXE_IFACE}\" oifname \"${WAN_IFACE}\" accept
-nft add rule ip lab_nat forward iifname \"${WAN_IFACE}\" oifname \"${PXE_IFACE}\" ct state established,related accept
-nft add rule ip lab_nat postrouting oifname \"${WAN_IFACE}\" masquerade
-EOS
-chmod +x '$script'"
-
-  log "Creating systemd unit: $unit"
-  sudo_run bash -c "cat > '$unit' <<EOF
+  tmp="$(mktemp)"
+  cat > "$tmp" <<'LABUNIT'
 [Unit]
-Description=Lab NAT (nftables) for PXE/LAB
-After=network-online.target
+Description=Lab NAT for PXE/LAB clients
+After=docker.service network-online.target
 Wants=network-online.target
+Requires=docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=$script
-ExecReload=$script
-ExecStop=/usr/sbin/nft delete table ip lab_nat
+ExecStart=/usr/local/sbin/lab-nat.sh up
+ExecReload=/usr/local/sbin/lab-nat.sh up
+ExecStop=/usr/local/sbin/lab-nat.sh down
 
 [Install]
 WantedBy=multi-user.target
-EOF"
+LABUNIT
+  sudo_run install -m 0644 "$tmp" "$unit"
+  rm -f "$tmp"
 
   sudo_run systemctl daemon-reload
   sudo_run systemctl enable --now lab-nat.service
-  log "NAT enabled (nftables). Verify: sudo nft list ruleset | grep lab_nat"
-}
-
-enable_nat_iptables() {
-  enable_ip_forwarding
-  sudo_run apt-get update -y >/dev/null 2>&1 || true
-  sudo_run apt-get install -y iptables iptables-persistent >/dev/null 2>&1 || true
-
-  log "Applying iptables NAT (MASQUERADE) rules..."
-  sudo_run iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
-  sudo_run iptables -A FORWARD -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT
-  sudo_run iptables -A FORWARD -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
-
-  sudo_run netfilter-persistent save
-  sudo_run systemctl enable --now netfilter-persistent
-  log "NAT enabled (iptables-persistent)."
+  log "NAT enabled. Verify:  sudo iptables -S DOCKER-USER ; sudo iptables -t nat -S POSTROUTING"
 }
 
 nat_wizard() {
-  if prompt_yesno "Enable persistent NAT for PXE/LAB clients?"; then
-    if prompt_yesno "Use recommended nftables method?"; then
-      enable_nat_nftables
-    else
-      if prompt_yesno "Use iptables-persistent fallback?"; then
-        enable_nat_iptables
-      else
-        warn "NAT skipped."
-      fi
-    fi
+  if prompt_yesno "Enable persistent NAT for PXE/LAB clients (recommended)?" "Y"; then
+    enable_nat
   else
     log "NAT not enabled."
   fi
@@ -405,7 +424,7 @@ EOF"
 
 check_stack() {
   log "=== Status ==="
-  docker ps || true
+  docker_cli ps || true
 
   if have curl; then
     local url="http://127.0.0.1:${WEBFS_PORT:-8080}/files/"
@@ -433,35 +452,28 @@ main() {
     env_wizard
   else
     load_env
-    # Ensure secrets exist even if wizard was skipped
-    if [[ -z "${AWX_DB_PASSWORD:-}" ]]; then
-      AWX_DB_PASSWORD="$(gen_secret)"
-      warn "AWX_DB_PASSWORD was empty — generated new value."
-      # Patch in-place atomically
+    # Ensure the session-signing key exists even if the wizard was skipped.
+    if [[ -z "${CCP_SECRET_KEY:-}" ]]; then
+      CCP_SECRET_KEY="$(gen_secret)"
+      warn "CCP_SECRET_KEY was empty — generated new value."
       local tmp; tmp="$(mktemp .env.XXXXXX)"
-      if grep -q '^AWX_DB_PASSWORD=' .env; then
-        sed "s|^AWX_DB_PASSWORD=.*|AWX_DB_PASSWORD=${AWX_DB_PASSWORD}|" .env > "$tmp"
+      if grep -q '^CCP_SECRET_KEY=' .env; then
+        sed "s|^CCP_SECRET_KEY=.*|CCP_SECRET_KEY=\"${CCP_SECRET_KEY}\"|" .env > "$tmp"
       else
-        { cat .env; echo "AWX_DB_PASSWORD=${AWX_DB_PASSWORD}"; } > "$tmp"
+        # guarantee a trailing newline before appending, so the new key never
+        # lands on the same line as the previous last entry
+        cp .env "$tmp"
+        [[ -s "$tmp" && -z "$(tail -c1 "$tmp")" ]] || echo >> "$tmp"
+        echo "CCP_SECRET_KEY=\"${CCP_SECRET_KEY}\"" >> "$tmp"
       fi
       mv "$tmp" .env
     fi
-    if [[ -z "${AWX_SECRET_KEY:-}" ]]; then
-      AWX_SECRET_KEY="$(gen_secret)"
-      warn "AWX_SECRET_KEY was empty — generated new value."
-      local tmp; tmp="$(mktemp .env.XXXXXX)"
-      if grep -q '^AWX_SECRET_KEY=' .env; then
-        sed "s|^AWX_SECRET_KEY=.*|AWX_SECRET_KEY=${AWX_SECRET_KEY}|" .env > "$tmp"
-      else
-        { cat .env; echo "AWX_SECRET_KEY=${AWX_SECRET_KEY}"; } > "$tmp"
-      fi
-      mv "$tmp" .env
-    fi
+    [[ -n "${CCP_ADMIN_PASSWORD:-}" ]] || \
+      warn "CCP_ADMIN_PASSWORD is empty in .env — set it before the Control Panel is usable."
     load_env
     log "Using existing .env as-is."
   fi
 
-  render_awx_credentials
   fetch_ipxe_binaries
   compose_up
   nat_wizard
@@ -478,10 +490,9 @@ main() {
   log "DONE."
   echo "Webfs:        http://${WEBFS_HOST_IP:-<host>}:${WEBFS_PORT:-8080}/"
   echo "iPXE Manager: http://${WEBFS_HOST_IP:-<host>}:${IPXE_MANAGER_PORT:-8091}/   (upload files, manage boot menu)"
-  echo "Monitor:      http://${WEBFS_HOST_IP:-<host>}:${MONITOR_PORT:-8090}/   (service health + DHCP leases)"
-  echo "AWX:          http://${WEBFS_HOST_IP:-<host>}:${AWX_HTTP_PORT:-8052}/   (admin: ${AWX_ADMIN_USER:-admin})"
+  echo "Monitor:       http://${WEBFS_HOST_IP:-<host>}:${MONITOR_PORT:-8090}/   (service health + DHCP leases)"
+  echo "Control Panel: http://${WEBFS_HOST_IP:-<host>}:${CCP_PORT:-8060}/   (ClusterShell + Ansible, login: ${CCP_ADMIN_USER:-admin})"
   echo
-  warn "AWX first boot runs DB migrations — allow ~2 minutes before the UI is ready."
   warn "Reminder: DHCP is running on PXE_IFACE=${PXE_IFACE:-<PXE_IFACE>}. Ensure no other DHCP server exists on that lab segment."
 }
 

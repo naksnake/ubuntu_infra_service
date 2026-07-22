@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block heading %}Audit Log{% endblock %}
+{% block body %}
+<div class="card">
+  <table>
+    <thead><tr><th>Time</th><th>User</th><th>Action</th><th>Detail</th><th>IP</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><small>{{ r.ts | tstime }}</small></td>
+        <td>{{ r.username }}</td>
+        <td><span class="pill">{{ r.action }}</span></td>
+        <td>{{ r.detail }}</td>
+        <td class="mono"><small>{{ r.ip }}</small></td>
+      </tr>
+      {% else %}<tr><td colspan="5" class="empty">No audit entries yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

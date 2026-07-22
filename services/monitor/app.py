@@ -10,9 +10,9 @@ LEASES_FILE      = os.environ.get('LEASES_FILE', '/data/dnsmasq.leases')
 REFRESH_INTERVAL = int(os.environ.get('REFRESH_INTERVAL', '30'))
 # ports for the dashboard quick-links (the browser fills in the host)
 LINKS = [
-    {'label': 'iPXE Manager', 'port': os.environ.get('IPXE_MANAGER_PORT', '8091'), 'icon': '☁'},
-    {'label': 'File server',  'port': os.environ.get('WEBFS_PORT', '8080'),         'icon': '\U0001F4C1', 'path': 'files/'},
-    {'label': 'AWX',          'port': os.environ.get('AWX_HTTP_PORT', '8052'),      'icon': '⚙'},
+    {'label': 'iPXE Manager',    'port': os.environ.get('IPXE_MANAGER_PORT', '8091'), 'icon': '☁'},
+    {'label': 'File server',     'port': os.environ.get('WEBFS_PORT', '8080'),        'icon': '\U0001F4C1', 'path': 'files/'},
+    {'label': 'Control Panel',   'port': os.environ.get('CCP_PORT', '8060'),          'icon': '⚙'},
 ]
 
 
@@ -45,14 +45,20 @@ def get_containers():
         for c in client.containers.list(all=True):
             state  = c.attrs.get('State', {})
             health = state.get('Health', {}).get('Status', 'none')
+            # a container whose image was removed makes c.image raise — never let
+            # one bad container blank the whole dashboard
+            try:
+                image = (c.image.tags[0] if c.image and c.image.tags else
+                         c.image.short_id if c.image else '(unknown)')
+            except Exception:
+                image = '(image removed)'
             result.append({
                 'name':     c.name,
                 'status':   c.status,
                 'health':   health,
                 'uptime':   _uptime_str(state.get('StartedAt', '')),
                 'restarts': c.attrs.get('RestartCount', 0),
-                'image':    (c.image.tags[0] if c.image and c.image.tags else
-                             c.image.short_id if c.image else '(unknown)'),
+                'image':    image,
             })
         result.sort(key=lambda x: (0 if x['status'] == 'running' else 1, x['name']))
         return result, None
@@ -68,33 +74,41 @@ def get_leases():
         now = int(time.time())
         with open(LEASES_FILE) as fh:
             for line in fh:
-                parts = line.strip().split()
-                if len(parts) < 4:
-                    continue
+                # one malformed lease line must never blank the entire table
                 try:
-                    expiry_ts = int(parts[0])
-                except ValueError:
+                    parts = line.strip().split()
+                    if len(parts) < 4:
+                        continue
+                    try:
+                        expiry_ts = int(parts[0])
+                    except ValueError:
+                        continue
+                    mac       = parts[1].upper()
+                    ip        = parts[2]
+                    hostname  = parts[3] if parts[3] != '*' else '(unknown)'
+                    remaining = expiry_ts - now
+                    if remaining <= 0:
+                        expires_str   = 'Expired'
+                        remaining_str = 'Expired'
+                    else:
+                        expires_str   = datetime.datetime.fromtimestamp(expiry_ts).strftime('%Y-%m-%d %H:%M')
+                        h, m          = divmod(remaining // 60, 60)
+                        remaining_str = f'{h}h {m}m'
+                    # IPv4 sorts numerically; anything else sorts last
+                    octets = ip.split('.')
+                    sort_key = [int(o) for o in octets] if (
+                        len(octets) == 4 and all(o.isdigit() for o in octets)) else [999]
+                    leases.append({
+                        'ip':        ip,
+                        'mac':       mac,
+                        'hostname':  hostname,
+                        'expires':   expires_str,
+                        'remaining': remaining_str,
+                        'expired':   remaining <= 0,
+                        'sort_key':  sort_key,
+                    })
+                except Exception:
                     continue
-                mac       = parts[1].upper()
-                ip        = parts[2]
-                hostname  = parts[3] if parts[3] != '*' else '(unknown)'
-                remaining = expiry_ts - now
-                if remaining <= 0:
-                    expires_str   = 'Expired'
-                    remaining_str = 'Expired'
-                else:
-                    expires_str   = datetime.datetime.fromtimestamp(expiry_ts).strftime('%Y-%m-%d %H:%M')
-                    h, m          = divmod(remaining // 60, 60)
-                    remaining_str = f'{h}h {m}m'
-                leases.append({
-                    'ip':        ip,
-                    'mac':       mac,
-                    'hostname':  hostname,
-                    'expires':   expires_str,
-                    'remaining': remaining_str,
-                    'expired':   remaining <= 0,
-                    'sort_key':  [int(p) for p in ip.split('.')],
-                })
         leases.sort(key=lambda x: x['sort_key'])
         return leases, None
     except Exception as exc:

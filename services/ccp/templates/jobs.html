@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block heading %}Job History{% endblock %}
+{% block body %}
+<div class="card">
+  <table>
+    <thead><tr><th>#</th><th>Kind</th><th>Target</th><th>Status</th><th>By</th><th>Started</th><th>Finished</th>{% if role_ok('admin') %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+      {% for j in jobs %}
+      <tr>
+        <td><a href="{{ url_for('job_detail', job_id=j.id) }}">{{ j.id }}</a></td>
+        <td>{{ j.kind }}</td>
+        <td class="mono">{{ j.target or '—' }}</td>
+        <td><span class="badge st-{{ j.status }}">{{ j.status }}{% if j.exit_code is not none %} · {{ j.exit_code }}{% endif %}</span></td>
+        <td>{{ j.created_by }}</td>
+        <td><small>{{ j.created_at | tstime }}</small></td>
+        <td><small>{{ j.finished_at | tstime }}</small></td>
+        {% if role_ok('admin') %}<td><button class="btn btn-danger btn-sm" onclick="del('/api/jobs/{{ j.id }}','Delete job {{ j.id }}?')">Delete</button></td>{% endif %}
+      </tr>
+      {% else %}<tr><td colspan="8" class="empty">No jobs yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

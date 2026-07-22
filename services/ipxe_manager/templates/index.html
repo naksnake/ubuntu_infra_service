@@ -161,6 +161,7 @@ header span { color: var(--muted); font-size: 12px; }
   <div class="tabs">
     <button class="tab active" onclick="switchTab('files',this)">Files</button>
     <button class="tab" onclick="switchTab('menu',this)">Boot Menu</button>
+    <button class="tab" onclick="switchTab('autoinstall',this)">Autoinstall</button>
     <button class="tab" onclick="switchTab('preview',this)">iPXE Preview</button>
   </div>
 
@@ -205,6 +206,26 @@ header span { color: var(--muted); font-size: 12px; }
       Use &#8679;&#8681; to set the <strong>boot order</strong> — this is the order shown in the PXE menu, and the
       top enabled entry (marked <span class="badge badge-default">default</span>) boots automatically after the 30&nbsp;s timeout.
     </p>
+  </div>
+
+  <!-- ─── AUTOINSTALL ─── -->
+  <div id="tab-autoinstall" class="panel">
+    <div class="uefi-note warn" style="margin-bottom:16px">
+      &#9888;&#65039; <strong>Autoinstall performs an unattended OS install and ERASES the target disk.</strong>
+      A profile is a cloud-init <em>NoCloud</em> seed served over HTTP. Attach one to a
+      <strong>Kernel&nbsp;+&nbsp;initrd</strong> boot entry (whose command line points at the matching
+      live-server ISO); the seed URL is added to the kernel line automatically. Entries with a profile
+      are flagged in the menu and are best left <strong>disabled</strong> until you intend to reinstall.
+    </div>
+    <div class="section">
+      <div class="section-head">
+        <h2>Autoinstall Profiles</h2>
+        <button class="btn btn-primary btn-sm" onclick="openProfile()">+ New Profile</button>
+      </div>
+      <div class="section-body" style="padding-top:10px">
+        <div id="profileList"><div class="empty"><span class="icon">&#128295;</span>No profiles yet</div></div>
+      </div>
+    </div>
   </div>
 
   <!-- ─── PREVIEW ─── -->
@@ -268,6 +289,13 @@ header span { color: var(--muted); font-size: 12px; }
           <textarea id="cmdline" placeholder="ip=dhcp url=http://SERVER:8080/files/your.iso autoinstall" oninput="onFieldChange()"></textarea>
           <span class="hint">For an HTTP ISO/rootfs install, reference its URL here (copy one from the list below).</span>
         </div>
+        <div class="field">
+          <label>Autoinstall profile (optional — unattended, ERASES DISK)</label>
+          <select id="entryAutoinstall" onchange="onFieldChange()">
+            <option value="">— none (interactive install) —</option>
+          </select>
+          <span class="hint">Attaches a cloud-init NoCloud seed; the <code>autoinstall ds=nocloud-net;s=…</code> argument is appended to the kernel line automatically. Manage profiles in the Autoinstall tab.</span>
+        </div>
         <div class="field" id="httpSources">
           <label>HTTP sources on the file server (click to copy the URL)</label>
           <div id="sourceList" class="source-list"></div>
@@ -307,11 +335,50 @@ header span { color: var(--muted); font-size: 12px; }
   </div>
 </div>
 
+<!-- ─── MODAL: AUTOINSTALL PROFILE ─── -->
+<div class="modal-backdrop" id="profileModal">
+  <div class="modal" style="width:640px">
+    <div class="modal-head">
+      <h3 id="profileModalTitle">New Autoinstall Profile</h3>
+      <button class="modal-close" onclick="closeProfile()">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="profileId">
+      <div class="uefi-note warn">&#9888;&#65039; This seed drives an <strong>unattended install that erases the target disk</strong>. Review it before use.</div>
+      <div class="row" style="gap:14px">
+        <div class="field" style="flex:1">
+          <label>Profile name</label>
+          <input type="text" id="profileName" placeholder="e.g. Ubuntu 24.04 unattended">
+        </div>
+        <div class="field" style="flex:1">
+          <label>Install hostname (optional)</label>
+          <input type="text" id="profileHostname" placeholder="ubuntu-lab">
+        </div>
+      </div>
+      <div class="field">
+        <label>Seed URL (given to the installer)</label>
+        <div class="url-field"><span class="url-prefix" id="profileSeed">—</span></div>
+      </div>
+      <div class="field">
+        <label>user-data (cloud-init / autoinstall YAML)</label>
+        <textarea id="profileUserData" style="min-height:280px"></textarea>
+        <span class="hint">Must be valid YAML. Kept as-is and served at <code>/autoinstall/&lt;id&gt;/user-data</code>; <code>meta-data</code> is generated for you.</span>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeProfile()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveProfile()">Save Profile</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
 let _files = [];
 let _entries = [];
+let _profiles = [];
+let _aiTemplate = '#cloud-config\n';
 
 // ── tab switching ──────────────────────────────────────────────────────────
 function switchTab(name, el) {
@@ -322,6 +389,7 @@ function switchTab(name, el) {
   if (name === 'preview') loadPreview();
   if (name === 'menu') loadEntries();
   if (name === 'files') loadFiles();
+  if (name === 'autoinstall') loadProfiles();
 }
 
 // ── toast ──────────────────────────────────────────────────────────────────
@@ -362,13 +430,13 @@ function renderFiles() {
   const el = document.getElementById('fileList');
   if (!_files.length) { el.innerHTML = '<div class="empty"><span class="icon">📁</span>No files uploaded yet</div>'; return; }
   el.innerHTML = _files.map(f => `
-    <div class="file-row" id="frow-${CSS.escape(f.name)}">
+    <div class="file-row">
       <span class="file-icon">${fileIcon(f.name)}</span>
-      <span class="file-name" title="${f.url}">${f.name}</span>
+      <span class="file-name" title="${escHtml(f.url)}">${escHtml(f.name)}</span>
       <span class="file-size">${fmtSize(f.size)}</span>
       <div class="file-actions">
-        <button class="btn btn-ghost btn-sm" onclick="copyText('${f.url}')" title="Copy URL">&#128203;</button>
-        <button class="btn btn-danger btn-sm" onclick="deleteFile('${f.name}')">&#128465;</button>
+        <button class="btn btn-ghost btn-sm" onclick="copyText('${escJs(f.url)}')" title="Copy URL">&#128203;</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteFile('${escJs(f.name)}')">&#128465;</button>
       </div>
     </div>`).join('');
 }
@@ -533,6 +601,7 @@ function currentFormEntry() {
     body.kernel  = document.getElementById('kernelFile').value.trim();
     body.initrd  = document.getElementById('initrdFile').value.trim();
     body.cmdline = document.getElementById('cmdline').value.trim();
+    body.autoinstall = document.getElementById('entryAutoinstall').value;
   } else if (type === 'iso') {
     body.iso = document.getElementById('isoFile').value.trim();
   } else {
@@ -571,6 +640,9 @@ function openModal(id) {
   document.getElementById('cmdline').value      = e?.cmdline || '';
   document.getElementById('isoFile').value      = e?.iso     || '';
   document.getElementById('chainUrl').value     = e?.url     || '';
+  // ensure the profile dropdown is populated before selecting the entry's value
+  if (!_profiles.length) { loadProfiles().then(() => { document.getElementById('entryAutoinstall').value = e?.autoinstall || ''; renderSnippet(); }); }
+  document.getElementById('entryAutoinstall').value = e?.autoinstall || '';
   switchType();
   document.getElementById('modal').classList.add('open');
   document.getElementById('entryName').focus();
@@ -607,6 +679,85 @@ async function saveEntry() {
   closeModal(); loadEntries();
 }
 
+// ── autoinstall profiles ─────────────────────────────────────────────────────
+async function loadProfiles() {
+  const r = await fetch('/api/autoinstall');
+  const j = await r.json();
+  _profiles = j.profiles || [];
+  if (j.template) _aiTemplate = j.template;
+  renderProfiles();
+  populateProfileSelect();
+}
+
+function renderProfiles() {
+  const el = document.getElementById('profileList');
+  if (!el) return;
+  if (!_profiles.length) {
+    el.innerHTML = '<div class="empty"><span class="icon">&#128295;</span>No profiles yet — create one to enable unattended installs.</div>';
+    return;
+  }
+  el.innerHTML = _profiles.map(p => `
+    <div class="entry-card">
+      <div class="entry-info">
+        <div class="entry-name">${escHtml(p.name)}</div>
+        <div class="entry-meta">${escHtml(p.seed_url)}</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="copyText('${escJs(p.seed_url)}')" title="Copy seed URL">&#128203;</button>
+      <button class="btn btn-ghost btn-sm" onclick="openProfile('${escJs(p.id)}')">Edit</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteProfile('${escJs(p.id)}')">&#128465;</button>
+    </div>`).join('');
+}
+
+function populateProfileSelect() {
+  const sel = document.getElementById('entryAutoinstall');
+  if (!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— none (interactive install) —</option>' +
+    _profiles.map(p => `<option value="${escHtml(p.id)}">${escHtml(p.name)} — ERASES DISK</option>`).join('');
+  sel.value = cur;
+}
+
+async function openProfile(id) {
+  // make sure the list/template are loaded even if opened from the menu tab
+  if (!_profiles.length && !id) { try { await loadProfiles(); } catch {} }
+  let p = id ? _profiles.find(x => x.id === id) : null;
+  if (id) {
+    const r = await fetch('/api/autoinstall/' + id);
+    if (r.ok) p = await r.json();
+  }
+  document.getElementById('profileModalTitle').textContent = id ? 'Edit Autoinstall Profile' : 'New Autoinstall Profile';
+  document.getElementById('profileId').value = id || '';
+  document.getElementById('profileName').value = p?.name || '';
+  document.getElementById('profileHostname').value = p?.hostname || '';
+  document.getElementById('profileUserData').value = p?.user_data || _aiTemplate;
+  document.getElementById('profileSeed').textContent = p?.seed_url || '(assigned on save)';
+  document.getElementById('profileModal').classList.add('open');
+  document.getElementById('profileName').focus();
+}
+
+function closeProfile() { document.getElementById('profileModal').classList.remove('open'); }
+
+async function saveProfile() {
+  const body = {
+    id: document.getElementById('profileId').value || undefined,
+    name: document.getElementById('profileName').value.trim(),
+    hostname: document.getElementById('profileHostname').value.trim(),
+    user_data: document.getElementById('profileUserData').value,
+  };
+  if (!body.name) { toast('Profile name is required', false); return; }
+  const r = await fetch('/api/autoinstall', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!r.ok) { toast(await apiError(r, 'Save failed'), false); return; }
+  toast('Profile saved'); closeProfile(); loadProfiles();
+}
+
+async function deleteProfile(id) {
+  const p = _profiles.find(x => x.id === id);
+  if (!confirm(`Delete profile "${p?.name}"? Boot entries using it will fall back to an interactive install.`)) return;
+  const r = await fetch('/api/autoinstall/' + id, { method: 'DELETE' });
+  if (r.ok) toast('Profile deleted'); else toast(await apiError(r, 'Delete failed'), false);
+  loadProfiles();
+}
+
 // ── preview ────────────────────────────────────────────────────────────────
 async function loadPreview() {
   const r = await fetch('/api/preview');
@@ -615,11 +766,14 @@ async function loadPreview() {
 }
 
 // ── utils ──────────────────────────────────────────────────────────────────
-function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escHtml(s) { return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+// escape for a single-quoted JS string embedded in a double-quoted HTML attribute
+function escJs(s) { return String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;').replace(/</g,'\\x3c'); }
 function copyText(t) { navigator.clipboard.writeText(t).then(() => toast('Copied')); }
 
 // modal close on backdrop click
 document.getElementById('modal').addEventListener('click', e => { if (e.target === document.getElementById('modal')) closeModal(); });
+document.getElementById('profileModal').addEventListener('click', e => { if (e.target === document.getElementById('profileModal')) closeProfile(); });
 
 // Enter key in modal name field
 document.getElementById('entryName').addEventListener('keydown', e => { if (e.key === 'Enter') saveEntry(); });
@@ -631,7 +785,7 @@ fetch('/api/config').then(r => r.json()).then(cfg => {
   FILES_BASE = cfg.files_base;
   document.querySelectorAll('[data-prefix]').forEach(el => { el.textContent = FILES_BASE; });
 });
-loadFiles(); loadEntries();
+loadFiles(); loadEntries(); loadProfiles();
 </script>
 </body>
 </html>

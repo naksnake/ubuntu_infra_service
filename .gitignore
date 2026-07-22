@@ -17,15 +17,13 @@ __pycache__/
 .env
 
 # Persistent runtime data (bind mounts — never commit)
-data/awx_postgres/
-data/awx_projects/
 data/webfs_share/
-
-# Rendered AWX credentials (contains secrets — never commit)
-services/awx/credentials.py
 
 # DHCP lease database (runtime data)
 data/dnsmasq.leases
 
 # iPXE Manager state (runtime data)
 data/ipxe_manager/
+
+# Cluster Control Panel state: SQLite db, job logs, uploads, SSH key (secrets)
+data/ccp/

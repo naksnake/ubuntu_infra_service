@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block heading %}Nodes{% endblock %}
+{% block body %}
+{% if role_ok('operator') %}
+<div class="card">
+  <h2>Add node</h2>
+  <div class="row">
+    <div><label>Name</label><input id="n-name" placeholder="web-01"></div>
+    <div><label>Address / host</label><input id="n-addr" placeholder="192.168.100.20"></div>
+    <div><label>Connection</label>
+      <select id="n-conn"><option value="ssh">SSH</option><option value="local">Local (this host)</option></select></div>
+  </div>
+  <div class="row">
+    <div><label>SSH user</label><input id="n-user" value="root"></div>
+    <div><label>SSH port</label><input id="n-port" type="number" value="22"></div>
+    <div><label>Groups (comma-separated)</label><input id="n-groups" placeholder="web,prod"></div>
+  </div>
+  <div style="margin-top:14px"><button class="btn" onclick="addNode()">Add node</button></div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Inventory ({{ nodes|length }})</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Address</th><th>Conn</th><th>SSH</th><th>Groups</th>{% if role_ok('operator') %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+      {% for n in nodes %}
+      <tr>
+        <td><b>{{ n.name }}</b></td>
+        <td class="mono">{{ n.address }}</td>
+        <td>{{ n.conn }}</td>
+        <td class="mono">{% if n.conn=='ssh' %}{{ n.ssh_user }}@:{{ n.ssh_port }}{% else %}—{% endif %}</td>
+        <td>{% for g in n.groups.split(',') if g.strip() %}<span class="pill">{{ g.strip() }}</span>{% endfor %}</td>
+        {% if role_ok('operator') %}<td><button class="btn btn-danger btn-sm" onclick="del('/api/nodes/{{ n.id }}','Delete node {{ n.name }}?')">Delete</button></td>{% endif %}
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty">No nodes yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+async function addNode(){
+  const p={name:v('n-name'),address:v('n-addr'),conn:v('n-conn'),
+    ssh_user:v('n-user'),ssh_port:v('n-port'),groups:v('n-groups')};
+  if(!p.name||!p.address){toast('Name and address required',true);return;}
+  try{await api('POST','/api/nodes',p);toast('Node added');location.reload();}
+  catch(e){toast(e.message,true);}
+}
+function v(id){return document.getElementById(id).value;}
+</script>{% endblock %}
