@@ -9,6 +9,7 @@ Roles (increasing privilege): viewer < operator < admin
   admin    — operator + manage users, view audit log, delete jobs
 """
 import os
+import re
 import json
 import time
 import functools
@@ -221,15 +222,31 @@ def api_add_node():
     d = request.get_json(force=True) or {}
     name = (d.get('name') or '').strip()
     address = (d.get('address') or '').strip()
+    ssh_user = (d.get('ssh_user') or 'root').strip()
     if not name or not address:
         return jsonify({'error': 'name and address are required'}), 400
+    # names/addresses/users flow into a ClusterShell NodeSet and an Ansible
+    # inventory file, so restrict them to safe characters (no whitespace,
+    # newlines, '=', or NodeSet range brackets that would corrupt either)
+    if not re.fullmatch(r'[A-Za-z0-9._-]{1,63}', name):
+        return jsonify({'error': 'name may contain only letters, digits, dot, dash, underscore'}), 400
+    if not re.fullmatch(r'[A-Za-z0-9._:-]{1,255}', address):
+        return jsonify({'error': 'address may contain only letters, digits, dot, colon, dash'}), 400
+    if not re.fullmatch(r'[A-Za-z0-9._-]{1,32}', ssh_user):
+        return jsonify({'error': 'ssh user may contain only letters, digits, dot, dash, underscore'}), 400
+    try:
+        port = int(d.get('ssh_port') or 22)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'ssh port must be a number'}), 400
+    if not (1 <= port <= 65535):
+        return jsonify({'error': 'ssh port must be 1-65535'}), 400
     conn = 'local' if d.get('conn') == 'local' else 'ssh'
     try:
         node_id = db.execute(
             'INSERT INTO nodes (name, address, conn, ssh_user, ssh_port, groups, created_at) '
             'VALUES (?,?,?,?,?,?,?)',
-            (name, address, conn, (d.get('ssh_user') or 'root').strip(),
-             int(d.get('ssh_port') or 22), (d.get('groups') or '').strip(), int(time.time())))
+            (name, address, conn, ssh_user, port,
+             (d.get('groups') or '').strip(), int(time.time())))
     except Exception as exc:
         return jsonify({'error': f'could not add node: {exc}'}), 400
     log_action('node.add', name)

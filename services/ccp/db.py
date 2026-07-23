@@ -6,6 +6,7 @@ control panel comfortably; the schema is created and the bootstrap admin seeded
 on first import.
 """
 import os
+import sys
 import json
 import time
 import sqlite3
@@ -115,6 +116,13 @@ def init_db():
     conn.executescript(SCHEMA)
     conn.commit()
 
+    # The single worker runs jobs in in-process threads; if it restarts, those
+    # threads are gone, so any job still marked 'running' is orphaned. Reap them
+    # so they don't linger forever.
+    conn.execute("UPDATE jobs SET status='failed', finished_at=? "
+                 "WHERE status='running'", (int(time.time()),))
+    conn.commit()
+
     admin_user = os.environ.get('CCP_ADMIN_USER', 'admin')
     admin_pw = os.environ.get('CCP_ADMIN_PASSWORD', '')
     have_users = conn.execute('SELECT COUNT(*) AS c FROM users').fetchone()['c']
@@ -123,6 +131,14 @@ def init_db():
             'INSERT INTO users (username, password_hash, role, created_at) VALUES (?,?,?,?)',
             (admin_user, generate_password_hash(admin_pw), 'admin', int(time.time())))
         conn.commit()
+    elif have_users == 0 and not admin_pw:
+        # No users and no bootstrap password → nobody can log in and there is no
+        # way to create the first account. Make the cause obvious in the logs.
+        sys.stderr.write(
+            '[ccp] WARNING: no users exist and CCP_ADMIN_PASSWORD is not set — '
+            'login is impossible. Set CCP_ADMIN_PASSWORD in .env and recreate the '
+            'container (docker compose up -d --force-recreate ccp).\n')
+        sys.stderr.flush()
 
     if os.environ.get('CCP_DEMO', '').lower() in ('1', 'true', 'yes'):
         _seed_demo(conn)

@@ -139,6 +139,9 @@ services:
       - CCP_JOBS_DIR=/data/ccp/jobs
       - CCP_FILES_DIR=/data/ccp/files
       - CCP_SSH_KEY=/data/ccp/ssh/id_ccp
+      # hard per-job wall-clock cap (seconds) so a hung command/playbook can't
+      # pin a worker thread forever
+      - CCP_JOB_TIMEOUT=${CCP_JOB_TIMEOUT:-900}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/healthz')\""]
       interval: 30s

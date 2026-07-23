@@ -19,6 +19,9 @@ import db
 
 JOBS_DIR = os.environ.get('CCP_JOBS_DIR', '/data/ccp/jobs')
 SSH_KEY = os.environ.get('CCP_SSH_KEY', '/data/ccp/ssh/id_ccp')
+# hard wall-clock cap per job so a hung command/playbook can't pin a worker
+# thread (and leave the job stuck 'running') forever
+JOB_TIMEOUT = int(os.environ.get('CCP_JOB_TIMEOUT', '900'))
 SSH_COMMON = ['-o', 'StrictHostKeyChecking=no',
               '-o', 'UserKnownHostsFile=/dev/null',
               '-o', 'ConnectTimeout=10',
@@ -88,13 +91,17 @@ def _run_shell(job_id, spec, log):
 
     for n in local:
         log.write(f'===== {n["name"]} ({n["address"]}, local) =====\n')
-        p = subprocess.run(['/bin/sh', '-c', command],
-                           capture_output=True, text=True)
-        log.write(p.stdout)
-        if p.stderr:
-            log.write(p.stderr)
-        log.write(f'[exit {p.returncode}]\n\n')
-        worst = max(worst, p.returncode)
+        try:
+            p = subprocess.run(['/bin/sh', '-c', command],
+                               capture_output=True, text=True, timeout=JOB_TIMEOUT)
+            log.write(p.stdout)
+            if p.stderr:
+                log.write(p.stderr)
+            log.write(f'[exit {p.returncode}]\n\n')
+            worst = max(worst, p.returncode)
+        except subprocess.TimeoutExpired:
+            log.write(f'[ccp] command timed out after {JOB_TIMEOUT}s\n[exit 124]\n\n')
+            worst = max(worst, 124)
 
     if remote:
         worst = max(worst, _run_shell_clustershell(remote, command, log))
@@ -125,8 +132,12 @@ def _run_shell_clustershell(remote, command, log):
             ssh_opts += ['-i', SSH_KEY]
         task.set_info('ssh_user', user)
         task.set_info('ssh_options', ' '.join(shlex.quote(o) for o in ssh_opts))
-        task.run(command, nodes=NodeSet.fromlist(addrs))
+        task.run(command, nodes=NodeSet.fromlist(addrs), timeout=JOB_TIMEOUT)
 
+        if task.num_timeout():
+            worst = max(worst, 124)
+            for node in task.iter_keys_timeout():
+                log.write(f'[{addr2name.get(str(node), node)} timed out after {JOB_TIMEOUT}s]\n')
         for buf, nodelist in task.iter_buffers():
             for node in nodelist:
                 name = addr2name.get(str(node), str(node))
@@ -183,9 +194,24 @@ def _run_ansible(job_id, spec, log):
         log.write(f'[ccp] {" ".join(shlex.quote(c) for c in cmd)}\n\n')
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, env=env)
-        for line in proc.stdout:
-            log.write(line)
-        proc.wait()
+        # watchdog: streaming line-by-line blocks until EOF, so a hung playbook
+        # is killed out-of-band after JOB_TIMEOUT
+        timed_out = {'v': False}
+        def _kill():
+            if proc.poll() is None:
+                timed_out['v'] = True
+                proc.kill()
+        wd = threading.Timer(JOB_TIMEOUT, _kill)
+        wd.start()
+        try:
+            for line in proc.stdout:
+                log.write(line)
+            proc.wait()
+        finally:
+            wd.cancel()
+        if timed_out['v']:
+            log.write(f'\n[ccp] playbook timed out after {JOB_TIMEOUT}s\n')
+            return 124
         return proc.returncode
 
 
