@@ -6,7 +6,11 @@ log-dhcp
 log-facility=-
 
 dhcp-leasefile=/data/dnsmasq.leases
-dhcp-range=${PXE_RANGE_START},${PXE_RANGE_END},${PXE_NETMASK},12h
+dhcp-range=${PXE_RANGE_START},${PXE_RANGE_END},${PXE_NETMASK},${PXE_LEASE_TIME}
+
+# Fixed IP-to-MAC reservations (one per line: <mac>,<ip>[,<hostname>][,<lease>]).
+# Maintained in services/dhcp/static-hosts.conf, bind-mounted here read-only.
+dhcp-hostsfile=/etc/dnsmasq-static-hosts.conf
 dhcp-option=option:router,${PXE_ROUTER_IP}
 dhcp-option=option:dns-server,${DNS_SERVER}
 

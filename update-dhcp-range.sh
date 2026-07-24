@@ -42,6 +42,14 @@ fi
 validate_ip "$NEW_START"
 validate_ip "$NEW_END"
 
+ip_to_int() {
+  local o1 o2 o3 o4
+  IFS='.' read -r o1 o2 o3 o4 <<< "$1"
+  echo $(( (o1 << 24) | (o2 << 16) | (o3 << 8) | o4 ))
+}
+(( $(ip_to_int "$NEW_START") <= $(ip_to_int "$NEW_END") )) \
+  || die "Range start ($NEW_START) must not be above range end ($NEW_END)."
+
 log "Updating .env: $NEW_START – $NEW_END"
 _tmp="$(mktemp "${ROOT_DIR}/.env.XXXXXX")"
 sed \

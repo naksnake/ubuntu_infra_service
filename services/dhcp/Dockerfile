@@ -5,6 +5,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY dnsmasq.conf.template /etc/dnsmasq.conf.template
+COPY static-hosts.conf /etc/dnsmasq-static-hosts.conf
 COPY entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh && mkdir -p /srv/tftp
