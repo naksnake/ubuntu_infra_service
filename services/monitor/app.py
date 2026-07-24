@@ -1,13 +1,11 @@
 import os
 import sys
 import time
-import shlex
 import secrets
-import functools
 import datetime
 
 from flask import (Flask, render_template, jsonify, request, session,
-                   redirect, url_for, Response, abort, flash)
+                   redirect, url_for, Response, flash)
 from werkzeug.security import generate_password_hash, check_password_hash
 import docker
 
@@ -16,7 +14,6 @@ app = Flask(__name__)
 LEASES_FILE      = os.environ.get('LEASES_FILE', '/data/dnsmasq.leases')
 REFRESH_INTERVAL = int(os.environ.get('REFRESH_INTERVAL', '30'))
 SESSION_MINUTES  = int(os.environ.get('MONITOR_SESSION_MINUTES', '30'))
-CONSOLE_TIMEOUT  = int(os.environ.get('MONITOR_CONSOLE_TIMEOUT', '60'))
 
 app.config.update(
     SECRET_KEY=os.environ.get('MONITOR_SECRET_KEY') or secrets.token_hex(32),
@@ -33,14 +30,11 @@ LINKS = [
     {'label': 'Control Panel', 'port': os.environ.get('CCP_PORT', '8060'),          'icon': '⚙'},
 ]
 
-# ── users / RBAC (roles: viewer < admin) ──────────────────────────────────────
-ROLES = ('viewer', 'admin')
-_RANK = {r: i for i, r in enumerate(ROLES)}
-
-
+# ── users / roles ─────────────────────────────────────────────────────────────
+# Login is required for the whole dashboard; accounts carry a role (admin or a
+# read-only viewer) shown in the top bar. Passwords are hashed once at startup.
 def _load_users():
-    """Build the account table from the environment. Admin can use the Console;
-    viewer is read-only. Passwords are hashed once at startup."""
+    """Build the account table from the environment."""
     users = {}
     au = os.environ.get('MONITOR_ADMIN_USER', 'admin')
     ap = os.environ.get('MONITOR_ADMIN_PASSWORD', '')
@@ -71,23 +65,6 @@ def audit(action, detail=''):
     sys.stderr.flush()
 
 
-def role_ok(minimum):
-    return _RANK.get(session.get('role'), -1) >= _RANK[minimum]
-
-
-def require(minimum):
-    def deco(fn):
-        @functools.wraps(fn)
-        def wrap(*a, **kw):
-            if not role_ok(minimum):
-                if request.path.startswith('/api/'):
-                    return jsonify({'error': f'forbidden: requires {minimum}'}), 403
-                abort(403)
-            return fn(*a, **kw)
-        return wrap
-    return deco
-
-
 PUBLIC_PATHS = {'/login', '/healthz'}
 
 
@@ -109,8 +86,7 @@ def _guard():
 @app.context_processor
 def _inject():
     return {'cur_user': session.get('user'), 'cur_role': session.get('role'),
-            'is_admin': role_ok('admin'), 'csrf_token': session.get('csrf'),
-            'session_minutes': SESSION_MINUTES}
+            'csrf_token': session.get('csrf'), 'session_minutes': SESSION_MINUTES}
 
 
 # ── data (dashboard) ──────────────────────────────────────────────────────────
@@ -158,14 +134,6 @@ def get_containers():
         return result, None
     except Exception as exc:
         return [], str(exc)
-
-
-def running_container_names():
-    try:
-        client = docker.from_env()
-        return sorted(c.name for c in client.containers.list())
-    except Exception:
-        return []
 
 
 def get_leases():
@@ -257,13 +225,6 @@ def dashboard():
         refresh=REFRESH_INTERVAL, links=LINKS)
 
 
-@app.route('/console')
-@require('admin')
-def console_page():
-    return render_template('console.html', containers=running_container_names(),
-                           timeout=CONSOLE_TIMEOUT)
-
-
 # ── APIs ──────────────────────────────────────────────────────────────────────
 
 @app.route('/api/status')
@@ -271,38 +232,6 @@ def api_status():
     containers, _ = get_containers()
     leases,     _ = get_leases()
     return jsonify({'timestamp': int(time.time()), 'containers': containers, 'leases': leases})
-
-
-@app.route('/api/console/run', methods=['POST'])
-@require('admin')
-def console_run():
-    d = request.get_json(force=True) or {}
-    target  = (d.get('container') or '').strip()
-    command = d.get('command') or ''
-    if not command.strip():
-        return jsonify({'error': 'command is required'}), 400
-    try:
-        client = docker.from_env()
-        names = [c.name for c in client.containers.list()]
-    except Exception as exc:
-        return jsonify({'error': f'Docker is not reachable: {exc}'}), 500
-    if target not in names:
-        return jsonify({'error': 'unknown or not-running container'}), 400
-
-    audit('console.run', f'@{target}: {command[:200]}')
-    try:
-        cont = client.containers.get(target)
-        # run under `timeout` so a hung command cannot pin the worker; combined
-        # stdout+stderr; login shell so PATH is sane
-        wrapped = f'timeout {CONSOLE_TIMEOUT} /bin/sh -lc {shlex.quote(command)}'
-        res = cont.exec_run(['/bin/sh', '-lc', wrapped], demux=False, tty=False)
-        out = res.output.decode('utf-8', 'replace') if res.output else ''
-        rc = res.exit_code
-        if rc == 124:
-            out += f'\n[monitor] command timed out after {CONSOLE_TIMEOUT}s'
-        return jsonify({'container': target, 'exit_code': rc, 'output': out})
-    except Exception as exc:
-        return jsonify({'error': str(exc)}), 500
 
 
 if __name__ == '__main__':

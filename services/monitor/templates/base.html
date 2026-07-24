@@ -72,20 +72,6 @@
   #search:focus{border-color:var(--accent)}
   .error-banner{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#fca5a5;padding:10px 14px;border-radius:6px;margin-bottom:12px;font-size:12px}
   #progress-bar{position:fixed;top:0;left:0;height:3px;background:var(--accent);transition:width 1s linear;z-index:100}
-
-  /* console */
-  .warnbox{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.4);color:#fbbf24;padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:13px}
-  label{display:block;font-size:12px;color:var(--muted);margin:0 0 5px}
-  select,input,textarea{background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:9px 11px;font-family:var(--mono);font-size:13px;outline:none}
-  select:focus,input:focus,textarea:focus{border-color:var(--accent)}
-  .console-in{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
-  .console-in .cmd{flex:1;min-width:280px}
-  .console-in textarea{width:100%;resize:vertical;min-height:44px}
-  .term{margin-top:16px;background:#020617;border:1px solid var(--border);border-radius:8px;padding:14px 16px;
-    font-family:var(--mono);font-size:12.5px;white-space:pre-wrap;word-break:break-word;min-height:220px;max-height:520px;overflow:auto;color:#cbd5e1;line-height:1.5}
-  .term .cmdline{color:var(--green)}.term .rc0{color:var(--green)}.term .rcN{color:var(--red)}
-  .toast{position:fixed;bottom:22px;right:22px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:11px 16px;border-radius:8px;opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none;z-index:80;max-width:360px}
-  .toast.show{opacity:1;transform:none}.toast.err{border-color:var(--red);color:#fca5a5}
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -94,7 +80,6 @@
   <span class="brand">&#9678; Lab Monitor</span>
   <nav>
     <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.path=='/' }}">Dashboard</a>
-    {% if is_admin %}<a href="{{ url_for('console_page') }}" class="{{ 'active' if request.path=='/console' }}">Console</a>{% endif %}
   </nav>
   <div class="spacer"></div>
   <div class="who">
@@ -112,7 +97,6 @@
   {% endwith %}
   {% block body %}{% endblock %}
 </div>
-<div id="toast" class="toast"></div>
 {% block scripts %}{% endblock %}
 </body>
 </html>
