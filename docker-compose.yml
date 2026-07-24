@@ -111,8 +111,17 @@ services:
       - WEBFS_PORT=${WEBFS_PORT:-8080}
       - IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT:-8091}
       - CCP_PORT=${CCP_PORT:-8060}
+      # login + RBAC for the dashboard (admin reuses the Control Panel login by
+      # default; set MONITOR_VIEWER_PASSWORD to add a read-only account)
+      - MONITOR_SECRET_KEY=${MONITOR_SECRET_KEY}
+      - MONITOR_ADMIN_USER=${CCP_ADMIN_USER:-admin}
+      - MONITOR_ADMIN_PASSWORD=${CCP_ADMIN_PASSWORD}
+      - MONITOR_VIEWER_USER=${MONITOR_VIEWER_USER:-viewer}
+      - MONITOR_VIEWER_PASSWORD=${MONITOR_VIEWER_PASSWORD:-}
+      - MONITOR_SESSION_MINUTES=${MONITOR_SESSION_MINUTES:-30}
+      - MONITOR_CONSOLE_TIMEOUT=${MONITOR_CONSOLE_TIMEOUT:-60}
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/status')\""]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')\""]
       interval: 30s
       timeout: 5s
       retries: 3

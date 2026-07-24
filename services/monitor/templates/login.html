@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · Lab Monitor</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{--bg:#0f172a;--surface:#1e293b;--border:#334155;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;--red:#ef4444;
+    --mono:ui-monospace,"Cascadia Code",monospace}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);min-height:100vh;display:flex;align-items:center;justify-content:center}
+  .card{width:360px;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:30px}
+  .brand{color:var(--accent);font-size:18px;letter-spacing:.05em;text-align:center;margin-bottom:6px}
+  .sub{color:var(--muted);font-size:12px;text-align:center;margin-bottom:22px}
+  label{display:block;font-size:12px;color:var(--muted);margin:14px 0 5px}
+  input{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-family:inherit;font-size:14px;outline:none}
+  input:focus{border-color:var(--accent)}
+  .btn{width:100%;margin-top:20px;background:var(--accent);color:#04263a;border:none;border-radius:8px;padding:11px;font:inherit;font-weight:700;font-size:14px;cursor:pointer}
+  .btn:hover{filter:brightness(1.08)}
+  .flash{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#fca5a5;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:13px}
+</style>
+</head>
+<body>
+<form class="card" method="post">
+  <div class="brand">&#9678; Lab Monitor</div>
+  <div class="sub">Sign in to view service health and the console</div>
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}<div class="flash">{{ messages[0] }}</div>{% endif %}
+  {% endwith %}
+  <label for="username">Username</label>
+  <input id="username" name="username" autofocus autocomplete="username">
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password">
+  <button class="btn">Sign in</button>
+</form>
+</body>
+</html>

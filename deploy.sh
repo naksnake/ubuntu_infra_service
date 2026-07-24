@@ -131,6 +131,25 @@ gen_secret() {
     fi )
 }
 
+# Ensure a generated secret exists in .env for the named key; patches in place.
+ensure_env_secret() {
+  local name="$1" val="${!1:-}"
+  [[ -n "$val" ]] && return 0
+  val="$(gen_secret)"
+  printf -v "$name" '%s' "$val"
+  warn "$name was empty — generated new value."
+  local tmp; tmp="$(mktemp .env.XXXXXX)"
+  if grep -q "^${name}=" .env; then
+    sed "s|^${name}=.*|${name}=\"${val}\"|" .env > "$tmp"
+  else
+    # guarantee a trailing newline before appending
+    cp .env "$tmp"
+    [[ -s "$tmp" && -z "$(tail -c1 "$tmp")" ]] || echo >> "$tmp"
+    echo "${name}=\"${val}\"" >> "$tmp"
+  fi
+  mv "$tmp" .env
+}
+
 ensure_dirs() {
   log "Creating required directories..."
   mkdir -p data/ccp
@@ -215,6 +234,15 @@ CCP_ADMIN_USER=${CCP_ADMIN_USER}
 CCP_ADMIN_PASSWORD="${CCP_ADMIN_PASSWORD}"
 CCP_DEMO=${CCP_DEMO:-0}
 CCP_SECRET_KEY="${CCP_SECRET_KEY}"
+
+# ==== Monitor dashboard (login + RBAC) ====
+# The dashboard admin reuses CCP_ADMIN_USER / CCP_ADMIN_PASSWORD above.
+# Optionally set a read-only viewer account (leave password blank to disable).
+MONITOR_SESSION_MINUTES=${MONITOR_SESSION_MINUTES:-30}
+MONITOR_CONSOLE_TIMEOUT=${MONITOR_CONSOLE_TIMEOUT:-60}
+MONITOR_VIEWER_USER=${MONITOR_VIEWER_USER:-viewer}
+MONITOR_VIEWER_PASSWORD="${MONITOR_VIEWER_PASSWORD:-}"
+MONITOR_SECRET_KEY="${MONITOR_SECRET_KEY}"
 EOF
   log "Wrote .env"
 }
@@ -275,10 +303,14 @@ env_wizard() {
   done
   CCP_DEMO="${CCP_DEMO:-0}"
 
-  # Flask session-signing key — generated once, then reused across runs
+  # Flask session-signing keys — generated once, then reused across runs
   if [[ -z "${CCP_SECRET_KEY:-}" ]]; then
     CCP_SECRET_KEY="$(gen_secret)"
     log "Generated CCP_SECRET_KEY."
+  fi
+  if [[ -z "${MONITOR_SECRET_KEY:-}" ]]; then
+    MONITOR_SECRET_KEY="$(gen_secret)"
+    log "Generated MONITOR_SECRET_KEY."
   fi
 
   write_env
@@ -452,24 +484,11 @@ main() {
     env_wizard
   else
     load_env
-    # Ensure the session-signing key exists even if the wizard was skipped.
-    if [[ -z "${CCP_SECRET_KEY:-}" ]]; then
-      CCP_SECRET_KEY="$(gen_secret)"
-      warn "CCP_SECRET_KEY was empty — generated new value."
-      local tmp; tmp="$(mktemp .env.XXXXXX)"
-      if grep -q '^CCP_SECRET_KEY=' .env; then
-        sed "s|^CCP_SECRET_KEY=.*|CCP_SECRET_KEY=\"${CCP_SECRET_KEY}\"|" .env > "$tmp"
-      else
-        # guarantee a trailing newline before appending, so the new key never
-        # lands on the same line as the previous last entry
-        cp .env "$tmp"
-        [[ -s "$tmp" && -z "$(tail -c1 "$tmp")" ]] || echo >> "$tmp"
-        echo "CCP_SECRET_KEY=\"${CCP_SECRET_KEY}\"" >> "$tmp"
-      fi
-      mv "$tmp" .env
-    fi
+    # Ensure the session-signing keys exist even if the wizard was skipped.
+    ensure_env_secret CCP_SECRET_KEY
+    ensure_env_secret MONITOR_SECRET_KEY
     [[ -n "${CCP_ADMIN_PASSWORD:-}" ]] || \
-      warn "CCP_ADMIN_PASSWORD is empty in .env — set it before the Control Panel is usable."
+      warn "CCP_ADMIN_PASSWORD is empty in .env — set it before the Control Panel / dashboard login is usable."
     load_env
     log "Using existing .env as-is."
   fi

@@ -1,23 +1,121 @@
 import os
+import sys
 import time
+import shlex
+import secrets
+import functools
 import datetime
-from flask import Flask, render_template, jsonify
+
+from flask import (Flask, render_template, jsonify, request, session,
+                   redirect, url_for, Response, abort, flash)
+from werkzeug.security import generate_password_hash, check_password_hash
 import docker
 
 app = Flask(__name__)
 
 LEASES_FILE      = os.environ.get('LEASES_FILE', '/data/dnsmasq.leases')
 REFRESH_INTERVAL = int(os.environ.get('REFRESH_INTERVAL', '30'))
+SESSION_MINUTES  = int(os.environ.get('MONITOR_SESSION_MINUTES', '30'))
+CONSOLE_TIMEOUT  = int(os.environ.get('MONITOR_CONSOLE_TIMEOUT', '60'))
+
+app.config.update(
+    SECRET_KEY=os.environ.get('MONITOR_SECRET_KEY') or secrets.token_hex(32),
+    PERMANENT_SESSION_LIFETIME=SESSION_MINUTES * 60,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_REFRESH_EACH_REQUEST=True,  # sliding: each request resets the 30-min clock
+)
+
 # ports for the dashboard quick-links (the browser fills in the host)
 LINKS = [
-    {'label': 'iPXE Manager',    'port': os.environ.get('IPXE_MANAGER_PORT', '8091'), 'icon': '☁'},
-    {'label': 'File server',     'port': os.environ.get('WEBFS_PORT', '8080'),        'icon': '\U0001F4C1', 'path': 'files/'},
-    {'label': 'Control Panel',   'port': os.environ.get('CCP_PORT', '8060'),          'icon': '⚙'},
+    {'label': 'iPXE Manager',  'port': os.environ.get('IPXE_MANAGER_PORT', '8091'), 'icon': '☁'},
+    {'label': 'File server',   'port': os.environ.get('WEBFS_PORT', '8080'),        'icon': '\U0001F4C1', 'path': 'files/'},
+    {'label': 'Control Panel', 'port': os.environ.get('CCP_PORT', '8060'),          'icon': '⚙'},
 ]
 
+# ── users / RBAC (roles: viewer < admin) ──────────────────────────────────────
+ROLES = ('viewer', 'admin')
+_RANK = {r: i for i, r in enumerate(ROLES)}
+
+
+def _load_users():
+    """Build the account table from the environment. Admin can use the Console;
+    viewer is read-only. Passwords are hashed once at startup."""
+    users = {}
+    au = os.environ.get('MONITOR_ADMIN_USER', 'admin')
+    ap = os.environ.get('MONITOR_ADMIN_PASSWORD', '')
+    if ap:
+        users[au] = {'hash': generate_password_hash(ap), 'role': 'admin'}
+    vu = os.environ.get('MONITOR_VIEWER_USER', 'viewer')
+    vp = os.environ.get('MONITOR_VIEWER_PASSWORD', '')
+    if vp:
+        users[vu] = {'hash': generate_password_hash(vp), 'role': 'viewer'}
+    return users
+
+
+USERS = _load_users()
+if not USERS:
+    sys.stderr.write('[monitor] WARNING: no MONITOR_ADMIN_PASSWORD set — login is '
+                     'impossible. Set it in .env and recreate the container.\n')
+    sys.stderr.flush()
+
+
+def _client_ip():
+    return (request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+            or request.remote_addr or '')
+
+
+def audit(action, detail=''):
+    sys.stderr.write(f'[monitor][audit] {session.get("user", "-")} {action} {detail} '
+                     f'from {_client_ip()}\n')
+    sys.stderr.flush()
+
+
+def role_ok(minimum):
+    return _RANK.get(session.get('role'), -1) >= _RANK[minimum]
+
+
+def require(minimum):
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrap(*a, **kw):
+            if not role_ok(minimum):
+                if request.path.startswith('/api/'):
+                    return jsonify({'error': f'forbidden: requires {minimum}'}), 403
+                abort(403)
+            return fn(*a, **kw)
+        return wrap
+    return deco
+
+
+PUBLIC_PATHS = {'/login', '/healthz'}
+
+
+@app.before_request
+def _guard():
+    if request.path in PUBLIC_PATHS or request.path.startswith('/static/'):
+        return None
+    if not session.get('user'):
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'authentication required'}), 401
+        return redirect(url_for('login', next=request.path))
+    if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+        token = request.headers.get('X-CSRF-Token') or request.form.get('_csrf')
+        if not token or token != session.get('csrf'):
+            return jsonify({'error': 'invalid or missing CSRF token'}), 403
+    return None
+
+
+@app.context_processor
+def _inject():
+    return {'cur_user': session.get('user'), 'cur_role': session.get('role'),
+            'is_admin': role_ok('admin'), 'csrf_token': session.get('csrf'),
+            'session_minutes': SESSION_MINUTES}
+
+
+# ── data (dashboard) ──────────────────────────────────────────────────────────
 
 def _uptime_str(started_at: str) -> str:
-    """Return human-readable uptime from a Docker StartedAt timestamp."""
     if not started_at or started_at.startswith('0001'):
         return '-'
     try:
@@ -30,10 +128,8 @@ def _uptime_str(started_at: str) -> str:
         if secs < 3600:
             return f'{secs // 60}m {secs % 60}s'
         if secs < 86400:
-            h = secs // 3600
-            return f'{h}h {(secs % 3600) // 60}m'
-        d = secs // 86400
-        return f'{d}d {(secs % 86400) // 3600}h'
+            return f'{secs // 3600}h {(secs % 3600) // 60}m'
+        return f'{secs // 86400}d {(secs % 86400) // 3600}h'
     except Exception:
         return '-'
 
@@ -45,8 +141,6 @@ def get_containers():
         for c in client.containers.list(all=True):
             state  = c.attrs.get('State', {})
             health = state.get('Health', {}).get('Status', 'none')
-            # a container whose image was removed makes c.image raise — never let
-            # one bad container blank the whole dashboard
             try:
                 image = (c.image.tags[0] if c.image and c.image.tags else
                          c.image.short_id if c.image else '(unknown)')
@@ -66,6 +160,14 @@ def get_containers():
         return [], str(exc)
 
 
+def running_container_names():
+    try:
+        client = docker.from_env()
+        return sorted(c.name for c in client.containers.list())
+    except Exception:
+        return []
+
+
 def get_leases():
     leases = []
     if not os.path.exists(LEASES_FILE):
@@ -74,7 +176,6 @@ def get_leases():
         now = int(time.time())
         with open(LEASES_FILE) as fh:
             for line in fh:
-                # one malformed lease line must never blank the entire table
                 try:
                     parts = line.strip().split()
                     if len(parts) < 4:
@@ -94,18 +195,13 @@ def get_leases():
                         expires_str   = datetime.datetime.fromtimestamp(expiry_ts).strftime('%Y-%m-%d %H:%M')
                         h, m          = divmod(remaining // 60, 60)
                         remaining_str = f'{h}h {m}m'
-                    # IPv4 sorts numerically; anything else sorts last
                     octets = ip.split('.')
                     sort_key = [int(o) for o in octets] if (
                         len(octets) == 4 and all(o.isdigit() for o in octets)) else [999]
                     leases.append({
-                        'ip':        ip,
-                        'mac':       mac,
-                        'hostname':  hostname,
-                        'expires':   expires_str,
-                        'remaining': remaining_str,
-                        'expired':   remaining <= 0,
-                        'sort_key':  sort_key,
+                        'ip': ip, 'mac': mac, 'hostname': hostname,
+                        'expires': expires_str, 'remaining': remaining_str,
+                        'expired': remaining <= 0, 'sort_key': sort_key,
                     })
                 except Exception:
                     continue
@@ -115,34 +211,101 @@ def get_leases():
         return [], str(exc)
 
 
+# ── auth routes ───────────────────────────────────────────────────────────────
+
+@app.route('/healthz')
+def healthz():
+    return Response('ok', mimetype='text/plain')
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = (request.form.get('username') or '').strip()
+        password = request.form.get('password') or ''
+        rec = USERS.get(username)
+        if rec and check_password_hash(rec['hash'], password):
+            session.clear()
+            session['user'] = username
+            session['role'] = rec['role']
+            session['csrf'] = secrets.token_hex(16)
+            session.permanent = True
+            audit('login', 'success')
+            nxt = request.args.get('next', '')
+            return redirect(nxt if nxt.startswith('/') else url_for('dashboard'))
+        audit('login', f'failed user={username!r}')
+        flash('Invalid username or password.')
+    return render_template('login.html')
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    audit('logout')
+    session.clear()
+    return redirect(url_for('login'))
+
+
+# ── pages ─────────────────────────────────────────────────────────────────────
+
 @app.route('/')
-def index():
+def dashboard():
     containers, c_err = get_containers()
     leases,     l_err = get_leases()
     return render_template(
-        'index.html',
-        containers=containers,
-        leases=leases,
-        c_err=c_err,
-        l_err=l_err,
+        'index.html', containers=containers, leases=leases, c_err=c_err, l_err=l_err,
         now=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        refresh=REFRESH_INTERVAL,
-        links=LINKS,
-    )
+        refresh=REFRESH_INTERVAL, links=LINKS)
 
+
+@app.route('/console')
+@require('admin')
+def console_page():
+    return render_template('console.html', containers=running_container_names(),
+                           timeout=CONSOLE_TIMEOUT)
+
+
+# ── APIs ──────────────────────────────────────────────────────────────────────
 
 @app.route('/api/status')
 def api_status():
     containers, _ = get_containers()
     leases,     _ = get_leases()
-    return jsonify({
-        'timestamp':  int(time.time()),
-        'containers': containers,
-        'leases':     leases,
-    })
+    return jsonify({'timestamp': int(time.time()), 'containers': containers, 'leases': leases})
+
+
+@app.route('/api/console/run', methods=['POST'])
+@require('admin')
+def console_run():
+    d = request.get_json(force=True) or {}
+    target  = (d.get('container') or '').strip()
+    command = d.get('command') or ''
+    if not command.strip():
+        return jsonify({'error': 'command is required'}), 400
+    try:
+        client = docker.from_env()
+        names = [c.name for c in client.containers.list()]
+    except Exception as exc:
+        return jsonify({'error': f'Docker is not reachable: {exc}'}), 500
+    if target not in names:
+        return jsonify({'error': 'unknown or not-running container'}), 400
+
+    audit('console.run', f'@{target}: {command[:200]}')
+    try:
+        cont = client.containers.get(target)
+        # run under `timeout` so a hung command cannot pin the worker; combined
+        # stdout+stderr; login shell so PATH is sane
+        wrapped = f'timeout {CONSOLE_TIMEOUT} /bin/sh -lc {shlex.quote(command)}'
+        res = cont.exec_run(['/bin/sh', '-lc', wrapped], demux=False, tty=False)
+        out = res.output.decode('utf-8', 'replace') if res.output else ''
+        rc = res.exit_code
+        if rc == 124:
+            out += f'\n[monitor] command timed out after {CONSOLE_TIMEOUT}s'
+        return jsonify({'container': target, 'exit_code': rc, 'output': out})
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
 
 
 if __name__ == '__main__':
-    # Dev/local convenience only — the container runs gunicorn as its CMD.
     import os
-    os.execvp('gunicorn', ['gunicorn', '-w', '2', '-b', '0.0.0.0:8090', 'app:app'])
+    os.execvp('gunicorn', ['gunicorn', '-w', '2', '-k', 'gthread', '--threads', '8',
+                           '--timeout', '120', '-b', '0.0.0.0:8090', 'app:app'])

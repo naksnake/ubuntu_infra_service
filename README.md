@@ -279,12 +279,32 @@ Open a browser and go to:
 ```
 http://192.168.100.1:8090/
 ```
-You will see:
+The dashboard now requires **login**. Sign in with the admin account (it reuses
+`CCP_ADMIN_USER` / `CCP_ADMIN_PASSWORD` from your `.env`). You will see:
 - **Services** — all container names, status (running/exited), health check result, uptime, restart count
 - **DHCP Leases** — IP address, MAC address, hostname, lease expiry, and time remaining for every active lease
 
 Use the search box to quickly find a host by IP, MAC, or hostname.  
-The page auto-refreshes every 30 seconds. A JSON API is also available at `/api/status`.
+The page auto-refreshes every 30 seconds. A JSON API is available at `/api/status` (login required).
+
+**Login & roles (RBAC).** Sessions last **30 minutes** (sliding — activity resets
+the timer; `MONITOR_SESSION_MINUTES` to change) and there is a **Log out** button.
+Two roles: **admin** (full access + Console) and an optional read-only **viewer**
+(set `MONITOR_VIEWER_PASSWORD` to enable). `/healthz` stays open for the container
+health check.
+
+**Console (admin only).** The **Console** tab runs a command *inside a running lab
+container* over the Docker socket — handy for quick checks like
+`docker logs`-style inspection without shelling into the host:
+```
+# on the Console tab: pick a container (e.g. lab_dhcp), then run
+cat /etc/dnsmasq.conf
+ps aux
+```
+Commands run under a `MONITOR_CONSOLE_TIMEOUT` (default 60s) cap and every
+invocation is written to the `lab_monitor` container log for auditing.
+> The Console executes commands in your containers — keep the dashboard admin
+> password strong, since the monitor port is reachable from any NIC it binds.
 
 ### Verify the Cluster Control Panel
 Open a browser and go to:
