@@ -156,7 +156,13 @@ def get_leases():
                     ip        = parts[2]
                     hostname  = parts[3] if parts[3] != '*' else '(unknown)'
                     remaining = expiry_ts - now
-                    if remaining <= 0:
+                    if expiry_ts == 0:
+                        # dnsmasq writes 0 for "infinite" leases (static hosts
+                        # or PXE_LEASE_TIME=infinite) — they never expire
+                        expires_str   = 'Never'
+                        remaining_str = 'Infinite'
+                        remaining     = 1
+                    elif remaining <= 0:
                         expires_str   = 'Expired'
                         remaining_str = 'Expired'
                     else:

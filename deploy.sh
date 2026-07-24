@@ -212,6 +212,7 @@ WAN_IFACE=${WAN_IFACE}
 PXE_RANGE_START=${PXE_RANGE_START}
 PXE_RANGE_END=${PXE_RANGE_END}
 PXE_NETMASK=${PXE_NETMASK}
+PXE_LEASE_TIME=${PXE_LEASE_TIME:-12h}
 PXE_ROUTER_IP=${PXE_ROUTER_IP}
 WEBFS_HOST_IP=${WEBFS_HOST_IP}
 TFTP_SERVER_IP=${TFTP_SERVER_IP}
@@ -276,6 +277,11 @@ env_wizard() {
   PXE_RANGE_START="$(prompt_ip "PXE_RANGE_START" "${PXE_RANGE_START:-192.168.100.10}")"
   PXE_RANGE_END="$(prompt_ip "PXE_RANGE_END" "${PXE_RANGE_END:-192.168.100.200}")"
   PXE_NETMASK="$(prompt_ip "PXE_NETMASK" "${PXE_NETMASK:-255.255.255.0}")"
+  while true; do
+    PXE_LEASE_TIME="$(prompt "PXE_LEASE_TIME (e.g. 45m, 12h, 1d, infinite)" "${PXE_LEASE_TIME:-12h}")"
+    [[ "$PXE_LEASE_TIME" =~ ^([0-9]+[smhd]?|infinite)$ ]] && break
+    warn "Invalid lease time. Use a number with an s/m/h/d suffix (e.g. 12h) or 'infinite'."
+  done
   PXE_ROUTER_IP="$(prompt_ip "PXE_ROUTER_IP (gateway for PXE clients)" "${PXE_ROUTER_IP:-192.168.100.1}")"
 
   WEBFS_HOST_IP="$(prompt_ip "WEBFS_HOST_IP (clients reach webfs here)" "${WEBFS_HOST_IP:-192.168.100.1}")"

@@ -46,6 +46,7 @@ services:
       - PXE_RANGE_START=${PXE_RANGE_START}
       - PXE_RANGE_END=${PXE_RANGE_END}
       - PXE_NETMASK=${PXE_NETMASK}
+      - PXE_LEASE_TIME=${PXE_LEASE_TIME:-12h}
       - PXE_ROUTER_IP=${PXE_ROUTER_IP}
       - DNS_SERVER=${DNS_SERVER}
       - WEBFS_HOST_IP=${WEBFS_HOST_IP}
@@ -54,6 +55,8 @@ services:
       - IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT:-8091}
     volumes:
       - ./services/dhcp/dnsmasq.conf.template:/etc/dnsmasq.conf.template:ro
+      # fixed IP-to-MAC reservations; edit then `docker compose restart dhcp`
+      - ./services/dhcp/static-hosts.conf:/etc/dnsmasq-static-hosts.conf:ro
       - ./data/dnsmasq.leases:/data/dnsmasq.leases:rw
     cap_add:
       - NET_ADMIN

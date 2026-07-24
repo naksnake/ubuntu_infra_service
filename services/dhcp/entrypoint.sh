@@ -1,8 +1,16 @@
 #!/bin/sh
 set -eu
 
+# Default the lease time so a .env that predates PXE_LEASE_TIME still renders
+# a valid dhcp-range line (envsubst would otherwise leave the field empty).
+export PXE_LEASE_TIME="${PXE_LEASE_TIME:-12h}"
+
 # Render config from environment
 envsubst < /etc/dnsmasq.conf.template > /etc/dnsmasq.conf
+
+# Compose bind-mounts the reservations file; when the image runs standalone,
+# make sure it exists so dnsmasq does not abort on a missing dhcp-hostsfile.
+[ -f /etc/dnsmasq-static-hosts.conf ] || touch /etc/dnsmasq-static-hosts.conf
 echo "==== Rendered /etc/dnsmasq.conf ===="
 cat /etc/dnsmasq.conf
 

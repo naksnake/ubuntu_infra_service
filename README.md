@@ -160,6 +160,7 @@ WAN_IFACE=enp1s0        # your internet NIC
 PXE_RANGE_START=192.168.100.10   # first IP to hand out to lab clients
 PXE_RANGE_END=192.168.100.200    # last IP to hand out to lab clients
 PXE_NETMASK=255.255.255.0
+PXE_LEASE_TIME=12h               # how long a client keeps its IP (45m, 12h, 1d, infinite)
 PXE_ROUTER_IP=192.168.100.1      # host's PXE_IFACE IP (from Step 1)
 WEBFS_HOST_IP=192.168.100.1      # same as PXE_ROUTER_IP
 TFTP_SERVER_IP=192.168.100.1     # same as PXE_ROUTER_IP
@@ -437,19 +438,91 @@ there, or generate one and distribute the matching public key to your nodes).
 
 ---
 
-## Changing the DHCP range
+## DHCP: lease time, fixed IPs, and the address pool
 
-You do not need to restart the full stack — only the DHCP container is recycled:
+### How long does a client keep its IP? (lease time)
+
+Every dynamic IP is a **lease** with a time limit, set by `PXE_LEASE_TIME` in
+`.env` (default `12h`). The lifecycle:
+
+- At **50%** of the lease (6h with the default) the client automatically asks
+  the server to **renew**. A client that stays online renews forever and keeps
+  the *same* IP indefinitely — the lease time is not a maximum ownership time.
+- If renewal gets no answer, the client retries by broadcast at **87.5%**
+  (*rebind*), and releases the address only when the lease fully expires.
+- If the client goes **offline**, its IP stays reserved until the lease
+  expires; only then can the pool give it to a different machine. dnsmasq
+  also prefers to re-issue the same IP to a returning MAC when it is free.
+
+Accepted formats: seconds (`3600`), `45m`, `12h`, `1d`, or `infinite`
+(minimum `2m`). Short leases (e.g. `45m`) recycle addresses quickly in a busy
+PXE lab; long leases (`1d`+) keep quiet networks stable. Apply a change with:
+
+```bash
+docker compose up -d --force-recreate dhcp
+```
+
+Live leases (IP, MAC, hostname, expiry) are visible on the Monitor dashboard
+or in `data/dnsmasq.leases` (first column = expiry as a Unix timestamp;
+`0` means an infinite lease).
+
+### Fix an IP address to a MAC (static reservation)
+
+To make a machine always get the same IP, add one line per machine to
+`services/dhcp/static-hosts.conf`:
+
+```
+# <mac>,<ip>[,<hostname>][,<lease time>]
+aa:bb:cc:dd:ee:01,192.168.100.201,node-01
+aa:bb:cc:dd:ee:02,192.168.100.202,node-02,24h
+aa:bb:cc:dd:ee:03,192.168.100.203,storage-01,infinite
+```
+
+Then apply with:
+
+```bash
+docker compose restart dhcp
+```
+
+Rules of thumb:
+
+- Reserve addresses **inside the PXE subnet but outside the dynamic pool**
+  (with the defaults: pool is `.10–.200`, so reserve `.201–.254`). This
+  guarantees the pool can never hand a reserved address to another machine.
+- Find a machine's MAC on the Monitor dashboard's lease table, in
+  `docker logs lab_dhcp`, or with `ip link` on the client itself.
+- A client that is already online switches to its reserved IP at its next
+  renewal (at the latest, half the lease time) or immediately after a reboot.
+
+### Changing or expanding the DHCP range
+
+To grow (or move) the pool **within the same subnet**, you do not need to
+restart the full stack — only the DHCP container is recycled:
 
 ```bash
 # With arguments:
-./update-dhcp-range.sh 192.168.100.50 192.168.100.150
+./update-dhcp-range.sh 192.168.100.10 192.168.100.250
 
 # Interactive:
 ./update-dhcp-range.sh
 ```
 
 Existing leases are not affected until they expire.
+
+A `/24` netmask (`255.255.255.0`) allows at most 254 hosts (`.1–.254`);
+remember to leave room for the server (`.1` by default) and your static
+reservations. If you need **more addresses than one /24 provides**, you must
+widen the subnet itself, e.g. to a /23 (`192.168.100.0–192.168.101.255`,
+510 hosts):
+
+1. In `.env`: set `PXE_NETMASK=255.255.254.0` and widen the pool, e.g.
+   `PXE_RANGE_START=192.168.100.10`, `PXE_RANGE_END=192.168.101.250`.
+2. Update the host's own address on the lab NIC to match
+   (`addresses: [192.168.100.1/23]` in the netplan config from Step 1),
+   then `sudo netplan apply`.
+3. Re-render and restart DHCP: `docker compose up -d --force-recreate dhcp`.
+4. Clients pick the new mask up as their leases renew; reboot or re-plug a
+   client to force it immediately.
 
 ---
 
@@ -575,6 +648,7 @@ ubuntu_infra_service/
 │
 ├── services/
 │   ├── dhcp/                    # dnsmasq DHCP container (PXE pointers, no TFTP)
+│   │   └── static-hosts.conf    # Fixed IP-to-MAC reservations (edit + restart dhcp)
 │   ├── tftp/                    # tftpd-hpa bootloader delivery container
 │   ├── webfs/                   # HTTP file server container
 │   ├── ipxe_manager/            # Web UI: file uploads + PXE boot menu + autoinstall profiles
