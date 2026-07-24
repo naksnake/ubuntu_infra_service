@@ -1,214 +1,13 @@
-<!doctype html>
-<title>Lab Monitor</title>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-  :root {
-    --bg:       #0f172a;
-    --surface:  #1e293b;
-    --border:   #334155;
-    --text:     #e2e8f0;
-    --muted:    #94a3b8;
-    --accent:   #38bdf8;
-
-    --green:    #22c55e;
-    --yellow:   #f59e0b;
-    --red:      #ef4444;
-    --gray:     #64748b;
-  }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: ui-monospace, "Cascadia Code", "Source Code Pro", monospace;
-    font-size: 14px;
-    line-height: 1.6;
-    padding: 24px 16px 48px;
-  }
-
-  /* ── Header ── */
-  header {
-    display: flex;
-    align-items: baseline;
-    gap: 16px;
-    flex-wrap: wrap;
-    margin-bottom: 32px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--border);
-  }
-  header h1 { font-size: 1.4rem; color: var(--accent); letter-spacing: .05em; }
-  .meta     { color: var(--muted); font-size: 12px; margin-left: auto; }
-  .meta strong { color: var(--text); }
-
-  /* ── Quick links ── */
-  .links { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
-  .link-card { display: flex; flex-direction: column; gap: 2px; padding: 14px 16px; background: var(--card, #161b22); border: 1px solid var(--border, #30363d); border-radius: 8px; text-decoration: none; color: var(--text); transition: border-color .15s, transform .15s; }
-  .link-card:hover { border-color: var(--accent); transform: translateY(-1px); }
-  .link-icon { font-size: 20px; color: var(--accent); }
-  .link-label { font-weight: 600; font-size: 14px; }
-  .link-url { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-  /* ── Sections ── */
-  section { margin-bottom: 40px; }
-  section h2 {
-    font-size: 1rem;
-    letter-spacing: .08em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin-bottom: 12px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .count {
-    background: var(--border);
-    color: var(--text);
-    border-radius: 12px;
-    padding: 1px 8px;
-    font-size: 11px;
-  }
-
-  /* ── Tables ── */
-  .table-wrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--border); }
-  table { width: 100%; border-collapse: collapse; }
-  th {
-    background: var(--surface);
-    color: var(--muted);
-    text-align: left;
-    padding: 10px 14px;
-    font-weight: 600;
-    font-size: 11px;
-    letter-spacing: .06em;
-    text-transform: uppercase;
-    white-space: nowrap;
-    border-bottom: 1px solid var(--border);
-  }
-  td {
-    padding: 10px 14px;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: rgba(255,255,255,.03); }
-
-  code {
-    font-family: inherit;
-    background: rgba(255,255,255,.07);
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: 13px;
-  }
-
-  /* ── Status badges ── */
-  .badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: .04em;
-    text-transform: uppercase;
-  }
-  .badge.running,
-  .badge.healthy   { background: rgba(34,197,94,.15);  color: var(--green); }
-  .badge.starting,
-  .badge.unhealthy { background: rgba(245,158,11,.15); color: var(--yellow); }
-  .badge.exited,
-  .badge.dead      { background: rgba(239,68,68,.15);  color: var(--red); }
-  .badge.none,
-  .badge.paused,
-  .badge.created   { background: rgba(100,116,139,.15); color: var(--gray); }
-
-  /* Dot indicator in service table */
-  .dot {
-    display: inline-block;
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    margin-right: 6px;
-    vertical-align: middle;
-  }
-  .dot.running,
-  .dot.healthy   { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  .dot.starting  { background: var(--yellow); }
-  .dot.unhealthy { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
-  .dot.exited,
-  .dot.dead      { background: var(--red); }
-  .dot.none,
-  .dot.paused    { background: var(--gray); }
-
-  /* Expired lease row */
-  tr.expired td { color: var(--muted); }
-
-  /* ── Search box ── */
-  .search-wrap { margin-bottom: 10px; }
-  #search {
-    width: 100%;
-    max-width: 360px;
-    padding: 8px 12px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    font-family: inherit;
-    font-size: 13px;
-    outline: none;
-  }
-  #search:focus { border-color: var(--accent); }
-  #search::placeholder { color: var(--gray); }
-
-  /* ── Error banner ── */
-  .error-banner {
-    background: rgba(239,68,68,.1);
-    border: 1px solid rgba(239,68,68,.3);
-    color: #fca5a5;
-    padding: 10px 14px;
-    border-radius: 6px;
-    margin-bottom: 12px;
-    font-size: 12px;
-  }
-
-  /* ── Empty state ── */
-  .empty { text-align: center; color: var(--muted); padding: 32px; }
-
-  /* ── Countdown bar ── */
-  #progress-bar {
-    position: fixed;
-    top: 0; left: 0;
-    height: 3px;
-    background: var(--accent);
-    transition: width 1s linear;
-    z-index: 100;
-  }
-
-  /* ── Copy button ── */
-  .copy-btn {
-    background: none;
-    border: none;
-    color: var(--muted);
-    cursor: pointer;
-    padding: 0 4px;
-    font-size: 12px;
-    vertical-align: middle;
-    opacity: 0;
-    transition: opacity .15s;
-  }
-  td:hover .copy-btn { opacity: 1; }
-  .copy-btn:hover { color: var(--accent); }
-</style>
-
+{% extends "base.html" %}
+{% block title %}Dashboard · Lab Monitor{% endblock %}
+{% block body %}
 <div id="progress-bar"></div>
 
-<header>
-  <h1>&#9678; Lab Monitor</h1>
-  <div class="meta">
-    Updated <strong>{{ now }}</strong> &nbsp;&middot;&nbsp;
-    Refresh in <strong><span id="countdown">{{ refresh }}</span>s</strong>
-  </div>
+<header class="page">
+  <h1>Service Health</h1>
+  <div class="meta">Updated <strong>{{ now }}</strong> &nbsp;&middot;&nbsp; Refresh in <strong><span id="countdown">{{ refresh }}</span>s</strong></div>
 </header>
 
-<!-- ── Quick links ── -->
 <section>
   <h2>Quick links</h2>
   <div class="links">
@@ -222,49 +21,20 @@
   </div>
 </section>
 
-<!-- ── Services ── -->
 <section>
   <h2>Services <span class="count">{{ containers|length }}</span></h2>
-
-  {% if c_err %}
-  <div class="error-banner">Docker socket error: {{ c_err }}</div>
-  {% endif %}
-
+  {% if c_err %}<div class="error-banner">Docker socket error: {{ c_err }}</div>{% endif %}
   <div class="table-wrap">
     <table>
-      <thead>
-        <tr>
-          <th>Container</th>
-          <th>Status</th>
-          <th>Health</th>
-          <th>Uptime</th>
-          <th>Restarts</th>
-          <th>Image</th>
-        </tr>
-      </thead>
+      <thead><tr><th>Container</th><th>Status</th><th>Health</th><th>Uptime</th><th>Restarts</th><th>Image</th></tr></thead>
       <tbody>
         {% for c in containers %}
         <tr>
-          <td>
-            <span class="dot {{ c.status }}"></span>
-            <code>{{ c.name }}</code>
-          </td>
+          <td><span class="dot {{ c.status }}"></span><code>{{ c.name }}</code></td>
           <td><span class="badge {{ c.status }}">{{ c.status }}</span></td>
-          <td>
-            {% if c.health != 'none' %}
-            <span class="badge {{ c.health }}">{{ c.health }}</span>
-            {% else %}
-            <span style="color:var(--muted)">—</span>
-            {% endif %}
-          </td>
+          <td>{% if c.health != 'none' %}<span class="badge {{ c.health }}">{{ c.health }}</span>{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
           <td>{{ c.uptime }}</td>
-          <td>
-            {% if c.restarts > 0 %}
-            <span style="color:var(--yellow)">{{ c.restarts }}</span>
-            {% else %}
-            0
-            {% endif %}
-          </td>
+          <td>{% if c.restarts > 0 %}<span style="color:var(--yellow)">{{ c.restarts }}</span>{% else %}0{% endif %}</td>
           <td style="color:var(--muted);font-size:12px">{{ c.image }}</td>
         </tr>
         {% else %}
@@ -275,49 +45,23 @@
   </div>
 </section>
 
-<!-- ── DHCP Leases ── -->
 <section>
   <h2>DHCP Leases <span class="count" id="lease-count">{{ leases|length }}</span></h2>
-
-  {% if l_err %}
-  <div class="error-banner">{{ l_err }}</div>
-  {% endif %}
-
+  {% if l_err %}<div class="error-banner">{{ l_err }}</div>{% endif %}
   <div class="search-wrap">
     <input id="search" type="search" placeholder="Search IP, MAC, hostname…" autocomplete="off" oninput="filterLeases()">
   </div>
-
   <div class="table-wrap">
     <table id="leases-table">
-      <thead>
-        <tr>
-          <th>IP Address</th>
-          <th>MAC Address</th>
-          <th>Hostname</th>
-          <th>Lease Expires</th>
-          <th>Remaining</th>
-        </tr>
-      </thead>
+      <thead><tr><th>IP Address</th><th>MAC Address</th><th>Hostname</th><th>Lease Expires</th><th>Remaining</th></tr></thead>
       <tbody>
         {% for l in leases %}
         <tr class="{{ 'expired' if l.expired else '' }}" data-row>
-          <td>
-            <code>{{ l.ip }}</code>
-            <button class="copy-btn" onclick="copy('{{ l.ip }}')" title="Copy">&#128203;</button>
-          </td>
-          <td>
-            <code>{{ l.mac }}</code>
-            <button class="copy-btn" onclick="copy('{{ l.mac }}')" title="Copy">&#128203;</button>
-          </td>
+          <td><code>{{ l.ip }}</code></td>
+          <td><code>{{ l.mac }}</code></td>
           <td>{{ l.hostname }}</td>
           <td style="color:var(--muted);font-size:12px">{{ l.expires }}</td>
-          <td>
-            {% if l.expired %}
-            <span class="badge exited">Expired</span>
-            {% else %}
-            {{ l.remaining }}
-            {% endif %}
-          </td>
+          <td>{% if l.expired %}<span class="badge exited">Expired</span>{% else %}{{ l.remaining }}{% endif %}</td>
         </tr>
         {% else %}
         <tr><td colspan="5" class="empty">No active leases — waiting for DHCP clients</td></tr>
@@ -326,52 +70,32 @@
     </table>
   </div>
 </section>
+{% endblock %}
 
-<script>
-  // ── Quick links: fill host from the browser so links work from any client ──
+{% block scripts %}<script>
   document.querySelectorAll('.link-card').forEach(a => {
     const url = `${location.protocol}//${location.hostname}:${a.dataset.port}/${a.dataset.path || ''}`;
     a.href = url;
     a.querySelector('[data-url]').textContent = url;
   });
-
-  // ── Countdown + progress bar ──────────────────────────────────────
-  const TOTAL   = {{ refresh }};
-  const barEl   = document.getElementById('progress-bar');
-  const countEl = document.getElementById('countdown');
+  const TOTAL = {{ refresh }};
+  const barEl = document.getElementById('progress-bar'), countEl = document.getElementById('countdown');
   let remaining = TOTAL;
-
-  function tick() {
+  barEl.style.width = '0%';
+  setInterval(() => {
     remaining--;
     if (remaining <= 0) { location.reload(); return; }
     countEl.textContent = remaining;
-    barEl.style.width   = ((TOTAL - remaining) / TOTAL * 100) + '%';
-  }
-  barEl.style.width = '0%';
-  setInterval(tick, 1000);
-
-  // ── DHCP search / filter ──────────────────────────────────────────
+    barEl.style.width = ((TOTAL - remaining) / TOTAL * 100) + '%';
+  }, 1000);
   function filterLeases() {
-    const q     = document.getElementById('search').value.toLowerCase();
-    const rows  = document.querySelectorAll('#leases-table tbody tr[data-row]');
+    const q = document.getElementById('search').value.toLowerCase();
     let visible = 0;
-    rows.forEach(r => {
+    document.querySelectorAll('#leases-table tbody tr[data-row]').forEach(r => {
       const match = r.textContent.toLowerCase().includes(q);
       r.style.display = match ? '' : 'none';
       if (match) visible++;
     });
     document.getElementById('lease-count').textContent = q ? visible : {{ leases|length }};
   }
-
-  // ── Copy to clipboard ─────────────────────────────────────────────
-  function copy(text) {
-    navigator.clipboard.writeText(text).catch(() => {
-      const el = document.createElement('textarea');
-      el.value = text;
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand('copy');
-      document.body.removeChild(el);
-    });
-  }
-</script>
+</script>{% endblock %}

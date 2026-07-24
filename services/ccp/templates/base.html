@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="{{ csrf_token or '' }}">
+<title>{% block title %}Cluster Control Panel{% endblock %} · CCP</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">◈</span><div><b>Cluster Control</b><small>Panel</small></div></div>
+    <nav>
+      <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.path=='/' }}">▚ Dashboard</a>
+      <a href="{{ url_for('nodes_page') }}" class="{{ 'active' if request.path=='/nodes' }}">▤ Nodes</a>
+      <a href="{{ url_for('shell_page') }}" class="{{ 'active' if request.path=='/shell' }}">❯_ ClusterShell</a>
+      <a href="{{ url_for('ansible_page') }}" class="{{ 'active' if request.path=='/ansible' }}">▶ Ansible</a>
+      <a href="{{ url_for('scripts_page') }}" class="{{ 'active' if request.path=='/scripts' }}">❏ Scripts</a>
+      <a href="{{ url_for('jobs_page') }}" class="{{ 'active' if request.path.startswith('/jobs') }}">≣ Jobs</a>
+      <a href="{{ url_for('files_page') }}" class="{{ 'active' if request.path=='/files' }}">⬆ Files</a>
+      {% if role_ok('admin') %}
+      <div class="nav-sep">Admin</div>
+      <a href="{{ url_for('users_page') }}" class="{{ 'active' if request.path=='/users' }}">☺ Users</a>
+      <a href="{{ url_for('audit_page') }}" class="{{ 'active' if request.path=='/audit' }}">✓ Audit Log</a>
+      {% endif %}
+    </nav>
+    <div class="who">
+      <div class="who-name">{{ user.username }}</div>
+      <div class="badge role-{{ user.role }}">{{ user.role }}</div>
+      <form method="post" action="{{ url_for('logout') }}">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn btn-ghost btn-sm">Log out</button>
+      </form>
+    </div>
+  </aside>
+  <main class="content">
+    <header class="topbar"><h1>{% block heading %}{% endblock %}</h1>{% block actions %}{% endblock %}</header>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}<div class="flash">{{ messages[0] }}</div>{% endif %}
+    {% endwith %}
+    <div id="toast" class="toast"></div>
+    {% block body %}{% endblock %}
+  </main>
+</div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

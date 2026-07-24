@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block heading %}Ansible Playbook{% endblock %}
+{% block body %}
+{% if not role_ok('operator') %}<div class="warnbox">You have viewer access — running playbooks requires the operator role.</div>{% endif %}
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Run a playbook</h2>
+    {% include "_nodesel.html" %}
+    <label>Load from script repository</label>
+    <select id="script-pick" onchange="loadScript()">
+      <option value="">— none —</option>
+      {% for s in scripts %}<option value="{{ s.id }}" data-content="{{ s.content }}">{{ s.name }}</option>{% endfor %}
+    </select>
+    <label>Playbook (YAML)</label>
+    <textarea id="pb" rows="12">---
+- name: Demo play
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Ping every target
+      ansible.builtin.ping:</textarea>
+    <label>Extra vars (optional, key=value or JSON)</label>
+    <input id="ev" placeholder='e.g. pkg=htop  or  {"pkg":"htop"}'>
+    <div style="margin-top:14px"><button class="btn" id="run-btn" onclick="run()" {{ 'disabled' if not role_ok('operator') }}>▶ Run playbook</button></div>
+  </div>
+  <div class="card">
+    <h2>Output <span id="job-status" class="badge" style="float:right"></span></h2>
+    <div id="console" class="console">An inventory is generated from your selected nodes automatically.</div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+function loadScript(){
+  const o=document.getElementById('script-pick').selectedOptions[0];
+  if(o&&o.dataset.content!==undefined&&o.value)document.getElementById('pb').value=o.dataset.content;
+}
+async function run(){
+  const payload=selectedNodePayload();
+  payload.playbook=document.getElementById('pb').value;
+  payload.extra_vars=document.getElementById('ev').value.trim();
+  if(!payload.playbook.trim()){toast('Playbook is empty',true);return;}
+  if(!payload.node_ids.length&&!payload.group){toast('Select at least one node or a group',true);return;}
+  const btn=document.getElementById('run-btn'),con=document.getElementById('console');
+  btn.disabled=true;con.textContent='Launching ansible-playbook…';
+  try{
+    const r=await api('POST','/api/run/ansible',payload);
+    pollJob(r.job_id,con,document.getElementById('job-status'),()=>{btn.disabled=false;});
+  }catch(e){con.textContent='Error: '+e.message;btn.disabled=false;toast(e.message,true);}
+}
+</script>{% endblock %}

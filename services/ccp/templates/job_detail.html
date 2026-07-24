@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block heading %}Job #{{ job.id }}{% endblock %}
+{% block actions %}<a class="btn btn-ghost btn-sm" href="{{ url_for('jobs_page') }}">← All jobs</a>{% endblock %}
+{% block body %}
+<div class="card">
+  <div class="row">
+    <div><label>Kind</label><div>{{ job.kind }}</div></div>
+    <div><label>Target</label><div class="mono">{{ job.target or '—' }}</div></div>
+    <div><label>Status</label><div><span id="job-status" class="badge st-{{ job.status }}">{{ job.status }}{% if job.exit_code is not none %} · exit {{ job.exit_code }}{% endif %}</span></div></div>
+    <div><label>By</label><div>{{ job.created_by }}</div></div>
+    <div><label>Started</label><div><small>{{ job.created_at | tstime }}</small></div></div>
+  </div>
+</div>
+<div class="card">
+  <h2>Output</h2>
+  <div id="console" class="console">Loading…</div>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+const con=document.getElementById('console'),st=document.getElementById('job-status');
+{% if job.status == 'running' %}
+pollJob({{ job.id }},con,st);
+{% else %}
+api('GET','/api/jobs/{{ job.id }}').then(j=>{con.textContent=j.output||'(no output)';}).catch(e=>con.textContent=e.message);
+{% endif %}
+</script>{% endblock %}

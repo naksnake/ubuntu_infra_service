@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block heading %}Files{% endblock %}
+{% block body %}
+{% if role_ok('operator') %}
+<div class="card">
+  <h2>Upload</h2>
+  <input type="file" id="file-input">
+  <div style="margin-top:12px"><button class="btn" onclick="upload()">⬆ Upload</button>
+    <span id="up-status" style="margin-left:10px"></span></div>
+</div>
+{% endif %}
+<div class="card">
+  <h2>Shared files ({{ files|length }})</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+    <tbody>
+      {% for f in files %}
+      <tr>
+        <td class="mono">{{ f.name }}</td>
+        <td>{{ f.size | filesizeformat }}</td>
+        <td><small>{{ f.mtime | tstime }}</small></td>
+        <td>
+          <a class="btn btn-ghost btn-sm" href="{{ url_for('download_file', filename=f.name) }}">Download</a>
+          {% if role_ok('operator') %}<button class="btn btn-danger btn-sm" onclick="del('/api/files/{{ f.name|urlencode }}','Delete {{ f.name }}?')">Delete</button>{% endif %}
+        </td>
+      </tr>
+      {% else %}<tr><td colspan="4" class="empty">No files uploaded yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+async function upload(){
+  const inp=document.getElementById('file-input');
+  if(!inp.files.length){toast('Choose a file first',true);return;}
+  const fd=new FormData();fd.append('file',inp.files[0]);
+  document.getElementById('up-status').textContent='Uploading…';
+  try{
+    const res=await fetch('/api/files',{method:'POST',headers:{'X-CSRF-Token':CSRF},body:fd});
+    const d=await res.json();if(!res.ok)throw new Error(d.error||('HTTP '+res.status));
+    toast('Uploaded');location.reload();
+  }catch(e){document.getElementById('up-status').textContent='';toast(e.message,true);}
+}
+</script>{% endblock %}

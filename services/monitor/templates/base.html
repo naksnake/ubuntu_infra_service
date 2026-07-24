@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="csrf-token" content="{{ csrf_token or '' }}">
+<title>{% block title %}Lab Monitor{% endblock %}</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0f172a;--surface:#1e293b;--border:#334155;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;
+    --green:#22c55e;--yellow:#f59e0b;--red:#ef4444;--gray:#64748b;
+    --mono:ui-monospace,"Cascadia Code","Source Code Pro",monospace;
+  }
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:14px;line-height:1.6}
+  a{color:var(--accent);text-decoration:none}
+  code{font-family:inherit;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;font-size:13px}
+
+  /* top bar */
+  .topbar{display:flex;align-items:center;gap:18px;padding:0 20px;height:52px;background:var(--surface);
+    border-bottom:1px solid var(--border);position:sticky;top:0;z-index:50}
+  .topbar .brand{color:var(--accent);font-size:15px;letter-spacing:.05em;font-weight:600;white-space:nowrap}
+  .topbar nav{display:flex;gap:4px}
+  .topbar nav a{color:var(--muted);padding:6px 12px;border-radius:6px;font-size:13px}
+  .topbar nav a:hover{background:rgba(255,255,255,.05);color:var(--text)}
+  .topbar nav a.active{background:rgba(56,189,248,.12);color:var(--accent)}
+  .topbar .spacer{margin-left:auto}
+  .who{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted)}
+  .who .u{color:var(--text)}
+  .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+  .role-admin{background:rgba(56,189,248,.15);color:var(--accent)}
+  .role-viewer{background:rgba(100,116,139,.2);color:#cbd5e1}
+  .btn{background:var(--accent);color:#04263a;border:none;border-radius:6px;padding:6px 12px;font:inherit;
+    font-size:12px;font-weight:700;cursor:pointer}
+  .btn:hover{filter:brightness(1.08)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text);font-weight:500}
+  .btn-ghost:hover{background:rgba(255,255,255,.05)}
+
+  .wrap{padding:24px 20px 48px;max-width:1200px;margin:0 auto}
+  .flash{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#fca5a5;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:13px}
+
+  header.page{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:26px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+  header.page h1{font-size:1.3rem;color:var(--accent);letter-spacing:.05em}
+  .meta{color:var(--muted);font-size:12px;margin-left:auto}.meta strong{color:var(--text)}
+
+  section{margin-bottom:36px}
+  section h2{font-size:1rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:10px}
+  .count{background:var(--border);color:var(--text);border-radius:12px;padding:1px 8px;font-size:11px}
+
+  .links{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+  .link-card{display:flex;flex-direction:column;gap:2px;padding:14px 16px;background:#161f33;border:1px solid var(--border);border-radius:8px;color:var(--text);transition:border-color .15s,transform .15s}
+  .link-card:hover{border-color:var(--accent);transform:translateY(-1px)}
+  .link-icon{font-size:20px;color:var(--accent)}.link-label{font-weight:600}.link-url{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  .table-wrap{overflow-x:auto;border-radius:8px;border:1px solid var(--border)}
+  table{width:100%;border-collapse:collapse}
+  th{background:var(--surface);color:var(--muted);text-align:left;padding:10px 14px;font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;white-space:nowrap;border-bottom:1px solid var(--border)}
+  td{padding:10px 14px;border-bottom:1px solid var(--border);white-space:nowrap}
+  tr:last-child td{border-bottom:none}tr:hover td{background:rgba(255,255,255,.03)}
+  .badge.running,.badge.healthy{background:rgba(34,197,94,.15);color:var(--green)}
+  .badge.starting,.badge.unhealthy{background:rgba(245,158,11,.15);color:var(--yellow)}
+  .badge.exited,.badge.dead{background:rgba(239,68,68,.15);color:var(--red)}
+  .badge.none,.badge.paused,.badge.created{background:rgba(100,116,139,.15);color:var(--gray)}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+  .dot.running,.dot.healthy{background:var(--green);box-shadow:0 0 6px var(--green)}
+  .dot.exited,.dot.dead{background:var(--red)}.dot.none,.dot.paused{background:var(--gray)}
+  tr.expired td{color:var(--muted)}
+  .empty{text-align:center;color:var(--muted);padding:32px}
+  .search-wrap{margin-bottom:10px}
+  #search{width:100%;max-width:360px;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;font-size:13px;outline:none}
+  #search:focus{border-color:var(--accent)}
+  .error-banner{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#fca5a5;padding:10px 14px;border-radius:6px;margin-bottom:12px;font-size:12px}
+  #progress-bar{position:fixed;top:0;left:0;height:3px;background:var(--accent);transition:width 1s linear;z-index:100}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <span class="brand">&#9678; Lab Monitor</span>
+  <nav>
+    <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.path=='/' }}">Dashboard</a>
+  </nav>
+  <div class="spacer"></div>
+  <div class="who">
+    <span class="u">{{ cur_user }}</span>
+    <span class="badge role-{{ cur_role }}">{{ cur_role }}</span>
+    <form method="post" action="{{ url_for('logout') }}" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn btn-ghost">Log out</button>
+    </form>
+  </div>
+</div>
+<div class="wrap">
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}<div class="flash">{{ messages[0] }}</div>{% endif %}
+  {% endwith %}
+  {% block body %}{% endblock %}
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

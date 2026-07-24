@@ -7,9 +7,12 @@ services:
     ports:
       - "${WEBFS_PORT:-8080}:8080"
     volumes:
-      - ./services/webfs/htdocs:/var/www/htdocs:rw
+      # webfsd only serves files; mount everything read-only so a compromised
+      # file server cannot tamper with boot assets (uploads are written by the
+      # iPXE Manager through its own rw mount of the same directory).
+      - ./services/webfs/htdocs:/var/www/htdocs:ro
       - ./ipxe:/var/www/htdocs/ipxe:ro
-      - ./data/webfs_share:/var/www/htdocs/files:rw
+      - ./data/webfs_share:/var/www/htdocs/files:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/files/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
@@ -26,7 +29,8 @@ services:
     volumes:
       - ./services/tftp/tftpboot:/srv/tftp:rw
     healthcheck:
-      test: ["CMD-SHELL", "ls /srv/tftp >/dev/null 2>&1"]
+      # check the daemon is actually running, not merely that the dir exists
+      test: ["CMD-SHELL", "pgrep in.tftpd >/dev/null || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -75,8 +79,12 @@ services:
     environment:
       - UPLOAD_DIR=/data/uploads
       - ENTRIES_FILE=/data/state/entries.json
+      - AUTOINSTALL_FILE=/data/state/autoinstall.json
       - WEBFS_BASE=http://${WEBFS_HOST_IP:-192.168.100.1}:${WEBFS_PORT:-8080}
       - SERVER_IP=${WEBFS_HOST_IP:-192.168.100.1}
+      # base URL PXE clients use to fetch the autoinstall seed — must point at
+      # this manager (host:published-port), which serves /autoinstall/<id>/
+      - MANAGER_BASE=http://${WEBFS_HOST_IP:-192.168.100.1}:${IPXE_MANAGER_PORT:-8091}
       - AUTH_PASSWORD=${IPXE_MANAGER_PASSWORD:-}
     healthcheck:
       # /menu.ipxe stays reachable even when IPXE_MANAGER_PASSWORD is set
@@ -102,93 +110,50 @@ services:
       # ports for the dashboard quick-links (host-relative in the browser)
       - WEBFS_PORT=${WEBFS_PORT:-8080}
       - IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT:-8091}
-      - AWX_HTTP_PORT=${AWX_HTTP_PORT:-8052}
+      - CCP_PORT=${CCP_PORT:-8060}
+      # login + RBAC for the dashboard (admin reuses the Control Panel login by
+      # default; set MONITOR_VIEWER_PASSWORD to add a read-only account)
+      - MONITOR_SECRET_KEY=${MONITOR_SECRET_KEY}
+      - MONITOR_ADMIN_USER=${CCP_ADMIN_USER:-admin}
+      - MONITOR_ADMIN_PASSWORD=${CCP_ADMIN_PASSWORD}
+      - MONITOR_VIEWER_USER=${MONITOR_VIEWER_USER:-viewer}
+      - MONITOR_VIEWER_PASSWORD=${MONITOR_VIEWER_PASSWORD:-}
+      - MONITOR_SESSION_MINUTES=${MONITOR_SESSION_MINUTES:-30}
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/api/status')\""]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz')\""]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
     restart: unless-stopped
 
-  # ── AWX: PostgreSQL database ────────────────────────────────────────────────
-  awx-postgres:
-    image: postgres:15-alpine
-    container_name: lab_awx_postgres
-    environment:
-      POSTGRES_USER: awx
-      POSTGRES_PASSWORD: ${AWX_DB_PASSWORD}
-      POSTGRES_DB: awx
-    volumes:
-      - ./data/awx_postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U awx -d awx"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    restart: unless-stopped
-
-  # ── AWX: Redis (channel layers + cache) ────────────────────────────────────
-  awx-redis:
-    image: redis:7-alpine
-    container_name: lab_awx_redis
-    command: redis-server --save "" --appendonly no --loglevel warning
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  # ── AWX: Web (nginx + daphne, runs migrations + creates admin) ─────────────
-  awx-web:
-    image: ghcr.io/ansible/awx:${AWX_VERSION:-23.9.0}
-    container_name: lab_awx_web
-    depends_on:
-      awx-postgres:
-        condition: service_healthy
-      awx-redis:
-        condition: service_healthy
+  # ── Cluster Control Panel (ClusterShell + Ansible web UI) ──────────────────
+  ccp:
+    build: ./services/ccp
+    container_name: lab_ccp
     ports:
-      - "${AWX_HTTP_PORT:-8052}:8052"
-    hostname: awxweb
-    user: root
-    environment:
-      AWX_COMPONENT: web
-      SECRET_KEY: ${AWX_SECRET_KEY}
-      DJANGO_SUPERUSER_USERNAME: ${AWX_ADMIN_USER:-admin}
-      DJANGO_SUPERUSER_PASSWORD: ${AWX_ADMIN_PASSWORD}
-      DJANGO_SUPERUSER_EMAIL: admin@lab.local
+      - "${CCP_PORT:-8060}:8060"
     volumes:
-      - ./services/awx/credentials.py:/etc/tower/conf.d/credentials.py:ro
-      - ./data/awx_projects:/var/lib/awx/projects:rw
+      # single directory bind mount holds the SQLite db, job logs, uploaded
+      # files and the SSH key — no single-file mounts (which Docker would
+      # auto-create as directories on a bare `docker compose up`)
+      - ./data/ccp:/data/ccp:rw
+    environment:
+      - CCP_SECRET_KEY=${CCP_SECRET_KEY}
+      - CCP_ADMIN_USER=${CCP_ADMIN_USER:-admin}
+      - CCP_ADMIN_PASSWORD=${CCP_ADMIN_PASSWORD}
+      - CCP_DEMO=${CCP_DEMO:-0}
+      - CCP_DB=/data/ccp/ccp.db
+      - CCP_JOBS_DIR=/data/ccp/jobs
+      - CCP_FILES_DIR=/data/ccp/files
+      - CCP_SSH_KEY=/data/ccp/ssh/id_ccp
+      # hard per-job wall-clock cap (seconds) so a hung command/playbook can't
+      # pin a worker thread forever
+      - CCP_JOB_TIMEOUT=${CCP_JOB_TIMEOUT:-900}
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsSo /dev/null http://127.0.0.1:8052/api/v2/ping/ 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/healthz')\""]
       interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 120s
-    restart: unless-stopped
-
-  # ── AWX: Task worker (Ansible dispatcher + receptor) ──────────────────────
-  awx-task:
-    image: ghcr.io/ansible/awx:${AWX_VERSION:-23.9.0}
-    container_name: lab_awx_task
-    depends_on:
-      awx-postgres:
-        condition: service_healthy
-      awx-redis:
-        condition: service_healthy
-      awx-web:
-        condition: service_healthy
-    hostname: awx
-    user: root
-    environment:
-      AWX_COMPONENT: task
-      SECRET_KEY: ${AWX_SECRET_KEY}
-      AWX_SKIP_MIGRATIONS: "1"
-    volumes:
-      - ./services/awx/credentials.py:/etc/tower/conf.d/credentials.py:ro
-      - ./data/awx_projects:/var/lib/awx/projects:rw
+      timeout: 5s
+      retries: 3
+      start_period: 8s
     restart: unless-stopped

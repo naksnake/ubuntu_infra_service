@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block heading %}Script Repository{% endblock %}
+{% block body %}
+{% if role_ok('operator') %}
+<div class="card">
+  <h2 id="editor-title">New script</h2>
+  <input type="hidden" id="s-id">
+  <div class="row">
+    <div><label>Name</label><input id="s-name" placeholder="collect-facts"></div>
+    <div><label>Kind</label><select id="s-kind"><option value="shell">Shell (ClusterShell)</option><option value="playbook">Ansible playbook</option></select></div>
+  </div>
+  <label>Description</label><input id="s-desc">
+  <label>Content</label><textarea id="s-content" rows="10"></textarea>
+  <div style="margin-top:14px">
+    <button class="btn" onclick="save()">Save</button>
+    <button class="btn btn-ghost" onclick="reset()">Clear</button>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Scripts ({{ scripts|length }})</h2>
+  <table>
+    <thead><tr><th>Name</th><th>Kind</th><th>Description</th><th>Updated</th><th></th></tr></thead>
+    <tbody>
+      {% for s in scripts %}
+      <tr>
+        <td><b>{{ s.name }}</b></td>
+        <td>{{ s.kind }}</td>
+        <td>{{ s.description }}</td>
+        <td><small>{{ s.updated_at | tstime }} · {{ s.updated_by }}</small></td>
+        <td>
+          {% if role_ok('operator') %}
+          <button class="btn btn-ghost btn-sm" onclick='edit({{ s.id }})'>Edit</button>
+          <button class="btn btn-danger btn-sm" onclick="del('/api/scripts/{{ s.id }}','Delete {{ s.name }}?')">Delete</button>
+          {% else %}<small>read-only</small>{% endif %}
+        </td>
+      </tr>
+      {% else %}<tr><td colspan="5" class="empty">No scripts yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script id="script-data" type="application/json">{{ scripts_json | safe }}</script>
+{% endblock %}
+{% block scripts %}<script>
+const SCRIPTS=JSON.parse(document.getElementById('script-data').textContent||'[]');
+function edit(id){
+  const s=SCRIPTS.find(x=>x.id===id);if(!s)return;
+  document.getElementById('editor-title').textContent='Edit: '+s.name;
+  document.getElementById('s-id').value=s.id;
+  document.getElementById('s-name').value=s.name;
+  document.getElementById('s-kind').value=s.kind;
+  document.getElementById('s-desc').value=s.description;
+  document.getElementById('s-content').value=s.content;
+  window.scrollTo(0,0);
+}
+function reset(){['s-id','s-name','s-desc','s-content'].forEach(i=>document.getElementById(i).value='');
+  document.getElementById('editor-title').textContent='New script';}
+async function save(){
+  const p={name:val('s-name'),kind:val('s-kind'),description:val('s-desc'),content:val('s-content')};
+  if(!p.name){toast('Name required',true);return;}
+  try{await api('POST','/api/scripts',p);toast('Saved');location.reload();}catch(e){toast(e.message,true);}
+}
+function val(id){return document.getElementById(id).value;}
+</script>{% endblock %}

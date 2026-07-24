@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Cluster Control Panel</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="login-wrap">
+  <form class="login-card" method="post">
+    <div class="brand"><span class="logo">◈</span><div><b>Cluster Control</b><small>Panel</small></div></div>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}<div class="flash">{{ messages[0] }}</div>{% endif %}
+    {% endwith %}
+    <label for="username">Username</label>
+    <input id="username" name="username" autofocus autocomplete="username">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password">
+    <button class="btn" style="width:100%;margin-top:18px">Sign in</button>
+  </form>
+</div>
+</body>
+</html>

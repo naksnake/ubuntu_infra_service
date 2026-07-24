@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block heading %}Users &amp; Roles{% endblock %}
+{% block body %}
+<div class="card">
+  <h2>Add user</h2>
+  <div class="row">
+    <div><label>Username</label><input id="u-name"></div>
+    <div><label>Password (min 8)</label><input id="u-pass" type="password"></div>
+    <div><label>Role</label><select id="u-role">
+      {% for r in roles %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+    </select></div>
+  </div>
+  <div style="margin-top:14px"><button class="btn" onclick="addUser()">Create user</button></div>
+  <p><small>viewer = read-only · operator = run jobs, manage nodes/scripts/files · admin = everything + users + audit</small></p>
+</div>
+<div class="card">
+  <h2>Accounts ({{ users|length }})</h2>
+  <table>
+    <thead><tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td><b>{{ u.username }}</b>{% if u.id == user.id %} <small>(you)</small>{% endif %}</td>
+        <td><span class="badge role-{{ u.role }}">{{ u.role }}</span></td>
+        <td><small>{{ u.created_at | tstime }}</small></td>
+        <td>{% if u.id != user.id %}<button class="btn btn-danger btn-sm" onclick="del('/api/users/{{ u.id }}','Delete user {{ u.username }}?')">Delete</button>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+async function addUser(){
+  const p={username:v('u-name'),password:v('u-pass'),role:v('u-role')};
+  if(!p.username||p.password.length<8){toast('Username and 8+ char password required',true);return;}
+  try{await api('POST','/api/users',p);toast('User created');location.reload();}catch(e){toast(e.message,true);}
+}
+function v(id){return document.getElementById(id).value;}
+</script>{% endblock %}
