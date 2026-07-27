@@ -166,6 +166,12 @@
     window.addEventListener('focus', () => { setTimeout(() => { pickerOpen = false; }, 500); });
     upInput.addEventListener('change', () => { pickerOpen = false; uploadFiles(upInput.files); });
     upCard.addEventListener('dragover',  e => { e.preventDefault(); upCard.classList.add('drag'); });
+
+    // preflight: surface a broken monitor→manager link on the card right away
+    fetch('/api/upload/check')
+      .then(r => r.json())
+      .then(j => { if (!j.ok) setStatus(j.error, 'err'); })
+      .catch(() => {});
     upCard.addEventListener('dragleave', () => upCard.classList.remove('drag'));
     upCard.addEventListener('drop', e => {
       e.preventDefault(); upCard.classList.remove('drag');

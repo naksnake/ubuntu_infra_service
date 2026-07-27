@@ -718,6 +718,25 @@ downloads, not the CPU. Store ISOs in `data/webfs_share/` on the SSD.
 - Check its logs: `docker logs lab_ccp 2>&1 | tail -30`
 - Confirm `CCP_ADMIN_PASSWORD` is set in `.env` (the admin is seeded on first run only)
 
+**Monitor upload card fails or shows "iPXE Manager unreachable"**
+- The card checks the monitor→manager link when the page loads and shows the
+  exact reason on the card; the same message appears in
+  `docker logs lab_monitor`.
+- Rebuild and recreate **both** containers together, then hard-reload the
+  dashboard (Ctrl+Shift+R) so the browser drops the old page's JavaScript:
+  ```bash
+  docker compose up -d --build monitor ipxe-manager
+  ```
+- Test the internal link by hand (expect `200`):
+  ```bash
+  docker exec lab_monitor python -c \
+    "import requests; print(requests.get('http://ipxe-manager:8091/menu.ipxe', timeout=5, proxies={'http': None}).status_code)"
+  ```
+- Changed `IPXE_MANAGER_PASSWORD` in `.env`? Recreate both containers — the
+  monitor sends that password with every upload.
+- HTTP proxies injected into containers by the Docker daemon (common on
+  corporate networks) are ignored for this internal call.
+
 **Containers restart repeatedly**
 - Check for missing `.env` values: `docker logs lab_dhcp | head -5`
 - Re-run `./deploy.sh` — it prompts "Run interactive configuration wizard now? (Y/n)";

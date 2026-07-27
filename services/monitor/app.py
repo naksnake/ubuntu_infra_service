@@ -270,6 +270,26 @@ class _KnownLengthStream:
         return iter(lambda: self._stream.read(65536), b'')
 
 
+def _mgr_session():
+    """HTTP session for monitor→manager calls on the compose network.
+    trust_env=False: a Docker daemon that injects corporate HTTP(S)_PROXY
+    variables into containers would otherwise send this internal request to
+    the proxy, which cannot resolve 'ipxe-manager' — the call would hang or
+    fail even though both containers are healthy."""
+    s = requests.Session()
+    s.trust_env = False
+    if IPXE_MANAGER_PASSWORD:
+        s.auth = ('monitor', IPXE_MANAGER_PASSWORD)
+    return s
+
+
+def _mgr_error(exc):
+    msg = f'iPXE Manager unreachable from the monitor container: {exc}'
+    sys.stderr.write(f'[monitor][upload] {msg}\n')
+    sys.stderr.flush()
+    return msg
+
+
 @app.route('/api/upload', methods=['POST'])
 def api_upload():
     # the viewer role is read-only by contract — uploads are for admins
@@ -283,18 +303,40 @@ def api_upload():
     if request.content_length:
         body = _KnownLengthStream(body, request.content_length)
     headers = {'Content-Type': request.content_type or 'application/octet-stream'}
-    auth = ('monitor', IPXE_MANAGER_PASSWORD) if IPXE_MANAGER_PASSWORD else None
     try:
-        resp = requests.post(f'{IPXE_MANAGER_URL}/api/files', data=body,
-                             headers=headers, auth=auth, timeout=(10, 3600))
+        resp = _mgr_session().post(f'{IPXE_MANAGER_URL}/api/files', data=body,
+                                   headers=headers, timeout=(10, 3600))
     except requests.RequestException as exc:
-        return jsonify({'error': f'iPXE Manager unreachable: {exc}'}), 502
+        return jsonify({'error': _mgr_error(exc)}), 502
     try:
         name = resp.json().get('name', '?') if resp.ok else f'(HTTP {resp.status_code})'
     except Exception:
         name = f'(HTTP {resp.status_code})'
     audit('upload', name)
     return Response(resp.content, resp.status_code, mimetype='application/json')
+
+
+@app.route('/api/upload/check')
+def api_upload_check():
+    """Preflight for the dashboard upload card: proves the monitor container
+    can reach AND authenticate to the iPXE Manager, so a broken link shows up
+    on the card at page load instead of as a dead upload. The same reason is
+    written to the container log (docker logs lab_monitor)."""
+    if session.get('role') != 'admin':
+        return jsonify({'ok': False, 'error': 'admin role required'}), 403
+    try:
+        r = _mgr_session().get(f'{IPXE_MANAGER_URL}/api/config', timeout=5)
+    except requests.RequestException as exc:
+        return jsonify({'ok': False, 'error': _mgr_error(exc)})
+    if r.status_code == 401:
+        return jsonify({'ok': False, 'error':
+                        'iPXE Manager rejected the password — set the same '
+                        'IPXE_MANAGER_PASSWORD for both containers in .env, then '
+                        'run: docker compose up -d monitor ipxe-manager'})
+    if not r.ok:
+        return jsonify({'ok': False,
+                        'error': f'iPXE Manager answered HTTP {r.status_code}'})
+    return jsonify({'ok': True})
 
 
 if __name__ == '__main__':
