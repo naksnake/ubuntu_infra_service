@@ -570,6 +570,10 @@ deploy script's subcommands instead of hunting down containers by hand:
 ./deploy.sh rebuild
 ```
 
+Re-running plain `./deploy.sh` also detects an existing stack and asks
+*"Remove old containers + built images before deploying?"* — answer **Y**
+(the default) for a clean re-deploy straight from the wizard.
+
 For a true factory reset, run `./deploy.sh clean` and then delete `./data`
 (this erases uploaded ISOs, DHCP leases, the CCP database and certificates).
 

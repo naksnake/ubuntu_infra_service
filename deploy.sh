@@ -370,6 +370,21 @@ ensure_https_cert() {
   warn "Self-signed cert: browsers will warn once; replace $pem with a CA-signed chained PEM to avoid it."
 }
 
+# On re-runs: offer to remove the previous containers and locally built
+# images first, so the deploy starts from a clean slate (.env and ./data
+# are always kept).
+maybe_clean_existing() {
+  local existing
+  existing="$(docker_cli compose --profile https ps -aq 2>/dev/null || true)"
+  [[ -n "$existing" ]] || return 0
+  if prompt_yesno "Existing stack found. Remove old containers + built images before deploying (clean re-deploy)?" "Y"; then
+    docker_cli compose --profile https down --remove-orphans --rmi local
+    log "Old containers and images removed — images will be rebuilt from scratch."
+  else
+    log "Keeping existing containers/images — compose only rebuilds what changed."
+  fi
+}
+
 compose_up() {
   log "Starting stack: docker compose up -d --build"
   docker_cli compose up -d --build
@@ -531,6 +546,7 @@ main() {
 
   fetch_ipxe_binaries
   ensure_https_cert
+  maybe_clean_existing
   compose_up
   nat_wizard
 
