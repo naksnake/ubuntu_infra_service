@@ -298,8 +298,9 @@ The dashboard now requires **login**. Sign in with the admin account (it reuses
   it and the file is stored in `data/webfs_share/`. Uploads are forwarded to
   the iPXE Manager, so an ISO gets the automatic kernel+initrd extraction and
   a disabled boot entry exactly as if uploaded in the manager UI — even when
-  `IPXE_MANAGER_PASSWORD` is set. The page's auto-refresh pauses while an
-  upload is running.
+  `IPXE_MANAGER_PASSWORD` is set. Files stream straight into the share (no
+  scratch copy in any container), and the page's auto-refresh pauses while a
+  file is being picked or uploaded.
 
 Use the search box to quickly find a host by IP, MAC, or hostname.  
 The page auto-refreshes every 30 seconds. A JSON API is available at `/api/status` (login required).

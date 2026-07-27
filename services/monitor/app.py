@@ -86,7 +86,13 @@ def _guard():
             return jsonify({'error': 'authentication required'}), 401
         return redirect(url_for('login', next=request.path))
     if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
-        token = request.headers.get('X-CSRF-Token') or request.form.get('_csrf')
+        token = request.headers.get('X-CSRF-Token')
+        if not token and request.mimetype == 'application/x-www-form-urlencoded':
+            # Only look inside urlencoded bodies for the token. Parsing a
+            # multipart body here would spool the whole upload to disk AND
+            # consume the stream /api/upload must forward — the proxied POST
+            # would then hang forever waiting for body bytes that never come.
+            token = request.form.get('_csrf')
         if not token or token != session.get('csrf'):
             return jsonify({'error': 'invalid or missing CSRF token'}), 403
     return None

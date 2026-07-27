@@ -90,10 +90,11 @@
   const TOTAL = {{ refresh }};
   const barEl = document.getElementById('progress-bar'), countEl = document.getElementById('countdown');
   let remaining = TOTAL;
-  let uploading = false;   // pause the auto-refresh so it can't kill an upload
+  let uploading = false;    // pause the auto-refresh so it can't kill an upload
+  let pickerOpen = false;   // …or reload behind the open file-picker dialog
   barEl.style.width = '0%';
   setInterval(() => {
-    if (uploading) return;
+    if (uploading || pickerOpen) return;
     remaining--;
     if (remaining <= 0) { location.reload(); return; }
     countEl.textContent = remaining;
@@ -131,6 +132,8 @@
             if (j.kernel_entry) setStatus(`${file.name}: kernel+initrd extracted, boot entry added (disabled)`, 'ok');
             else if (file.name.toLowerCase().endsWith('.iso')) setStatus(`${file.name} uploaded — no kernel+initrd pair found inside`, 'ok');
             else setStatus(`${file.name} uploaded`, 'ok');
+          } else if (xhr.status === 401) {
+            setStatus('Session expired — reload the page and log in again', 'err');
           } else {
             setStatus(`${file.name}: ${j.error || 'upload failed (HTTP ' + xhr.status + ')'}`, 'err');
           }
@@ -144,6 +147,7 @@
     async function uploadFiles(list) {
       const files = [...(list || [])];
       if (!files.length || uploading) return;
+      if (!CSRF) { setStatus('Session problem — reload the page and log in again', 'err'); return; }
       uploading = true;
       try {
         for (const f of files) await uploadOne(f);
@@ -156,7 +160,11 @@
       }
     }
 
-    upInput.addEventListener('change', () => uploadFiles(upInput.files));
+    // freeze the auto-refresh while the picker dialog is up: a reload behind
+    // it would orphan the dialog and the chosen file would go nowhere
+    upInput.addEventListener('click', () => { pickerOpen = true; });
+    window.addEventListener('focus', () => { setTimeout(() => { pickerOpen = false; }, 500); });
+    upInput.addEventListener('change', () => { pickerOpen = false; uploadFiles(upInput.files); });
     upCard.addEventListener('dragover',  e => { e.preventDefault(); upCard.classList.add('drag'); });
     upCard.addEventListener('dragleave', () => upCard.classList.remove('drag'));
     upCard.addEventListener('drop', e => {

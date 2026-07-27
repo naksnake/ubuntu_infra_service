@@ -1,9 +1,11 @@
 import os
 import re
 import json
+import time
 import uuid
 import fcntl
 import pathlib
+import tempfile
 from contextlib import contextmanager
 from urllib.parse import quote
 
@@ -17,7 +19,7 @@ try:
 except Exception:  # pragma: no cover - uploads still work, just no extraction
     pycdlib = None
 
-from flask import Flask, request, jsonify, render_template, Response
+from flask import Flask, Request, request, jsonify, render_template, Response
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -36,6 +38,47 @@ AUTOINSTALL_FILE = pathlib.Path(
     os.environ.get('AUTOINSTALL_FILE', str(ENTRIES_FILE.parent / 'autoinstall.json')))
 MANAGER_PORT = os.environ.get('MANAGER_PORT', '8091')
 MANAGER_BASE = os.environ.get('MANAGER_BASE', f'http://{SERVER_IP}:{MANAGER_PORT}').rstrip('/')
+
+
+class UploadsSpoolRequest(Request):
+    """Spool multipart file parts straight into UPLOAD_DIR while they upload.
+
+    Werkzeug's default spools them to the container's /tmp, so an 8 GB ISO
+    would need 8 GB of scratch space in the overlay filesystem on top of its
+    final copy in the share. Landing in UPLOAD_DIR (the big bind-mounted disk)
+    avoids that, and lets api_upload() rename the finished spool into place
+    instead of copying it a second time. The '.spool-' dotfile prefix keeps
+    half-received files out of the file listing.
+    """
+    def _get_file_stream(self, total_content_length, content_type,
+                         filename=None, content_length=None):
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        fd, path = tempfile.mkstemp(prefix='.spool-', dir=UPLOAD_DIR)
+        os.close(fd)
+        os.chmod(path, 0o644)          # mkstemp's 0600 would be unreadable to webfs
+        return open(path, 'wb+')       # .name == path so the route can rename it
+
+
+app.request_class = UploadsSpoolRequest
+
+
+def _spool_path(file_storage):
+    """The on-disk spool behind an uploaded part, if it lives in UPLOAD_DIR."""
+    name = getattr(file_storage.stream, 'name', None)
+    if isinstance(name, str) and pathlib.Path(name).parent == UPLOAD_DIR:
+        return pathlib.Path(name)
+    return None
+
+
+def _reap_stale_spools(max_age=86400):
+    """Remove spool files orphaned by crashed/aborted uploads."""
+    try:
+        cutoff = time.time() - max_age
+        for p in UPLOAD_DIR.glob('.spool-*'):
+            if p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 # ── optional auth (everything except the PXE-facing menu endpoint) ──────────
 
@@ -414,22 +457,37 @@ def api_files():
 
 @app.route('/api/files', methods=['POST'])
 def api_upload():
+    # touching request.files parses the multipart body; file parts stream to
+    # unique '.spool-*' names inside UPLOAD_DIR (see UploadsSpoolRequest), so
+    # webfs never sees a half-written file under its final name
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
     f = request.files['file']
+    _reap_stale_spools()
+    spool = _spool_path(f)
     filename = secure_filename(f.filename or '')
     if not filename:
+        if spool:
+            f.stream.close()
+            spool.unlink(missing_ok=True)
         return jsonify({'error': 'Invalid filename'}), 400
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     dest = UPLOAD_DIR / filename
-    # stream to a hidden, unique temp name so webfs never serves a half-written
-    # file and two concurrent uploads of the same name can't corrupt each other
-    tmp = UPLOAD_DIR / f'.{filename}.{uuid.uuid4().hex}.uploading'
     try:
-        f.save(str(tmp))
-        tmp.replace(dest)
+        if spool:
+            # already fully written to the destination filesystem — rename
+            # into place, no second copy
+            f.stream.close()
+            spool.replace(dest)
+        else:  # foreign stream (e.g. a test client): fall back to save+rename
+            tmp = UPLOAD_DIR / f'.{filename}.{uuid.uuid4().hex}.uploading'
+            try:
+                f.save(str(tmp))
+                tmp.replace(dest)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
     except Exception as exc:
-        tmp.unlink(missing_ok=True)
         return jsonify({'error': f'Upload failed: {exc}'}), 500
 
     # An uploaded ISO becomes bootable automatically: kernel+initrd are
