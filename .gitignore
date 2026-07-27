@@ -19,6 +19,18 @@ __pycache__/
 # Persistent runtime data (bind mounts — never commit)
 data/webfs_share/
 
+# TLS certificates + private keys for the optional HTTPS listener (secrets)
+data/certs/
+
+# webfs htdocs subdirs are bind-mount targets: keep the dirs, never their
+# contents (boot assets can be large; at runtime they're shadowed by mounts)
+services/webfs/htdocs/linux/*
+services/webfs/htdocs/ipxe/*
+services/webfs/htdocs/files/*
+!services/webfs/htdocs/linux/.gitkeep
+!services/webfs/htdocs/ipxe/.gitkeep
+!services/webfs/htdocs/files/.gitkeep
+
 # DHCP lease database (runtime data)
 data/dnsmasq.leases
 

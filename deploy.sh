@@ -4,7 +4,9 @@ set -euo pipefail
 # ==========================================================
 # Lab Services deploy wizard (Linux-only)
 # Usage:
-#   ./deploy.sh
+#   ./deploy.sh            interactive deploy wizard (default)
+#   ./deploy.sh clean      stop stack, remove containers + built images
+#   ./deploy.sh rebuild    clean + rebuild images from scratch + start
 #
 # What it does:
 # - Ensures Docker + docker compose plugin
@@ -155,6 +157,11 @@ ensure_dirs() {
   mkdir -p data/ccp
   mkdir -p data/webfs_share
   mkdir -p services/webfs/htdocs/linux
+  # nested bind-mount targets: /var/www/htdocs is mounted read-only, so the
+  # /ipxe and /files mountpoints must already exist in the source directory
+  # (a nested mount cannot mkdir its mountpoint on an ro filesystem)
+  mkdir -p services/webfs/htdocs/ipxe
+  mkdir -p services/webfs/htdocs/files
   mkdir -p services/tftp/tftpboot
   # dnsmasq writes leases here; must exist as a file before Docker bind-mounts it
   touch data/dnsmasq.leases
@@ -220,10 +227,16 @@ DNS_SERVER=${DNS_SERVER}
 
 # ==== Ports ====
 WEBFS_PORT=${WEBFS_PORT}
+WEBFS_HTTPS_PORT=${WEBFS_HTTPS_PORT:-8443}
 IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT}
 CCP_PORT=${CCP_PORT}
 MONITOR_PORT=${MONITOR_PORT}
 MONITOR_REFRESH=${MONITOR_REFRESH:-30}
+
+# ==== Optional HTTPS listener for the file share ====
+# Set COMPOSE_PROFILES=https to serve the share over TLS on WEBFS_HTTPS_PORT
+# as well. deploy.sh generates a self-signed cert into data/certs/webfs.pem.
+COMPOSE_PROFILES=${COMPOSE_PROFILES:-}
 
 # ==== iPXE Manager ====
 # Optional: set a password to protect the web UI and API (menu.ipxe stays open).
@@ -322,20 +335,102 @@ env_wizard() {
   load_env
 }
 
+# Download url -> dst with curl, falling back to wget. Rejects HTML error
+# pages that captive portals / intercepting proxies serve with HTTP 200, and
+# anything implausibly small for an iPXE binary.
+fetch_file() {
+  local url="$1" dst="$2" tmp ok=0
+  tmp="$(mktemp "${dst}.dl.XXXXXX")"
+  if have curl && curl -fsSL --connect-timeout 15 --retry 2 -o "$tmp" "$url"; then
+    ok=1
+  elif have wget && wget -q --timeout=15 --tries=2 -O "$tmp" "$url"; then
+    ok=1
+  fi
+  if [[ "$ok" -eq 1 ]] \
+     && [[ "$(stat -c%s "$tmp" 2>/dev/null || echo 0)" -ge 10240 ]] \
+     && ! head -c 256 "$tmp" | grep -aqi '<!doctype\|<html'; then
+    mv "$tmp" "$dst"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 fetch_ipxe_binaries() {
   local dst="services/tftp/tftpboot"
   mkdir -p "$dst"
 
-  if prompt_yesno "Download iPXE binaries (undionly.kpxe, ipxe.efi) into $dst now?" "Y"; then
-    log "Downloading from boot.ipxe.org..."
-    sudo_run apt-get update -y >/dev/null 2>&1 || true
-    sudo_run apt-get install -y curl ca-certificates >/dev/null 2>&1 || true
+  # filename|url — stage-1 bootloaders served over TFTP to PXE firmware:
+  #   undionly.kpxe    x86 BIOS
+  #   ipxe.efi         x86-64 UEFI
+  #   ipxe-arm64.efi   ARM64 UEFI (Pi 4/5 net-boot firmware, ARM servers)
+  local binaries=(
+    "undionly.kpxe|https://boot.ipxe.org/undionly.kpxe"
+    "ipxe.efi|https://boot.ipxe.org/ipxe.efi"
+    "ipxe-arm64.efi|https://boot.ipxe.org/arm64-efi/ipxe.efi"
+  )
 
-    curl -fsSL "https://boot.ipxe.org/undionly.kpxe" -o "$dst/undionly.kpxe"
-    curl -fsSL "https://boot.ipxe.org/ipxe.efi"     -o "$dst/ipxe.efi"
-    log "Downloaded: $dst/undionly.kpxe, $dst/ipxe.efi"
+  if prompt_yesno "Download iPXE binaries (x86 BIOS + x86-64/ARM64 UEFI) into $dst now?" "Y"; then
+    if ! have curl && ! have wget; then
+      sudo_run apt-get update -y >/dev/null 2>&1 || true
+      sudo_run apt-get install -y curl ca-certificates >/dev/null 2>&1 || true
+    fi
+    local entry name url failed=0
+    for entry in "${binaries[@]}"; do
+      name="${entry%%|*}"; url="${entry##*|}"
+      if [[ -s "$dst/$name" ]]; then
+        log "$name already present — keeping it (delete the file to force a re-download)."
+        continue
+      fi
+      if fetch_file "$url" "$dst/$name"; then
+        log "Downloaded $name ($(du -h "$dst/$name" | cut -f1))"
+      else
+        warn "Could not download $name from $url"
+        failed=1
+      fi
+    done
+    if [[ "$failed" -eq 1 ]]; then
+      warn "Some iPXE binaries are missing — PXE boot for those architectures will not work yet."
+      warn "Download them on any machine with internet and copy into $dst/ :"
+      warn "  x86 BIOS:    https://boot.ipxe.org/undionly.kpxe"
+      warn "  x86-64 UEFI: https://boot.ipxe.org/ipxe.efi"
+      warn "  ARM64 UEFI:  https://boot.ipxe.org/arm64-efi/ipxe.efi  (save as ipxe-arm64.efi)"
+    fi
   else
     warn "Skipped iPXE binaries download."
+  fi
+}
+
+# Self-signed certificate for the optional HTTPS listener (COMPOSE_PROFILES=https).
+# webfsd -C wants a single chained PEM: certificate first, then the private key.
+ensure_https_cert() {
+  [[ ",${COMPOSE_PROFILES:-}," == *",https,"* ]] || return 0
+  local pem="data/certs/webfs.pem"
+  [[ -s "$pem" ]] && return 0
+  have openssl || die "openssl is required to generate $pem (or place your own chained PEM there)."
+  local cn="${WEBFS_HOST_IP:-192.168.100.1}"
+  log "HTTPS profile is enabled — generating self-signed certificate for $cn (10 years): $pem"
+  mkdir -p data/certs
+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+    -subj "/CN=${cn}" -addext "subjectAltName=IP:${cn}" \
+    -keyout data/certs/webfs.key -out data/certs/webfs.crt 2>/dev/null
+  cat data/certs/webfs.crt data/certs/webfs.key > "$pem"
+  chmod 600 "$pem" data/certs/webfs.key
+  warn "Self-signed cert: browsers will warn once; replace $pem with a CA-signed chained PEM to avoid it."
+}
+
+# On re-runs: offer to remove the previous containers and locally built
+# images first, so the deploy starts from a clean slate (.env and ./data
+# are always kept).
+maybe_clean_existing() {
+  local existing
+  existing="$(docker_cli compose --profile https ps -aq 2>/dev/null || true)"
+  [[ -n "$existing" ]] || return 0
+  if prompt_yesno "Existing stack found. Remove old containers + built images before deploying (clean re-deploy)?" "Y"; then
+    docker_cli compose --profile https down --remove-orphans --rmi local
+    log "Old containers and images removed — images will be rebuilt from scratch."
+  else
+    log "Keeping existing containers/images — compose only rebuilds what changed."
   fi
 }
 
@@ -499,6 +594,8 @@ main() {
   fi
 
   fetch_ipxe_binaries
+  ensure_https_cert
+  maybe_clean_existing
   compose_up
   nat_wizard
 
@@ -520,4 +617,51 @@ main() {
   warn "Reminder: DHCP is running on PXE_IFACE=${PXE_IFACE:-<PXE_IFACE>}. Ensure no other DHCP server exists on that lab segment."
 }
 
-main "$@"
+usage() {
+  cat <<'USAGE'
+Usage: ./deploy.sh [command]
+
+Commands:
+  (none)     Interactive deploy wizard: Docker, .env, iPXE binaries,
+             build + start the stack, optional NAT and autostart.
+  clean      Stop the stack; remove its containers, networks and the
+             locally built images. Keeps .env and ./data (ISOs, leases,
+             CCP database, certificates) — delete ./data yourself for a
+             factory reset.
+  rebuild    clean, then rebuild every image from scratch (--no-cache)
+             and start the stack again. Use after editing a Dockerfile
+             or when an image is suspected stale/broken.
+  help       Show this help.
+USAGE
+}
+
+# `--profile https` so the optional HTTPS listener is torn down/rebuilt too,
+# whether or not it is currently enabled in .env.
+cmd_clean() {
+  docker compose version >/dev/null 2>&1 || docker_cli compose version >/dev/null 2>&1 || die "docker compose not available."
+  load_env
+  log "Stopping stack and removing containers, networks and locally built images..."
+  docker_cli compose --profile https down --remove-orphans --rmi local
+  log "Clean complete. Kept: .env and ./data — remove ./data manually for a factory reset."
+}
+
+cmd_rebuild() {
+  docker compose version >/dev/null 2>&1 || docker_cli compose version >/dev/null 2>&1 || die "docker compose not available."
+  ensure_dirs
+  load_env
+  ensure_https_cert
+  log "Stopping stack..."
+  docker_cli compose --profile https down --remove-orphans
+  log "Rebuilding all images from scratch (--no-cache)..."
+  docker_cli compose build --no-cache
+  docker_cli compose up -d
+  check_stack
+}
+
+case "${1:-}" in
+  "")             main ;;
+  clean)          cmd_clean ;;
+  rebuild)        cmd_rebuild ;;
+  help|-h|--help) usage ;;
+  *)              usage; die "Unknown command: $1" ;;
+esac

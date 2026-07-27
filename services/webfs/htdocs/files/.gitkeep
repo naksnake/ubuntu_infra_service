@@ -1,0 +1,2 @@
+This file keeps the directory in git: it is the mountpoint for a read-only
+nested bind mount (see docker-compose.yml, webfs service). Do not delete.

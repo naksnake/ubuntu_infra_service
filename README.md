@@ -201,7 +201,11 @@ The wizard will ask you to confirm each setting, then it will:
 1. Install Docker + Compose plugin (if not present)
 2. Create the required data directories
 3. Auto-generate `CCP_SECRET_KEY` and save it to `.env`
-4. Offer to download iPXE boot binaries (`undionly.kpxe`, `ipxe.efi`) — defaults to **yes**
+4. Offer to download iPXE boot binaries — defaults to **yes**. One per client
+   architecture: `undionly.kpxe` (x86 BIOS), `ipxe.efi` (x86-64 UEFI) and
+   `ipxe-arm64.efi` (ARM64 UEFI — Pi 4/5, ARM servers). Uses curl or wget,
+   skips files already present, and a failed download only warns (copy the
+   file into `services/tftp/tftpboot/` manually and re-run)
 5. Build and start all containers with `docker compose up -d --build`
 6. Offer to enable persistent NAT via a systemd unit (`lab-nat.service`)
 7. Offer to enable stack autostart on reboot via `lab-stack.service`
@@ -261,6 +265,11 @@ sudo iptables -t nat -S POSTROUTING   # MASQUERADE rule for the WAN interface
 > separate table would be overridden by Docker's `FORWARD` policy of `DROP`.
 
 ### Verify the file server
+Open `http://192.168.100.1:8080/` in a browser — the webfs web UI lists the
+`/files/` share and the static iPXE scripts, with per-file **Download** and
+**Copy URL** buttons (use Copy URL when building boot entries by hand).
+
+Or from the command line:
 ```bash
 curl -fsS "http://192.168.100.1:8080/files/"
 # Should return an HTML directory listing (empty until you copy files in)
@@ -551,6 +560,63 @@ docker compose up -d
 docker compose up -d --build dhcp
 ```
 
+### Clean and rebuild from scratch
+
+When an image is stale or broken (or you just want a fresh start), use the
+deploy script's subcommands instead of hunting down containers by hand:
+
+```bash
+# Stop the stack; remove its containers, networks and locally built images.
+# Keeps .env and ./data (ISOs, leases, CCP db, certs).
+./deploy.sh clean
+
+# clean + rebuild every image with --no-cache + start the stack again
+./deploy.sh rebuild
+```
+
+Re-running plain `./deploy.sh` also detects an existing stack and asks
+*"Remove old containers + built images before deploying?"* — answer **Y**
+(the default) for a clean re-deploy straight from the wizard.
+
+For a true factory reset, run `./deploy.sh clean` and then delete `./data`
+(this erases uploaded ISOs, DHCP leases, the CCP database and certificates).
+
+---
+
+## HTTPS for the file share (optional)
+
+The webfs share can also be served over TLS — webfsd has native HTTPS
+support. This is meant for humans downloading files from a browser;
+**PXE boot keeps using plain HTTP** (stock iPXE binaries will not trust a
+self-signed certificate, and netboot needs no TLS on an isolated lab
+segment).
+
+1. Enable the compose profile in `.env`:
+   ```
+   COMPOSE_PROFILES=https
+   WEBFS_HTTPS_PORT=8443
+   ```
+2. Re-run `./deploy.sh` (answer **n** to the wizard to keep your `.env`).
+   It generates a self-signed certificate for `WEBFS_HOST_IP` into
+   `data/certs/webfs.pem` and starts the extra `lab_webfs_https` container.
+   Or do it by hand:
+   ```bash
+   mkdir -p data/certs
+   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+     -subj "/CN=192.168.100.1" -addext "subjectAltName=IP:192.168.100.1" \
+     -keyout data/certs/webfs.key -out data/certs/webfs.crt
+   cat data/certs/webfs.crt data/certs/webfs.key > data/certs/webfs.pem
+   docker compose up -d   # COMPOSE_PROFILES=https must be set in .env
+   ```
+3. Browse `https://192.168.100.1:8443/` — same web UI and `/files/` share as
+   the HTTP listener. Your browser will warn once about the self-signed cert.
+
+To use a real certificate instead, replace `data/certs/webfs.pem` with your
+own **chained PEM (certificate first, then the private key)** and
+`docker compose restart webfs-https`. To turn HTTPS off again, clear
+`COMPOSE_PROFILES` in `.env` and run `docker compose --profile https down`
+followed by `docker compose up -d`.
+
 ---
 
 ## Autostart and NAT after reboot
@@ -662,6 +728,7 @@ ubuntu_infra_service/
     ├── webfs_share/             # Uploaded ISOs, kernels, initrds (served at /files/)
     ├── ipxe_manager/            # Boot menu entries + autoinstall profiles (JSON)
     ├── ccp/                     # CCP SQLite db, job logs, uploaded files, SSH key
+    ├── certs/                   # TLS cert + key for the optional HTTPS listener
     └── dnsmasq.leases           # Live DHCP lease database (read by monitor)
 ```
 

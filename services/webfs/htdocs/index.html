@@ -5,33 +5,207 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Lab File Server</title>
   <style>
-    body { font-family: system-ui, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 16px; color: #1f2328; }
-    h1 { font-size: 1.5rem; }
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 900px;
+           margin: 32px auto; padding: 0 16px; color: #1f2328; background: #fff; }
+    h1 { font-size: 1.4rem; margin-bottom: 4px; }
+    .sub { color: #57606a; font-size: .9rem; margin-top: 0; }
     code { background: #f0f3f6; padding: 2px 6px; border-radius: 4px; font-size: .9em; }
-    a { color: #0969da; }
-    .note { background: #f0f6fc; border: 1px solid #d0e2f2; border-radius: 6px; padding: 12px 14px; font-size: .92rem; }
-    ul { line-height: 1.8; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .tabs { margin: 18px 0 10px; display: flex; gap: 8px; }
+    .tabs button { border: 1px solid #d0d7de; background: #f6f8fa; color: inherit; border-radius: 6px;
+                   padding: 6px 14px; font-size: .92rem; cursor: pointer; }
+    .tabs button.active { background: #0969da; border-color: #0969da; color: #fff; }
+    .crumb { font-size: .92rem; margin: 8px 2px; word-break: break-all; }
+    table { width: 100%; border-collapse: collapse; font-size: .93rem; }
+    th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #d8dee4; }
+    th { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: #57606a; }
+    td.meta { color: #57606a; white-space: nowrap; font-size: .85rem; }
+    td.act { white-space: nowrap; text-align: right; }
+    td.act a, td.act button { border: 1px solid #d0d7de; background: #f6f8fa; color: inherit;
+        border-radius: 6px; padding: 3px 10px; font-size: .82rem; cursor: pointer; margin-left: 6px; }
+    .name { word-break: break-all; }
+    .dir::before { content: "📁 "; } .file::before { content: "📄 "; }
+    .empty, .error { padding: 18px 10px; color: #57606a; }
+    .error { color: #b35900; }
+    .note { background: #f0f6fc; border: 1px solid #d0e2f2; border-radius: 6px;
+            padding: 10px 14px; font-size: .88rem; margin-top: 22px; }
+    @media (prefers-color-scheme: dark) {
+      body { color: #e6edf3; background: #0d1117; }
+      .sub, td.meta, th, .empty { color: #8b949e; }
+      code, .tabs button, td.act a, td.act button { background: #21262d; border-color: #30363d; }
+      th, td { border-color: #30363d; }
+      a { color: #58a6ff; }
+      .note { background: #161b22; border-color: #30363d; }
+      .tabs button.active { background: #1f6feb; border-color: #1f6feb; }
+    }
   </style>
 </head>
 <body>
   <h1>Lab File Server</h1>
-  <p>HTTP share for PXE boot assets — ISO images, kernels, initrds and root filesystems.</p>
+  <p class="sub">PXE boot assets — ISO images, kernels, initrds, root filesystems and iPXE scripts.
+     Click a file to download it, or copy its URL for a boot entry.</p>
 
-  <p>Download path: <a href="/files/">/files/</a> &nbsp;(host directory: <code>./data/webfs_share</code>)</p>
+  <div class="tabs">
+    <button id="tab-files" onclick="go('/files/')">Files (uploads)</button>
+    <button id="tab-ipxe"  onclick="go('/ipxe/')">iPXE scripts</button>
+  </div>
+  <div class="crumb" id="crumb"></div>
+  <div id="listing"></div>
 
   <div class="note">
-    <strong>Boot menus are managed by the iPXE Manager</strong>, not from this page.
-    Upload files and build boot entries there — the live menu is served at
-    <code>http://&lt;this-host&gt;:8091/menu.ipxe</code>, and PXE clients are pointed
-    at it automatically by DHCP.
+    <strong>Uploads and boot menus are managed by the iPXE Manager</strong> (port 8091 by
+    default), which writes into <code>./data/webfs_share</code> — this server only reads it.
+    You can also copy files straight into that directory on the host.
   </div>
 
-  <h2>Static iPXE scripts (manual fallback)</h2>
-  <ul>
-    <li><a href="/ipxe/default.ipxe">/ipxe/default.ipxe</a> — chains to the iPXE Manager menu</li>
-    <li><a href="/ipxe/menu.ipxe">/ipxe/menu.ipxe</a> — static fallback menu</li>
-    <li><a href="/ipxe/linux-kernel-initrd.ipxe">/ipxe/linux-kernel-initrd.ipxe</a> — kernel + initrd over HTTP (UEFI-friendly)</li>
-    <li><a href="/ipxe/boot-iso.ipxe">/ipxe/boot-iso.ipxe</a> — ISO sanboot (BIOS only)</li>
-  </ul>
+  <script>
+  "use strict";
+  const listing = document.getElementById("listing");
+  const crumb = document.getElementById("crumb");
+
+  function currentPath() {
+    const h = decodeURIComponent(location.hash.replace(/^#/, ""));
+    return /^\/(files|ipxe)\/([^\0]*\/)?$/.test(h) ? h : "/files/";
+  }
+
+  function go(path) { location.hash = path; }
+
+  // webfsd's listing puts entries in a <pre>: a text node with
+  // "perms user group date size" followed by the <a> of the entry itself.
+  // The <h1> breadcrumb and the footer also contain anchors (with absolute
+  // hrefs) — resolve every href against the current directory and keep only
+  // direct children, which drops breadcrumbs, "../" and external links.
+  function parseListing(html, base) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const baseURL = new URL(base, location.origin);
+    const out = [];
+    for (const a of doc.querySelectorAll("pre a")) {
+      const href = a.getAttribute("href") || "";
+      if (!href) continue;
+      let abs;
+      try { abs = new URL(href, baseURL); } catch { continue; }
+      if (abs.origin !== location.origin) continue;
+      const p = abs.pathname;
+      if (!p.startsWith(base) || p === base) continue;
+      const rest = p.slice(base.length);
+      const dir = rest.endsWith("/");
+      const name = decodeURIComponent(dir ? rest.slice(0, -1) : rest);
+      if (!name || name.includes("/")) continue; // direct children only
+      let meta = "";
+      const prev = a.previousSibling;
+      if (prev && prev.nodeType === Node.TEXT_NODE) {
+        const line = prev.textContent.split("\n").pop();
+        const m = line.match(/([A-Z][a-z]{2}\s+\d{1,2}\s+(?:\d{1,2}:\d{2}|\d{4}))\s+(.*?)\s*$/);
+        if (m) meta = m[1].replace(/\s+/g, " ") + (dir ? "" : " · " + m[2].replace(/\s+/g, " "));
+      }
+      out.push({ name, href: p, dir, meta });
+    }
+    out.sort((x, y) => (y.dir - x.dir) || x.name.localeCompare(y.name));
+    return out;
+  }
+
+  function renderCrumb(path) {
+    crumb.textContent = "";
+    let acc = "/";
+    const parts = path.split("/").filter(Boolean);
+    const root = document.createElement("a");
+    root.href = "#/" + parts[0] + "/";
+    root.textContent = "/";
+    crumb.appendChild(root);
+    parts.forEach((p, i) => {
+      acc += p + "/";
+      const a = document.createElement("a");
+      a.href = "#" + acc;
+      a.textContent = p + "/";
+      crumb.appendChild(a);
+    });
+  }
+
+  function render(entries, path) {
+    listing.textContent = "";
+    const up = path.replace(/[^/]+\/$/, "");
+    if (/^\/(files|ipxe)\/.+/.test(path)) {
+      const upLink = document.createElement("div");
+      const a = document.createElement("a");
+      a.href = "#" + up;
+      a.textContent = "⬆ up one level";
+      upLink.appendChild(a);
+      upLink.style.margin = "6px 2px";
+      listing.appendChild(upLink);
+    }
+    if (!entries.length) {
+      const d = document.createElement("div");
+      d.className = "empty";
+      d.textContent = "Empty directory. Upload files via the iPXE Manager or copy them into data/webfs_share/ on the host.";
+      listing.appendChild(d);
+      return;
+    }
+    const table = document.createElement("table");
+    table.innerHTML = "<thead><tr><th>Name</th><th>Modified / size</th><th></th></tr></thead>";
+    const tb = document.createElement("tbody");
+    for (const e of entries) {
+      const tr = document.createElement("tr");
+
+      const tdName = document.createElement("td");
+      const a = document.createElement("a");
+      a.className = "name " + (e.dir ? "dir" : "file");
+      if (e.dir) { a.href = "#" + e.href; } else { a.href = e.href; a.setAttribute("download", e.name); }
+      a.textContent = e.name + (e.dir ? "/" : "");
+      tdName.appendChild(a);
+
+      const tdMeta = document.createElement("td");
+      tdMeta.className = "meta";
+      tdMeta.textContent = e.meta || (e.dir ? "directory" : "");
+
+      const tdAct = document.createElement("td");
+      tdAct.className = "act";
+      if (!e.dir) {
+        const dl = document.createElement("a");
+        dl.href = e.href;
+        dl.setAttribute("download", e.name);
+        dl.textContent = "Download";
+        const cp = document.createElement("button");
+        cp.textContent = "Copy URL";
+        cp.onclick = () => {
+          const url = new URL(e.href, location.href).href;
+          (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject())
+            .then(() => { cp.textContent = "Copied!"; setTimeout(() => cp.textContent = "Copy URL", 1200); })
+            .catch(() => prompt("Copy this URL:", url));
+        };
+        tdAct.appendChild(dl);
+        tdAct.appendChild(cp);
+      }
+      tr.appendChild(tdName); tr.appendChild(tdMeta); tr.appendChild(tdAct);
+      tb.appendChild(tr);
+    }
+    table.appendChild(tb);
+    listing.appendChild(table);
+  }
+
+  async function refresh() {
+    const path = currentPath();
+    document.getElementById("tab-files").classList.toggle("active", path.startsWith("/files/"));
+    document.getElementById("tab-ipxe").classList.toggle("active", path.startsWith("/ipxe/"));
+    renderCrumb(path);
+    listing.innerHTML = '<div class="empty">Loading…</div>';
+    try {
+      const res = await fetch(path, { headers: { "Accept": "text/html" } });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      render(parseListing(await res.text(), path), path);
+    } catch (err) {
+      listing.innerHTML = "";
+      const d = document.createElement("div");
+      d.className = "error";
+      d.textContent = "Could not list " + path + " (" + err.message + "). " +
+        "If this directory contains its own index.html, webfsd serves that instead of a listing.";
+      listing.appendChild(d);
+    }
+  }
+
+  window.addEventListener("hashchange", refresh);
+  refresh();
+  </script>
 </body>
 </html>
