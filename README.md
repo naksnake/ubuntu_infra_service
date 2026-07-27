@@ -342,12 +342,11 @@ http://192.168.100.1:8091/
    initrd http://<server>:8080/files/<iso-name>/initrd
    boot
    ```
-   Auto-created entries start **disabled** so the boot menu never changes
-   behind your back — enable the entry when you're ready.
+   The auto-created entry starts **disabled** so the boot menu never changes
+   behind your back — enable it when you're ready.
 2. **Boot Menu tab** — click **+ Add Entry**, give it a name, pick the boot type:
    - **Kernel + initrd** — fetched over HTTP; works on **BIOS and UEFI**
      (this is the modern, recommended path)
-   - **ISO sanboot** — **BIOS firmware only** (UEFI cannot sanboot an ISO)
    - **Chainload URL** — point at another `.ipxe` script
 3. In each file field the base URL (`http://<server>:8080/files/`) is fixed —
    you type or pick **only the filename**. A live preview under the form shows
@@ -368,17 +367,18 @@ ip=dhcp url=http://192.168.100.1:8080/files/ubuntu-24.04-live-server-amd64.iso a
 boot=live fetch=http://192.168.100.1:8080/files/filesystem.squashfs ip=dhcp
 ```
 
-> **ISO shortcut:** uploading a `.iso` auto-creates **two disabled entries**:
-> a **Kernel + initrd** entry built from the boot files extracted out of the
-> ISO (works on UEFI *and* BIOS — this is the one to enable), and a sanboot
-> entry as a BIOS-only fallback. The extractor knows the standard layouts
-> (Ubuntu/Debian `casper/` & `live/`, Debian installer `install.amd/`,
-> Fedora/RHEL `images/pxeboot/`, openSUSE, Arch); if an ISO has no
-> recognizable kernel+initrd pair, only the sanboot entry is created. The
-> default command line `ip=dhcp url=<iso-url>` fits Ubuntu live ISOs — for
-> other distros edit it (e.g. `inst.repo=` for Fedora/RHEL). Bare kernels are
-> never auto-added because they need a matching initrd and command line.
-> Deleting an ISO also removes its extracted folder.
+> **ISO shortcut:** uploading a `.iso` auto-creates a disabled
+> **Kernel + initrd** entry built from the boot files extracted out of the
+> ISO — it works on UEFI *and* BIOS, so there is no separate sanboot type
+> (sanboot was BIOS-only and cannot work on UEFI). The extractor knows the
+> standard layouts (Ubuntu/Debian `casper/` & `live/`, Debian installer
+> `install.amd/`, Fedora/RHEL `images/pxeboot/`, openSUSE, Arch); an ISO with
+> no recognizable kernel+initrd pair gets no entry — add a Kernel + initrd
+> entry by hand instead. The default command line `ip=dhcp url=<iso-url>`
+> fits Ubuntu live ISOs — for other distros edit it (e.g. `inst.repo=` for
+> Fedora/RHEL). Bare kernels are never auto-added because they need a
+> matching initrd and command line. Deleting an ISO also removes its
+> extracted folder.
 
 ### Boot order
 
@@ -729,8 +729,7 @@ ubuntu_infra_service/
 ├── ipxe/                        # Static iPXE scripts (manual fallbacks, served by webfs)
 │   ├── default.ipxe             # Chains to the iPXE Manager's live menu
 │   ├── menu.ipxe                # Static fallback menu
-│   ├── linux-kernel-initrd.ipxe # UEFI-friendly kernel+initrd boot
-│   └── boot-iso.ipxe            # BIOS-only ISO sanboot
+│   └── linux-kernel-initrd.ipxe # UEFI-friendly kernel+initrd boot
 │
 ├── services/
 │   ├── dhcp/                    # dnsmasq DHCP container (PXE pointers, no TFTP)

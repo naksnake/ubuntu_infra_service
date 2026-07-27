@@ -59,7 +59,11 @@ def load_entries():
     if not ENTRIES_FILE.exists() or ENTRIES_FILE.stat().st_size == 0:
         return []
     try:
-        return json.loads(ENTRIES_FILE.read_text())
+        entries = json.loads(ENTRIES_FILE.read_text())
+        # The ISO sanboot type was removed (BIOS-only — useless on UEFI, where
+        # kernel+initrd with the ISO's URL is the way). Filter any legacy
+        # entries so they never reach the menu; the next save purges them.
+        return [e for e in entries if e.get('type') != 'iso']
     except Exception:
         # Corrupt JSON: preserve it instead of silently returning [] (a following
         # mutation would then persist the empty list and destroy the entries).
@@ -141,12 +145,14 @@ def sanitize_fields(data):
             return None, 'name must not be empty'
         out['name'] = name
     if 'type' in data:
-        if data['type'] not in ('kernel', 'iso', 'chain'):
-            return None, 'type must be kernel, iso or chain'
+        # 'iso' (sanboot) is gone: BIOS-only, cannot work on UEFI — ISOs boot
+        # via kernel+initrd with the ISO's HTTP URL on the command line instead
+        if data['type'] not in ('kernel', 'chain'):
+            return None, 'type must be kernel or chain'
         out['type'] = data['type']
     if 'enabled' in data:
         out['enabled'] = bool(data['enabled'])
-    for k in ('kernel', 'initrd', 'iso'):
+    for k in ('kernel', 'initrd'):
         if k in data:
             # relative paths allowed: extracted ISO boot files live in a
             # per-ISO subfolder (e.g. 'ubuntu-24.04-live-server-amd64/vmlinuz')
@@ -295,7 +301,7 @@ def extract_boot_files(iso_path, dest_dir):
 
 def entry_body_lines(e):
     """The iPXE commands that boot a single entry (no label, no trailing goto).
-    Kernel+initrd over HTTP is the UEFI-friendly path; sanboot is BIOS-only."""
+    Kernel+initrd over HTTP works on UEFI and BIOS alike."""
     t = e.get('type', 'kernel')
     lines = []
     if t == 'kernel':
@@ -323,10 +329,6 @@ def entry_body_lines(e):
         if initrd:
             lines.append(f'initrd {file_url(initrd)} || goto failed')
         lines.append('boot || goto failed')
-    elif t == 'iso':
-        # --no-describe matches the static boot-iso.ipxe and avoids a describe
-        # step some BIOS sanboot paths choke on
-        lines.append(f'sanboot --no-describe {file_url(e.get("iso", ""))} || goto failed')
     elif t == 'chain':
         lines.append(f'chain {e.get("url", "")} || goto failed')
     return lines
@@ -430,21 +432,20 @@ def api_upload():
         tmp.unlink(missing_ok=True)
         return jsonify({'error': f'Upload failed: {exc}'}), 500
 
-    # An uploaded ISO becomes bootable automatically (entries start disabled,
-    # so the boot menu never changes until you enable one):
-    #   1. kernel+initrd are extracted into UPLOAD_DIR/<stem>/ and a UEFI-ready
-    #      "Kernel + initrd" entry is created whose command line hands the OS
-    #      the ISO's HTTP URL (ip=dhcp url=…) — no sanboot involved;
-    #   2. a sanboot entry is still added as the BIOS-only fallback.
+    # An uploaded ISO becomes bootable automatically: kernel+initrd are
+    # extracted into UPLOAD_DIR/<stem>/ and a "Kernel + initrd" entry (works on
+    # UEFI and BIOS) is created whose command line hands the OS the ISO's HTTP
+    # URL (ip=dhcp url=…). The entry starts disabled, so the boot menu never
+    # changes until you enable it. ISOs with no recognizable kernel+initrd pair
+    # get no entry (sanboot was removed — BIOS-only, it cannot work on UEFI).
     # Bare kernels can't be auto-added — they need a matching initrd and cmdline.
-    auto_entry = kernel_entry = extracted = None
+    kernel_entry = extracted = None
     if filename.lower().endswith('.iso'):
         stem = pathlib.Path(filename).stem
         extracted = extract_boot_files(dest, UPLOAD_DIR / stem)
-        with entries_lock():
-            entries = load_entries()
-            changed = False
-            if extracted:
+        if extracted:
+            with entries_lock():
+                entries = load_entries()
                 kpath = f'{stem}/{extracted["kernel"]}'
                 if not any(e.get('type') == 'kernel' and e.get('kernel') == kpath
                            for e in entries):
@@ -460,19 +461,10 @@ def api_upload():
                         'enabled': False,
                     }
                     entries.append(kernel_entry)
-                    changed = True
-            if not any(e.get('type') == 'iso' and e.get('iso') == filename
-                       for e in entries):
-                auto_entry = {'id': 'e' + uuid.uuid4().hex[:7],
-                              'name': pathlib.Path(filename).stem,
-                              'type': 'iso', 'iso': filename, 'enabled': False}
-                entries.append(auto_entry)
-                changed = True
-            if changed:
-                save_entries(entries)
+                    save_entries(entries)
 
     return jsonify({'name': filename, 'size': dest.stat().st_size,
-                    'url': file_url(filename), 'auto_entry': auto_entry,
+                    'url': file_url(filename),
                     'kernel_entry': kernel_entry,
                     'extracted': extracted and {
                         'folder': pathlib.Path(filename).stem,
