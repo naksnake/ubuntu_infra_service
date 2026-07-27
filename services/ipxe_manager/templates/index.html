@@ -173,7 +173,9 @@ header span { color: var(--muted); font-size: 12px; }
         <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
           <span class="icon">&#128190;</span>
           <strong>Click to browse</strong> or drag &amp; drop
-          <p>ISO images, kernels (vmlinuz), initrd — any size</p>
+          <p>ISO images, kernels (vmlinuz), initrd — any size.<br>
+          An ISO is unpacked automatically: its kernel + initrd land in a folder named
+          after it, with a ready-made UEFI boot entry pointing at the ISO's URL.</p>
           <input type="file" id="fileInput" multiple onchange="uploadFiles(this.files)">
         </div>
         <div class="progress-bar" id="progress"><div class="fill" id="progressFill"></div></div>
@@ -275,7 +277,7 @@ header span { color: var(--muted); font-size: 12px; }
             <span class="url-prefix" data-prefix></span>
             <input type="text" id="kernelFile" list="uploadedFiles" placeholder="vmlinuz" oninput="onFieldChange()">
           </div>
-          <span class="hint">Pick an uploaded file or type a filename — the path stays fixed, you change only the name.</span>
+          <span class="hint">Pick an uploaded file or type a name — boot files extracted from an ISO appear as <code>&lt;iso-name&gt;/vmlinuz</code>.</span>
         </div>
         <div class="field">
           <label>initrd file (optional)</label>
@@ -471,7 +473,8 @@ function uploadOne(file) {
       bar.style.display = 'none';
       if (xhr.status === 201) {
         let j = {}; try { j = JSON.parse(xhr.responseText); } catch {}
-        if (j.auto_entry) toast('Uploaded ' + file.name + ' — added a boot entry (disabled)');
+        if (j.kernel_entry) toast('Uploaded ' + file.name + ' — extracted kernel+initrd to ' + j.extracted.folder + '/ and added boot entries (disabled)');
+        else if (j.auto_entry) toast('Uploaded ' + file.name + ' — added a boot entry (disabled)');
         else toast('Uploaded ' + file.name);
       } else {
         toast('Upload of ' + file.name + ' failed', false);
@@ -500,8 +503,11 @@ async function uploadFiles(list) {
 }
 
 async function deleteFile(name) {
-  if (!confirm(`Delete "${name}"?`)) return;
-  const r = await fetch('/api/files/' + encodeURIComponent(name), { method: 'DELETE' });
+  const extra = name.toLowerCase().endsWith('.iso') ? ' Its extracted kernel/initrd folder is removed too.' : '';
+  if (!confirm(`Delete "${name}"?` + extra)) return;
+  // encode per segment: extracted files have names like '<iso-stem>/vmlinuz'
+  const encoded = name.split('/').map(encodeURIComponent).join('/');
+  const r = await fetch('/api/files/' + encoded, { method: 'DELETE' });
   if (r.ok) { toast('Deleted ' + name); loadFiles(); }
   else toast('Delete failed', false);
 }

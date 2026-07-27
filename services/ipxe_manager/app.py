@@ -12,6 +12,11 @@ try:
 except Exception:  # pragma: no cover - degrade gracefully if PyYAML is absent
     yaml = None
 
+try:
+    import pycdlib  # for extracting kernel/initrd from uploaded ISOs
+except Exception:  # pragma: no cover - uploads still work, just no extraction
+    pycdlib = None
+
 from flask import Flask, request, jsonify, render_template, Response
 from werkzeug.utils import secure_filename
 
@@ -117,6 +122,16 @@ def _clean(value, maxlen=200):
     v = _IPXE_SEP.sub(' ', v)
     return v.strip()[:maxlen]
 
+def _safe_relpath(value):
+    """Sanitize a webfs-relative path like 'ubuntu-24.04/vmlinuz': every
+    component goes through secure_filename, so '..', absolute paths and
+    hidden files can never survive. Returns '' when nothing safe remains."""
+    parts = [p for p in str(value).replace('\\', '/').split('/') if p]
+    clean = [secure_filename(p) for p in parts]
+    if not clean or any(not c for c in clean):
+        return ''
+    return '/'.join(clean)
+
 def sanitize_fields(data):
     """Whitelist, clean and validate entry fields. Returns (fields, error)."""
     out = {}
@@ -133,7 +148,9 @@ def sanitize_fields(data):
         out['enabled'] = bool(data['enabled'])
     for k in ('kernel', 'initrd', 'iso'):
         if k in data:
-            fn = secure_filename(str(data[k])) if data[k] else ''
+            # relative paths allowed: extracted ISO boot files live in a
+            # per-ISO subfolder (e.g. 'ubuntu-24.04-live-server-amd64/vmlinuz')
+            fn = _safe_relpath(data[k]) if data[k] else ''
             if data[k] and not fn:
                 return None, f'invalid {k} filename'
             out[k] = fn
@@ -157,20 +174,122 @@ def sanitize_fields(data):
 # ── file helpers ─────────────────────────────────────────────────────────────
 
 def file_url(name):
-    return f'{WEBFS_BASE}/files/{quote(name)}'
+    return f'{WEBFS_BASE}/files/{quote(name)}'   # quote() keeps '/' intact
 
 def list_files():
     result = []
     if UPLOAD_DIR.exists():
-        for f in sorted(UPLOAD_DIR.iterdir()):
+        # recurse so the boot files extracted into per-ISO subfolders
+        # ('<iso-name>/vmlinuz') show up in the UI and datalists
+        for f in sorted(UPLOAD_DIR.rglob('*')):
+            rel = f.relative_to(UPLOAD_DIR)
             # dotfiles include .<name>.uploading partials — never show them
-            if f.is_file() and not f.name.startswith('.'):
-                result.append({
-                    'name': f.name,
-                    'size': f.stat().st_size,
-                    'url':  file_url(f.name),
-                })
+            if not f.is_file() or any(p.startswith('.') for p in rel.parts):
+                continue
+            name = rel.as_posix()
+            result.append({
+                'name': name,
+                'size': f.stat().st_size,
+                'url':  file_url(name),
+            })
     return result
+
+# ── ISO boot-file extraction ─────────────────────────────────────────────────
+# UEFI firmware cannot sanboot an ISO, but every mainstream installer ISO
+# carries a PXE-bootable kernel + initrd. On upload we pull that pair out into
+# UPLOAD_DIR/<iso-stem>/ so a "Kernel + initrd" entry can boot it directly:
+#   kernel .../files/<stem>/vmlinuz ip=dhcp url=.../files/<iso>   (casper
+#   fetches the ISO itself over HTTP — no sanboot involved).
+
+_KERNEL_NAME = re.compile(r'^(vmlinuz|vmlinux|bzimage|linux)([.\-].*)?$')
+_INITRD_NAME = re.compile(r'^(initrd|initramfs)([.\-].*)?$')
+# where distros keep the netboot pair; tried in this order when several
+# directories qualify (Ubuntu/Debian-live, Debian d-i, Fedora/RHEL, openSUSE, Arch)
+_BOOT_DIR_PREFERENCE = ('casper', 'live', 'install.amd', 'install',
+                        'images/pxeboot', 'boot/x86_64/loader', 'arch/boot/x86_64')
+# never treat package archives or firmware blobs as boot files
+_EXTRACT_SKIP_DIRS = ('pool', 'dists')
+_EXTRACT_SKIP_EXT  = ('.deb', '.udeb', '.rpm', '.efi', '.sig', '.mod', '.c32')
+
+def extract_boot_files(iso_path, dest_dir):
+    """Best-effort: copy the kernel + initrd out of a distro ISO into dest_dir.
+
+    Scans the ISO for a directory holding both a kernel (vmlinuz/linux/bzImage)
+    and an initrd (initrd*/initramfs*) and extracts that pair. Returns
+    {'kernel': <basename>, 'initrd': <basename>} on success, else None —
+    any parse failure leaves the upload itself untouched.
+    """
+    if pycdlib is None:
+        return None
+    iso = pycdlib.PyCdlib()
+    try:
+        iso.open(str(iso_path))
+    except Exception:
+        app.logger.warning('%s: not a readable ISO9660 image, skipping extraction',
+                           iso_path.name)
+        return None
+    try:
+        # richest name facade available (plain ISO9660 mangles to 'VMLINUZ.;1')
+        if iso.has_udf():          kw = 'udf_path'
+        elif iso.has_rock_ridge(): kw = 'rr_path'
+        elif iso.has_joliet():     kw = 'joliet_path'
+        else:                      kw = 'iso_path'
+        dirs = {}
+        for dirpath, _subdirs, files in iso.walk(**{kw: '/'}):
+            rel = dirpath.strip('/')
+            if rel.split('/', 1)[0].lower() in _EXTRACT_SKIP_DIRS:
+                continue  # apt/yum trees are full of linux-*.deb false positives
+            for fn in files:
+                name = fn.split(';')[0].rstrip('.') if kw == 'iso_path' else fn
+                base = name.lower()
+                if base.endswith(_EXTRACT_SKIP_EXT):
+                    continue
+                bucket = dirs.setdefault(rel, {'kernel': [], 'initrd': []})
+                if _KERNEL_NAME.match(base):
+                    bucket['kernel'].append((fn, name))
+                elif _INITRD_NAME.match(base):
+                    bucket['initrd'].append((fn, name))
+
+        candidates = [d for d, b in dirs.items() if b['kernel'] and b['initrd']]
+        if not candidates:
+            return None
+
+        def dir_rank(d):
+            dl = d.lower()
+            for i, pref in enumerate(_BOOT_DIR_PREFERENCE):
+                if dl == pref or dl.endswith('/' + pref):
+                    return i
+            return len(_BOOT_DIR_PREFERENCE) + dl.count('/')
+        best = min(candidates, key=dir_rank)
+        # shortest name wins: 'vmlinuz' over 'vmlinuz.efi', 'initrd' over
+        # 'initrd.lz', 'initramfs-linux.img' over the -fallback variant
+        pick = lambda cands: min(cands, key=lambda t: len(t[1]))
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out = {}
+        for (fn, name), key in ((pick(dirs[best]['kernel']), 'kernel'),
+                                (pick(dirs[best]['initrd']), 'initrd')):
+            src = '/' + (best + '/' if best else '') + fn
+            safe = secure_filename(name) or key
+            # hidden temp name: webfs must never serve a half-written boot file
+            tmp = dest_dir / f'.{safe}.{uuid.uuid4().hex}.extracting'
+            try:
+                iso.get_file_from_iso(str(tmp), **{kw: src})
+                tmp.replace(dest_dir / safe)
+            finally:
+                tmp.unlink(missing_ok=True)
+            out[key] = safe
+        app.logger.info('%s: extracted %s from /%s', iso_path.name,
+                        ' + '.join(out.values()), best)
+        return out
+    except Exception:
+        app.logger.exception('boot-file extraction failed for %s', iso_path.name)
+        return None
+    finally:
+        try:
+            iso.close()
+        except Exception:
+            pass
 
 # ── iPXE menu generator ───────────────────────────────────────────────────────
 
@@ -311,29 +430,78 @@ def api_upload():
         tmp.unlink(missing_ok=True)
         return jsonify({'error': f'Upload failed: {exc}'}), 500
 
-    # An ISO maps cleanly to a single sanboot entry, so auto-create one
-    # (disabled, so it never changes the boot menu until you enable it).
-    # Kernels can't be auto-added — they need a matching initrd and cmdline.
-    auto_entry = None
+    # An uploaded ISO becomes bootable automatically (entries start disabled,
+    # so the boot menu never changes until you enable one):
+    #   1. kernel+initrd are extracted into UPLOAD_DIR/<stem>/ and a UEFI-ready
+    #      "Kernel + initrd" entry is created whose command line hands the OS
+    #      the ISO's HTTP URL (ip=dhcp url=…) — no sanboot involved;
+    #   2. a sanboot entry is still added as the BIOS-only fallback.
+    # Bare kernels can't be auto-added — they need a matching initrd and cmdline.
+    auto_entry = kernel_entry = extracted = None
     if filename.lower().endswith('.iso'):
+        stem = pathlib.Path(filename).stem
+        extracted = extract_boot_files(dest, UPLOAD_DIR / stem)
         with entries_lock():
             entries = load_entries()
+            changed = False
+            if extracted:
+                kpath = f'{stem}/{extracted["kernel"]}'
+                if not any(e.get('type') == 'kernel' and e.get('kernel') == kpath
+                           for e in entries):
+                    kernel_entry = {
+                        'id': 'e' + uuid.uuid4().hex[:7],
+                        'name': f'{stem} (kernel+initrd)',
+                        'type': 'kernel',
+                        'kernel': kpath,
+                        'initrd': f'{stem}/{extracted["initrd"]}',
+                        # casper/subiquity fetch the ISO itself over HTTP;
+                        # adjust for other distros (inst.repo=, fetch=, …)
+                        'cmdline': f'ip=dhcp url={file_url(filename)}',
+                        'enabled': False,
+                    }
+                    entries.append(kernel_entry)
+                    changed = True
             if not any(e.get('type') == 'iso' and e.get('iso') == filename
                        for e in entries):
                 auto_entry = {'id': 'e' + uuid.uuid4().hex[:7],
                               'name': pathlib.Path(filename).stem,
                               'type': 'iso', 'iso': filename, 'enabled': False}
                 entries.append(auto_entry)
+                changed = True
+            if changed:
                 save_entries(entries)
 
     return jsonify({'name': filename, 'size': dest.stat().st_size,
-                    'url': file_url(filename), 'auto_entry': auto_entry}), 201
+                    'url': file_url(filename), 'auto_entry': auto_entry,
+                    'kernel_entry': kernel_entry,
+                    'extracted': extracted and {
+                        'folder': pathlib.Path(filename).stem,
+                        'kernel_url': file_url(f'{pathlib.Path(filename).stem}/{extracted["kernel"]}'),
+                        'initrd_url': file_url(f'{pathlib.Path(filename).stem}/{extracted["initrd"]}'),
+                    }}), 201
 
-@app.route('/api/files/<filename>', methods=['DELETE'])
+@app.route('/api/files/<path:filename>', methods=['DELETE'])
 def api_delete_file(filename):
-    path = UPLOAD_DIR / secure_filename(filename)
+    rel = _safe_relpath(filename)
+    if not rel:
+        return jsonify({'error': 'Invalid path'}), 400
+    path = UPLOAD_DIR / rel
     if path.exists() and path.is_file():
         path.unlink()
+        parent = path.parent
+        # deleting an ISO also removes the boot files extracted from it
+        if rel.lower().endswith('.iso') and '/' not in rel:
+            folder = UPLOAD_DIR / pathlib.Path(rel).stem
+            if folder.is_dir():
+                for f in folder.iterdir():
+                    base = f.name.lower()
+                    if f.is_file() and (_KERNEL_NAME.match(base)
+                                        or _INITRD_NAME.match(base)):
+                        f.unlink()
+                parent = folder
+        # drop a now-empty extraction folder, but never UPLOAD_DIR itself
+        if parent != UPLOAD_DIR and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
         return jsonify({'ok': True})
     return jsonify({'error': 'Not found'}), 404
 

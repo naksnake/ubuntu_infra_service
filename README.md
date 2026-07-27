@@ -332,6 +332,18 @@ http://192.168.100.1:8091/
 
 1. **Files tab** — upload your ISO, kernel (`vmlinuz`), or initrd
    (drag & drop or click to browse; files are stored in `data/webfs_share/`).
+   **Uploading an ISO does the rest automatically**: the manager extracts the
+   kernel + initrd out of the image into a folder named after it
+   (`data/webfs_share/<iso-name>/vmlinuz` + `initrd`) and creates a ready-made
+   **Kernel + initrd** boot entry whose command line hands the OS the ISO's
+   HTTP URL — the UEFI-friendly path, no sanboot involved:
+   ```
+   kernel http://<server>:8080/files/<iso-name>/vmlinuz initrd=initrd ip=dhcp url=http://<server>:8080/files/<name>.iso
+   initrd http://<server>:8080/files/<iso-name>/initrd
+   boot
+   ```
+   Auto-created entries start **disabled** so the boot menu never changes
+   behind your back — enable the entry when you're ready.
 2. **Boot Menu tab** — click **+ Add Entry**, give it a name, pick the boot type:
    - **Kernel + initrd** — fetched over HTTP; works on **BIOS and UEFI**
      (this is the modern, recommended path)
@@ -356,10 +368,17 @@ ip=dhcp url=http://192.168.100.1:8080/files/ubuntu-24.04-live-server-amd64.iso a
 boot=live fetch=http://192.168.100.1:8080/files/filesystem.squashfs ip=dhcp
 ```
 
-> **ISO shortcut:** uploading a `.iso` still auto-creates a **disabled**
-> sanboot entry (handy for BIOS clients or quick tests). For UEFI, use the
-> Kernel + initrd type as above. Kernels are never auto-added because they
-> need a matching initrd and command line.
+> **ISO shortcut:** uploading a `.iso` auto-creates **two disabled entries**:
+> a **Kernel + initrd** entry built from the boot files extracted out of the
+> ISO (works on UEFI *and* BIOS — this is the one to enable), and a sanboot
+> entry as a BIOS-only fallback. The extractor knows the standard layouts
+> (Ubuntu/Debian `casper/` & `live/`, Debian installer `install.amd/`,
+> Fedora/RHEL `images/pxeboot/`, openSUSE, Arch); if an ISO has no
+> recognizable kernel+initrd pair, only the sanboot entry is created. The
+> default command line `ip=dhcp url=<iso-url>` fits Ubuntu live ISOs — for
+> other distros edit it (e.g. `inst.repo=` for Fedora/RHEL). Bare kernels are
+> never auto-added because they need a matching initrd and command line.
+> Deleting an ISO also removes its extracted folder.
 
 ### Boot order
 
@@ -398,16 +417,17 @@ to that entry's kernel command line. These seed URLs stay reachable even when
 
 **Steps:**
 
-1. **Files tab** — upload the Ubuntu **live-server** ISO (plus its `vmlinuz` and
-   `initrd` if you extracted them, or reference the ISO over HTTP).
+1. **Files tab** — upload the Ubuntu **live-server** ISO. The manager extracts
+   its `vmlinuz` + `initrd` and creates a disabled **Kernel + initrd** entry
+   for it automatically.
 2. **Autoinstall tab** → **+ New Profile**. The editor is pre-filled with a
    standard Ubuntu autoinstall template (identity, storage `layout: direct`, SSH
    server). Edit the hostname, user, password hash (`mkpasswd -m sha-512`), disk
    layout, and packages. It's validated as YAML on save.
-3. **Boot Menu tab** → add or edit a **Kernel + initrd** entry. Point its command
-   line at the matching ISO/rootfs, e.g.
-   `ip=dhcp url=http://192.168.100.1:8080/files/ubuntu-24.04.1-live-server-amd64.iso`,
-   then pick your profile in **Autoinstall profile**. The live preview shows the
+3. **Boot Menu tab** → edit the auto-created **Kernel + initrd** entry (its
+   command line already reads
+   `ip=dhcp url=http://192.168.100.1:8080/files/ubuntu-24.04.1-live-server-amd64.iso`)
+   and pick your profile in **Autoinstall profile**. The live preview shows the
    exact kernel line, including the appended seed URL.
 4. Enable the entry only when you're ready; the next PXE boot of that machine
    installs Ubuntu unattended per your profile.
@@ -726,6 +746,7 @@ ubuntu_infra_service/
 │
 └── data/                        # Runtime data — back this up
     ├── webfs_share/             # Uploaded ISOs, kernels, initrds (served at /files/)
+    │   └── <iso-name>/          # kernel + initrd auto-extracted from an uploaded ISO
     ├── ipxe_manager/            # Boot menu entries + autoinstall profiles (JSON)
     ├── ccp/                     # CCP SQLite db, job logs, uploaded files, SSH key
     ├── certs/                   # TLS cert + key for the optional HTTPS listener
