@@ -465,14 +465,26 @@ def api_upload():
     f = request.files['file']
     _reap_stale_spools()
     spool = _spool_path(f)
-    filename = secure_filename(f.filename or '')
-    if not filename:
+
+    def _discard_and_fail(msg):
         if spool:
             f.stream.close()
             spool.unlink(missing_ok=True)
-        return jsonify({'error': 'Invalid filename'}), 400
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    dest = UPLOAD_DIR / filename
+        return jsonify({'error': msg}), 400
+
+    filename = secure_filename(f.filename or '')
+    if not filename:
+        return _discard_and_fail('Invalid filename')
+    # optional single-level target folder inside the share (?dir=monitor —
+    # the Lab Monitor uploads into its own space this way)
+    raw_dir = request.args.get('dir', '')
+    sub = secure_filename(raw_dir) if raw_dir else ''
+    if raw_dir and not sub:
+        return _discard_and_fail('Invalid dir')
+    base = UPLOAD_DIR / sub if sub else UPLOAD_DIR
+    relbase = f'{sub}/' if sub else ''          # prefix for share-relative paths
+    base.mkdir(parents=True, exist_ok=True)
+    dest = base / filename
     try:
         if spool:
             # already fully written to the destination filesystem — rename
@@ -480,7 +492,7 @@ def api_upload():
             f.stream.close()
             spool.replace(dest)
         else:  # foreign stream (e.g. a test client): fall back to save+rename
-            tmp = UPLOAD_DIR / f'.{filename}.{uuid.uuid4().hex}.uploading'
+            tmp = base / f'.{filename}.{uuid.uuid4().hex}.uploading'
             try:
                 f.save(str(tmp))
                 tmp.replace(dest)
@@ -491,7 +503,7 @@ def api_upload():
         return jsonify({'error': f'Upload failed: {exc}'}), 500
 
     # An uploaded ISO becomes bootable automatically: kernel+initrd are
-    # extracted into UPLOAD_DIR/<stem>/ and a "Kernel + initrd" entry (works on
+    # extracted into <base>/<stem>/ and a "Kernel + initrd" entry (works on
     # UEFI and BIOS) is created whose command line hands the OS the ISO's HTTP
     # URL (ip=dhcp url=…). The entry starts disabled, so the boot menu never
     # changes until you enable it. ISOs with no recognizable kernel+initrd pair
@@ -500,11 +512,11 @@ def api_upload():
     kernel_entry = extracted = None
     if filename.lower().endswith('.iso'):
         stem = pathlib.Path(filename).stem
-        extracted = extract_boot_files(dest, UPLOAD_DIR / stem)
+        extracted = extract_boot_files(dest, base / stem)
         if extracted:
             with entries_lock():
                 entries = load_entries()
-                kpath = f'{stem}/{extracted["kernel"]}'
+                kpath = f'{relbase}{stem}/{extracted["kernel"]}'
                 if not any(e.get('type') == 'kernel' and e.get('kernel') == kpath
                            for e in entries):
                     kernel_entry = {
@@ -512,22 +524,23 @@ def api_upload():
                         'name': f'{stem} (kernel+initrd)',
                         'type': 'kernel',
                         'kernel': kpath,
-                        'initrd': f'{stem}/{extracted["initrd"]}',
+                        'initrd': f'{relbase}{stem}/{extracted["initrd"]}',
                         # casper/subiquity fetch the ISO itself over HTTP;
                         # adjust for other distros (inst.repo=, fetch=, …)
-                        'cmdline': f'ip=dhcp url={file_url(filename)}',
+                        'cmdline': f'ip=dhcp url={file_url(relbase + filename)}',
                         'enabled': False,
                     }
                     entries.append(kernel_entry)
                     save_entries(entries)
 
-    return jsonify({'name': filename, 'size': dest.stat().st_size,
-                    'url': file_url(filename),
+    stem = pathlib.Path(filename).stem
+    return jsonify({'name': relbase + filename, 'size': dest.stat().st_size,
+                    'url': file_url(relbase + filename),
                     'kernel_entry': kernel_entry,
                     'extracted': extracted and {
-                        'folder': pathlib.Path(filename).stem,
-                        'kernel_url': file_url(f'{pathlib.Path(filename).stem}/{extracted["kernel"]}'),
-                        'initrd_url': file_url(f'{pathlib.Path(filename).stem}/{extracted["initrd"]}'),
+                        'folder': f'{relbase}{stem}',
+                        'kernel_url': file_url(f'{relbase}{stem}/{extracted["kernel"]}'),
+                        'initrd_url': file_url(f'{relbase}{stem}/{extracted["initrd"]}'),
                     }}), 201
 
 @app.route('/api/files/<path:filename>', methods=['DELETE'])
@@ -538,20 +551,22 @@ def api_delete_file(filename):
     path = UPLOAD_DIR / rel
     if path.exists() and path.is_file():
         path.unlink()
-        parent = path.parent
+        prune = [path.parent]
         # deleting an ISO also removes the boot files extracted from it
-        if rel.lower().endswith('.iso') and '/' not in rel:
-            folder = UPLOAD_DIR / pathlib.Path(rel).stem
+        # (works at any level: 'x.iso' -> 'x/', 'monitor/x.iso' -> 'monitor/x/')
+        if rel.lower().endswith('.iso'):
+            folder = path.parent / pathlib.Path(rel).stem
             if folder.is_dir():
                 for f in folder.iterdir():
                     base = f.name.lower()
                     if f.is_file() and (_KERNEL_NAME.match(base)
                                         or _INITRD_NAME.match(base)):
                         f.unlink()
-                parent = folder
-        # drop a now-empty extraction folder, but never UPLOAD_DIR itself
-        if parent != UPLOAD_DIR and parent.is_dir() and not any(parent.iterdir()):
-            parent.rmdir()
+                prune.insert(0, folder)   # innermost first
+        # drop now-empty folders, but never UPLOAD_DIR itself
+        for d in prune:
+            if d != UPLOAD_DIR and d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
         return jsonify({'ok': True})
     return jsonify({'error': 'Not found'}), 404
 

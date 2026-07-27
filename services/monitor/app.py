@@ -3,6 +3,7 @@ import sys
 import time
 import secrets
 import datetime
+from urllib.parse import quote
 
 from flask import (Flask, render_template, jsonify, request, session,
                    redirect, url_for, Response, flash)
@@ -23,6 +24,9 @@ SESSION_MINUTES  = int(os.environ.get('MONITOR_SESSION_MINUTES', '30'))
 IPXE_MANAGER_URL      = os.environ.get('IPXE_MANAGER_URL',
                                        'http://ipxe-manager:8091').rstrip('/')
 IPXE_MANAGER_PASSWORD = os.environ.get('IPXE_MANAGER_PASSWORD', '')
+# Files uploaded through this dashboard land in their own space inside the
+# share: data/webfs_share/<MONITOR_UPLOAD_DIR>/ (URLs under /files/<dir>/).
+MONITOR_UPLOAD_DIR    = os.environ.get('MONITOR_UPLOAD_DIR', 'monitor')
 
 app.config.update(
     SECRET_KEY=os.environ.get('MONITOR_SECRET_KEY') or secrets.token_hex(32),
@@ -253,7 +257,7 @@ def dashboard():
     return render_template(
         'index.html', containers=containers, leases=leases, c_err=c_err, l_err=l_err,
         now=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        refresh=REFRESH_INTERVAL, links=LINKS)
+        refresh=REFRESH_INTERVAL, links=LINKS, monitor_space=MONITOR_UPLOAD_DIR)
 
 
 # ── APIs ──────────────────────────────────────────────────────────────────────
@@ -314,8 +318,10 @@ def api_upload():
         body = _KnownLengthStream(body, request.content_length)
     headers = {'Content-Type': request.content_type or 'application/octet-stream'}
     try:
-        resp = _mgr_session().post(f'{IPXE_MANAGER_URL}/api/files', data=body,
-                                   headers=headers, timeout=(10, 3600))
+        # ?dir= puts dashboard uploads in the monitor's own space in the share
+        resp = _mgr_session().post(
+            f'{IPXE_MANAGER_URL}/api/files?dir={quote(MONITOR_UPLOAD_DIR)}',
+            data=body, headers=headers, timeout=(10, 3600))
     except requests.RequestException as exc:
         return jsonify({'error': _mgr_error(exc)}), 502
     try:
@@ -323,6 +329,31 @@ def api_upload():
     except Exception:
         name = f'(HTTP {resp.status_code})'
     audit('upload', name)
+    return Response(resp.content, resp.status_code, mimetype='application/json')
+
+
+@app.route('/api/files')
+def api_files():
+    """File-server listing for the dashboard's File Server section (all
+    logged-in roles — the viewer sees it read-only)."""
+    try:
+        resp = _mgr_session().get(f'{IPXE_MANAGER_URL}/api/files', timeout=10)
+    except requests.RequestException as exc:
+        return jsonify({'error': _mgr_error(exc)}), 502
+    return Response(resp.content, resp.status_code, mimetype='application/json')
+
+
+@app.route('/api/files/<path:name>', methods=['DELETE'])
+def api_delete_file(name):
+    # removal is a state change — admins only, like uploads
+    if session.get('role') != 'admin':
+        return jsonify({'error': 'admin role required'}), 403
+    try:
+        resp = _mgr_session().delete(f'{IPXE_MANAGER_URL}/api/files/{quote(name)}',
+                                     timeout=30)
+    except requests.RequestException as exc:
+        return jsonify({'error': _mgr_error(exc)}), 502
+    audit('delete_file', f'{name} (HTTP {resp.status_code})')
     return Response(resp.content, resp.status_code, mimetype='application/json')
 
 

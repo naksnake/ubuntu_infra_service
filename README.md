@@ -295,12 +295,18 @@ The dashboard now requires **login**. Sign in with the admin account (it reuses
 - **DHCP Leases** — IP address, MAC address, hostname, lease expiry, and time remaining for every active lease
 - **Quick links** — one-click access to the other web UIs, plus an
   **Upload to file server** card (admin role only): click it or drop a file on
-  it and the file is stored in `data/webfs_share/`. Uploads are forwarded to
-  the iPXE Manager, so an ISO gets the automatic kernel+initrd extraction and
-  a disabled boot entry exactly as if uploaded in the manager UI — even when
-  `IPXE_MANAGER_PASSWORD` is set. Files stream straight into the share (no
-  scratch copy in any container), and the page's auto-refresh pauses while a
-  file is being picked or uploaded.
+  it and the file is stored in the monitor's own space in the share,
+  `data/webfs_share/monitor/` (URLs under `/files/monitor/`), keeping
+  dashboard uploads separate from files managed in the iPXE Manager. Uploads
+  are forwarded to the iPXE Manager, so an ISO gets the automatic
+  kernel+initrd extraction and a disabled boot entry exactly as if uploaded
+  in the manager UI — even when `IPXE_MANAGER_PASSWORD` is set. Files stream
+  straight into the share (no scratch copy in any container), and the page's
+  auto-refresh pauses while a file is being picked or uploaded.
+- **File Server** — lists everything in the `/files/` share (dashboard
+  uploads carry a `monitor` badge) with per-file **Copy URL** and — for
+  admins — **Remove**. Removing an ISO also removes its extracted
+  kernel/initrd folder. The viewer role sees the list read-only.
 
 Use the search box to quickly find a host by IP, MAC, or hostname.  
 The page auto-refreshes every 30 seconds. A JSON API is available at `/api/status` (login required).
@@ -772,6 +778,7 @@ ubuntu_infra_service/
 │
 └── data/                        # Runtime data — back this up
     ├── webfs_share/             # Uploaded ISOs, kernels, initrds (served at /files/)
+    │   ├── monitor/             # Files uploaded via the Lab Monitor dashboard
     │   └── <iso-name>/          # kernel + initrd auto-extracted from an uploaded ISO
     ├── ipxe_manager/            # Boot menu entries + autoinstall profiles (JSON)
     ├── ccp/                     # CCP SQLite db, job logs, uploaded files, SSH key

@@ -19,7 +19,7 @@
     </a>
     {% endfor %}
     {% if cur_role == 'admin' %}
-    <label class="link-card upload-card" id="uploadCard" title="Upload a file to the file server share">
+    <label class="link-card upload-card" id="uploadCard" title="Upload a file to the file server share (stored in the monitor's own space)">
       <span class="link-icon">&#128228;</span>
       <span class="link-label">Upload to file server</span>
       <span class="link-url" id="uploadStatus">ISO / kernel / initrd — click or drop</span>
@@ -27,6 +27,21 @@
       <input type="file" id="uploadInput" multiple hidden>
     </label>
     {% endif %}
+  </div>
+</section>
+
+<section>
+  <h2>File Server <span class="count" id="fileCount">…</span></h2>
+  <p style="color:var(--muted);font-size:11px;margin-bottom:10px">
+    Everything in the <code>/files/</code> share. Files uploaded from this dashboard live in the
+    <code>{{ monitor_space }}/</code> space{% if cur_role == 'admin' %}; <strong>Remove</strong> deletes a file from
+    the file server (an ISO's extracted kernel/initrd folder goes with it){% endif %}.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>File</th><th>Size</th><th style="width:1%"></th></tr></thead>
+      <tbody id="filesBody"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+    </table>
   </div>
 </section>
 
@@ -82,6 +97,9 @@
 {% endblock %}
 
 {% block scripts %}<script>
+  const CSRF = document.querySelector('meta[name=csrf-token]').content;
+  const IS_ADMIN = {{ 'true' if cur_role == 'admin' else 'false' }};
+
   // [data-port] excludes the upload card, which is also a .link-card but has
   // no URL line — touching it here would throw and kill this whole script
   document.querySelectorAll('.link-card[data-port]').forEach(a => {
@@ -111,7 +129,6 @@
     const upStatus = document.getElementById('uploadStatus');
     const upProg   = document.getElementById('uploadProgress');
     const upFill   = document.getElementById('uploadFill');
-    const CSRF     = document.querySelector('meta[name=csrf-token]').content;
     const IDLE_MSG = upStatus.textContent;
 
     function setStatus(msg, cls) { upStatus.textContent = msg; upStatus.className = 'link-url' + (cls ? ' ' + cls : ''); }
@@ -161,6 +178,7 @@
         upInput.value = '';
         remaining = TOTAL;   // fresh countdown so the result stays readable
         setTimeout(() => setStatus(IDLE_MSG), TOTAL * 1000);
+        loadShareFiles();    // show the new file(s) right away
       }
     }
 
@@ -192,4 +210,60 @@
     });
     document.getElementById('lease-count').textContent = q ? visible : {{ leases|length }};
   }
+
+  // ── File Server section (list + remove, proxied to the iPXE Manager) ──
+  function escHtml(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  function escJs(s)   { return String(s == null ? '' : s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;').replace(/</g,'\\x3c'); }
+  function encPath(n) { return n.split('/').map(encodeURIComponent).join('/'); }
+  function fmtSize(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+    return (b / 1073741824).toFixed(2) + ' GB';
+  }
+
+  const MON_SPACE = {{ (monitor_space + '/') | tojson }};
+  async function loadShareFiles() {
+    const body = document.getElementById('filesBody');
+    try {
+      const r = await fetch('/api/files');
+      const files = await r.json();
+      if (!r.ok) throw new Error(files.error || r.status);
+      document.getElementById('fileCount').textContent = files.length;
+      if (!files.length) {
+        body.innerHTML = '<tr><td colspan="3" class="empty">No files on the file server yet — use the upload card above</td></tr>';
+        return;
+      }
+      // monitor's own space first, then everything else, alphabetical
+      files.sort((a, b) => (b.name.startsWith(MON_SPACE) - a.name.startsWith(MON_SPACE)) || a.name.localeCompare(b.name));
+      body.innerHTML = files.map(f => `
+        <tr>
+          <td><code>${escHtml(f.name)}</code>${f.name.startsWith(MON_SPACE) ? ' <span class="badge space">monitor</span>' : ''}</td>
+          <td style="color:var(--muted)">${fmtSize(f.size)}</td>
+          <td style="white-space:nowrap;text-align:right">
+            <button class="btn btn-ghost" onclick="copyUrl('${escJs(f.url)}')" title="Copy download URL">Copy URL</button>
+            ${IS_ADMIN ? `<button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
+          </td>
+        </tr>`).join('');
+    } catch (e) {
+      document.getElementById('fileCount').textContent = '!';
+      body.innerHTML = `<tr><td colspan="3" class="empty">File server list unavailable — ${escHtml(e.message)}</td></tr>`;
+    }
+  }
+
+  function copyUrl(u) { navigator.clipboard.writeText(u); }
+
+  async function removeFile(name) {
+    const extra = name.toLowerCase().endsWith('.iso') ? '\nIts extracted kernel/initrd folder will be removed too.' : '';
+    if (!confirm(`Remove "${name}" from the file server?` + extra)) return;
+    const r = await fetch('/api/files/' + encPath(name),
+                          { method: 'DELETE', headers: { 'X-CSRF-Token': CSRF } });
+    if (!r.ok) {
+      let j = {}; try { j = await r.json(); } catch {}
+      alert('Remove failed: ' + (j.error || 'HTTP ' + r.status));
+    }
+    loadShareFiles();
+  }
+
+  loadShareFiles();
 </script>{% endblock %}
