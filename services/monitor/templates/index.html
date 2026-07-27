@@ -82,10 +82,13 @@
 {% endblock %}
 
 {% block scripts %}<script>
-  document.querySelectorAll('.link-card').forEach(a => {
+  // [data-port] excludes the upload card, which is also a .link-card but has
+  // no URL line — touching it here would throw and kill this whole script
+  document.querySelectorAll('.link-card[data-port]').forEach(a => {
     const url = `${location.protocol}//${location.hostname}:${a.dataset.port}/${a.dataset.path || ''}`;
     a.href = url;
-    a.querySelector('[data-url]').textContent = url;
+    const label = a.querySelector('[data-url]');
+    if (label) label.textContent = url;
   });
   const TOTAL = {{ refresh }};
   const barEl = document.getElementById('progress-bar'), countEl = document.getElementById('countdown');
@@ -130,6 +133,7 @@
           let j = {}; try { j = JSON.parse(xhr.responseText); } catch {}
           if (xhr.status === 201) {
             if (j.kernel_entry) setStatus(`${file.name}: kernel+initrd extracted, boot entry added (disabled)`, 'ok');
+            else if (j.extracted) setStatus(`${file.name}: kernel+initrd re-extracted (boot entry already existed)`, 'ok');
             else if (file.name.toLowerCase().endsWith('.iso')) setStatus(`${file.name} uploaded — no kernel+initrd pair found inside`, 'ok');
             else setStatus(`${file.name} uploaded`, 'ok');
           } else if (xhr.status === 401) {

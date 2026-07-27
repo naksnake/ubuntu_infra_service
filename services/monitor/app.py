@@ -74,7 +74,7 @@ def audit(action, detail=''):
     sys.stderr.flush()
 
 
-PUBLIC_PATHS = {'/login', '/healthz'}
+PUBLIC_PATHS = {'/login', '/healthz', '/favicon.ico'}
 
 
 @app.before_request
@@ -205,6 +205,16 @@ def get_leases():
 @app.route('/healthz')
 def healthz():
     return Response('ok', mimetype='text/plain')
+
+
+@app.route('/favicon.ico')
+def favicon():
+    # without this every browser visit logs a 404 for the tab icon
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+           '<circle cx="8" cy="8" r="7" fill="none" stroke="#38bdf8" stroke-width="2"/>'
+           '<circle cx="8" cy="8" r="3" fill="#38bdf8"/></svg>')
+    return Response(svg, mimetype='image/svg+xml',
+                    headers={'Cache-Control': 'public, max-age=86400'})
 
 
 @app.route('/login', methods=['GET', 'POST'])
