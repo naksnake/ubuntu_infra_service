@@ -72,24 +72,35 @@
 
   function go(path) { location.hash = path; }
 
-  // webfsd's generated listing is a <pre> of anchors; the text node after each
-  // anchor carries "date  size" for files. Parse anchors + trailing text.
+  // webfsd's listing puts entries in a <pre>: a text node with
+  // "perms user group date size" followed by the <a> of the entry itself.
+  // The <h1> breadcrumb and the footer also contain anchors (with absolute
+  // hrefs) — resolve every href against the current directory and keep only
+  // direct children, which drops breadcrumbs, "../" and external links.
   function parseListing(html, base) {
     const doc = new DOMParser().parseFromString(html, "text/html");
+    const baseURL = new URL(base, location.origin);
     const out = [];
-    for (const a of doc.querySelectorAll("a")) {
+    for (const a of doc.querySelectorAll("pre a")) {
       const href = a.getAttribute("href") || "";
-      if (!href || href.startsWith("#") || /^[a-z]+:/i.test(href)) continue; // skip absolute/external
-      if (href === "../" || href === "..") continue;                          // we render our own "up"
+      if (!href) continue;
+      let abs;
+      try { abs = new URL(href, baseURL); } catch { continue; }
+      if (abs.origin !== location.origin) continue;
+      const p = abs.pathname;
+      if (!p.startsWith(base) || p === base) continue;
+      const rest = p.slice(base.length);
+      const dir = rest.endsWith("/");
+      const name = decodeURIComponent(dir ? rest.slice(0, -1) : rest);
+      if (!name || name.includes("/")) continue; // direct children only
       let meta = "";
-      let n = a.nextSibling;
-      while (n && n.nodeType === Node.TEXT_NODE) { meta += n.textContent; n = n.nextSibling; }
-      out.push({
-        name: decodeURIComponent(href.replace(/\/$/, "")),
-        href: base + href,
-        dir: href.endsWith("/"),
-        meta: meta.replace(/\s+/g, " ").trim(),
-      });
+      const prev = a.previousSibling;
+      if (prev && prev.nodeType === Node.TEXT_NODE) {
+        const line = prev.textContent.split("\n").pop();
+        const m = line.match(/([A-Z][a-z]{2}\s+\d{1,2}\s+(?:\d{1,2}:\d{2}|\d{4}))\s+(.*?)\s*$/);
+        if (m) meta = m[1].replace(/\s+/g, " ") + (dir ? "" : " · " + m[2].replace(/\s+/g, " "));
+      }
+      out.push({ name, href: p, dir, meta });
     }
     out.sort((x, y) => (y.dir - x.dir) || x.name.localeCompare(y.name));
     return out;
@@ -146,7 +157,7 @@
 
       const tdMeta = document.createElement("td");
       tdMeta.className = "meta";
-      tdMeta.textContent = e.dir ? "directory" : e.meta;
+      tdMeta.textContent = e.meta || (e.dir ? "directory" : "");
 
       const tdAct = document.createElement("td");
       tdAct.className = "act";
