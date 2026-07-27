@@ -261,6 +261,11 @@ sudo iptables -t nat -S POSTROUTING   # MASQUERADE rule for the WAN interface
 > separate table would be overridden by Docker's `FORWARD` policy of `DROP`.
 
 ### Verify the file server
+Open `http://192.168.100.1:8080/` in a browser — the webfs web UI lists the
+`/files/` share and the static iPXE scripts, with per-file **Download** and
+**Copy URL** buttons (use Copy URL when building boot entries by hand).
+
+Or from the command line:
 ```bash
 curl -fsS "http://192.168.100.1:8080/files/"
 # Should return an HTML directory listing (empty until you copy files in)
@@ -551,6 +556,59 @@ docker compose up -d
 docker compose up -d --build dhcp
 ```
 
+### Clean and rebuild from scratch
+
+When an image is stale or broken (or you just want a fresh start), use the
+deploy script's subcommands instead of hunting down containers by hand:
+
+```bash
+# Stop the stack; remove its containers, networks and locally built images.
+# Keeps .env and ./data (ISOs, leases, CCP db, certs).
+./deploy.sh clean
+
+# clean + rebuild every image with --no-cache + start the stack again
+./deploy.sh rebuild
+```
+
+For a true factory reset, run `./deploy.sh clean` and then delete `./data`
+(this erases uploaded ISOs, DHCP leases, the CCP database and certificates).
+
+---
+
+## HTTPS for the file share (optional)
+
+The webfs share can also be served over TLS — webfsd has native HTTPS
+support. This is meant for humans downloading files from a browser;
+**PXE boot keeps using plain HTTP** (stock iPXE binaries will not trust a
+self-signed certificate, and netboot needs no TLS on an isolated lab
+segment).
+
+1. Enable the compose profile in `.env`:
+   ```
+   COMPOSE_PROFILES=https
+   WEBFS_HTTPS_PORT=8443
+   ```
+2. Re-run `./deploy.sh` (answer **n** to the wizard to keep your `.env`).
+   It generates a self-signed certificate for `WEBFS_HOST_IP` into
+   `data/certs/webfs.pem` and starts the extra `lab_webfs_https` container.
+   Or do it by hand:
+   ```bash
+   mkdir -p data/certs
+   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+     -subj "/CN=192.168.100.1" -addext "subjectAltName=IP:192.168.100.1" \
+     -keyout data/certs/webfs.key -out data/certs/webfs.crt
+   cat data/certs/webfs.crt data/certs/webfs.key > data/certs/webfs.pem
+   docker compose up -d   # COMPOSE_PROFILES=https must be set in .env
+   ```
+3. Browse `https://192.168.100.1:8443/` — same web UI and `/files/` share as
+   the HTTP listener. Your browser will warn once about the self-signed cert.
+
+To use a real certificate instead, replace `data/certs/webfs.pem` with your
+own **chained PEM (certificate first, then the private key)** and
+`docker compose restart webfs-https`. To turn HTTPS off again, clear
+`COMPOSE_PROFILES` in `.env` and run `docker compose --profile https down`
+followed by `docker compose up -d`.
+
 ---
 
 ## Autostart and NAT after reboot
@@ -632,14 +690,24 @@ The text *after* `Error response from daemon:` identifies the cause. Run
   image; webfs is simply the first build to hit the network. Check the WAN
   port is cabled and DNS resolves (`ping -c1 registry-1.docker.io`), then
   re-run `docker compose up -d --build`.
+- `... mkdir /var/lib/docker/.../var/www/htdocs/ipxe: read-only file system`
+  (often wrapped in `OCI runtime create failed`) — the nested mounts for
+  `/ipxe` and `/files` could not create their mountpoints because the parent
+  `htdocs` mount is read-only and the subdirectories were missing on the
+  host. Fixed in the repo (the directories are now tracked and created by
+  `deploy.sh`); on an older checkout run
+  `mkdir -p services/webfs/htdocs/ipxe services/webfs/htdocs/files`
+  and `docker compose up -d`.
 - `error while creating mount source path ...` (read-only file system /
   permission denied) — Docker was installed from **snap**, which cannot
   bind-mount the repo and `data/` paths this stack needs. Remove it
   (`sudo snap remove docker`) and re-run `./deploy.sh`, which installs
   `docker.io` from apt.
 
-If webfs *starts* but shows `(unhealthy)` or restarts, that is not a daemon
-error — check `docker logs lab_webfs --tail 30` instead.
+If webfs *starts* but shows `(unhealthy)`, restarts, or serves every file as
+plain text, check `docker logs lab_webfs --tail 30`. A complaint about
+`/etc/mime.types` means the image was built before `media-types` was added
+to the webfs Dockerfile — update the repo and run `./deploy.sh rebuild`.
 
 **DHCP clients get no IP**
 - Confirm `PXE_IFACE` has the static IP: `ip addr show <PXE_IFACE>`
@@ -694,6 +762,7 @@ ubuntu_infra_service/
     ├── webfs_share/             # Uploaded ISOs, kernels, initrds (served at /files/)
     ├── ipxe_manager/            # Boot menu entries + autoinstall profiles (JSON)
     ├── ccp/                     # CCP SQLite db, job logs, uploaded files, SSH key
+    ├── certs/                   # TLS cert + key for the optional HTTPS listener
     └── dnsmasq.leases           # Live DHCP lease database (read by monitor)
 ```
 
