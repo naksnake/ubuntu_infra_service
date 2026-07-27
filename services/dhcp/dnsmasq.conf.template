@@ -19,14 +19,17 @@ dhcp-option=option:dns-server,${DNS_SERVER}
 # and would race for UDP port 69, killing whichever starts second.
 dhcp-option=option:tftp-server,${TFTP_SERVER_IP}
 
-# Client architecture tags (RFC 4578): both 7 and 9 are used for x86-64 UEFI
+# Client architecture tags (RFC 4578): 7 and 9 are x86-64 UEFI, 11 is ARM64 UEFI
 dhcp-match=set:efi-x86_64,option:client-arch,7
 dhcp-match=set:efi-x86_64,option:client-arch,9
+dhcp-match=set:efi-arm64,option:client-arch,11
 dhcp-userclass=set:ipxe,iPXE
 
-# Stage 1: plain PXE firmware loads iPXE from the lab_tftp container
+# Stage 1: plain PXE firmware loads the iPXE build for its architecture from
+# the lab_tftp container; anything unmatched is legacy x86 BIOS.
 dhcp-boot=tag:!ipxe,tag:efi-x86_64,ipxe.efi,,${TFTP_SERVER_IP}
-dhcp-boot=tag:!ipxe,tag:!efi-x86_64,undionly.kpxe,,${TFTP_SERVER_IP}
+dhcp-boot=tag:!ipxe,tag:efi-arm64,ipxe-arm64.efi,,${TFTP_SERVER_IP}
+dhcp-boot=tag:!ipxe,tag:!efi-x86_64,tag:!efi-arm64,undionly.kpxe,,${TFTP_SERVER_IP}
 
 # Stage 2: iPXE fetches the live boot menu from the iPXE Manager
 dhcp-boot=tag:ipxe,http://${WEBFS_HOST_IP}:${IPXE_MANAGER_PORT}/menu.ipxe

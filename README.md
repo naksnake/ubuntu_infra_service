@@ -201,7 +201,11 @@ The wizard will ask you to confirm each setting, then it will:
 1. Install Docker + Compose plugin (if not present)
 2. Create the required data directories
 3. Auto-generate `CCP_SECRET_KEY` and save it to `.env`
-4. Offer to download iPXE boot binaries (`undionly.kpxe`, `ipxe.efi`) — defaults to **yes**
+4. Offer to download iPXE boot binaries — defaults to **yes**. One per client
+   architecture: `undionly.kpxe` (x86 BIOS), `ipxe.efi` (x86-64 UEFI) and
+   `ipxe-arm64.efi` (ARM64 UEFI — Pi 4/5, ARM servers). Uses curl or wget,
+   skips files already present, and a failed download only warns (copy the
+   file into `services/tftp/tftpboot/` manually and re-run)
 5. Build and start all containers with `docker compose up -d --build`
 6. Offer to enable persistent NAT via a systemd unit (`lab-nat.service`)
 7. Offer to enable stack autostart on reboot via `lab-stack.service`

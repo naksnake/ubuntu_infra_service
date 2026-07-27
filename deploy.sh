@@ -335,18 +335,67 @@ env_wizard() {
   load_env
 }
 
+# Download url -> dst with curl, falling back to wget. Rejects HTML error
+# pages that captive portals / intercepting proxies serve with HTTP 200, and
+# anything implausibly small for an iPXE binary.
+fetch_file() {
+  local url="$1" dst="$2" tmp ok=0
+  tmp="$(mktemp "${dst}.dl.XXXXXX")"
+  if have curl && curl -fsSL --connect-timeout 15 --retry 2 -o "$tmp" "$url"; then
+    ok=1
+  elif have wget && wget -q --timeout=15 --tries=2 -O "$tmp" "$url"; then
+    ok=1
+  fi
+  if [[ "$ok" -eq 1 ]] \
+     && [[ "$(stat -c%s "$tmp" 2>/dev/null || echo 0)" -ge 10240 ]] \
+     && ! head -c 256 "$tmp" | grep -aqi '<!doctype\|<html'; then
+    mv "$tmp" "$dst"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 fetch_ipxe_binaries() {
   local dst="services/tftp/tftpboot"
   mkdir -p "$dst"
 
-  if prompt_yesno "Download iPXE binaries (undionly.kpxe, ipxe.efi) into $dst now?" "Y"; then
-    log "Downloading from boot.ipxe.org..."
-    sudo_run apt-get update -y >/dev/null 2>&1 || true
-    sudo_run apt-get install -y curl ca-certificates >/dev/null 2>&1 || true
+  # filename|url — stage-1 bootloaders served over TFTP to PXE firmware:
+  #   undionly.kpxe    x86 BIOS
+  #   ipxe.efi         x86-64 UEFI
+  #   ipxe-arm64.efi   ARM64 UEFI (Pi 4/5 net-boot firmware, ARM servers)
+  local binaries=(
+    "undionly.kpxe|https://boot.ipxe.org/undionly.kpxe"
+    "ipxe.efi|https://boot.ipxe.org/ipxe.efi"
+    "ipxe-arm64.efi|https://boot.ipxe.org/arm64-efi/ipxe.efi"
+  )
 
-    curl -fsSL "https://boot.ipxe.org/undionly.kpxe" -o "$dst/undionly.kpxe"
-    curl -fsSL "https://boot.ipxe.org/ipxe.efi"     -o "$dst/ipxe.efi"
-    log "Downloaded: $dst/undionly.kpxe, $dst/ipxe.efi"
+  if prompt_yesno "Download iPXE binaries (x86 BIOS + x86-64/ARM64 UEFI) into $dst now?" "Y"; then
+    if ! have curl && ! have wget; then
+      sudo_run apt-get update -y >/dev/null 2>&1 || true
+      sudo_run apt-get install -y curl ca-certificates >/dev/null 2>&1 || true
+    fi
+    local entry name url failed=0
+    for entry in "${binaries[@]}"; do
+      name="${entry%%|*}"; url="${entry##*|}"
+      if [[ -s "$dst/$name" ]]; then
+        log "$name already present — keeping it (delete the file to force a re-download)."
+        continue
+      fi
+      if fetch_file "$url" "$dst/$name"; then
+        log "Downloaded $name ($(du -h "$dst/$name" | cut -f1))"
+      else
+        warn "Could not download $name from $url"
+        failed=1
+      fi
+    done
+    if [[ "$failed" -eq 1 ]]; then
+      warn "Some iPXE binaries are missing — PXE boot for those architectures will not work yet."
+      warn "Download them on any machine with internet and copy into $dst/ :"
+      warn "  x86 BIOS:    https://boot.ipxe.org/undionly.kpxe"
+      warn "  x86-64 UEFI: https://boot.ipxe.org/ipxe.efi"
+      warn "  ARM64 UEFI:  https://boot.ipxe.org/arm64-efi/ipxe.efi  (save as ipxe-arm64.efi)"
+    fi
   else
     warn "Skipped iPXE binaries download."
   fi
