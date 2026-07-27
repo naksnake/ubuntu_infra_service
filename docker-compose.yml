@@ -142,6 +142,11 @@ services:
       - WEBFS_PORT=${WEBFS_PORT:-8080}
       - IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT:-8091}
       - CCP_PORT=${CCP_PORT:-8060}
+      # dashboard uploads are proxied to the iPXE Manager (compose-internal
+      # address — the in-container port is fixed at 8091), so ISO uploads get
+      # the same kernel/initrd extraction + auto boot entry as manager uploads
+      - IPXE_MANAGER_URL=http://ipxe-manager:8091
+      - IPXE_MANAGER_PASSWORD=${IPXE_MANAGER_PASSWORD:-}
       # login + RBAC for the dashboard (admin reuses the Control Panel login by
       # default; set MONITOR_VIEWER_PASSWORD to add a read-only account)
       - MONITOR_SECRET_KEY=${MONITOR_SECRET_KEY}

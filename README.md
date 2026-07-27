@@ -46,7 +46,7 @@ run commands/playbooks across your nodes, and `http://192.168.100.1:8090/`
 | iPXE Manager | `lab_ipxe_manager` | Web UI: upload boot files, edit the PXE boot menu, manage autoinstall profiles |
 | Cluster Control Panel | `lab_ccp` | Web UI: run ClusterShell commands + Ansible playbooks across nodes, with login/RBAC, job history, script repo, and audit log |
 | NAT | systemd `lab-nat` | Lets lab clients reach the internet via the host |
-| Monitor | `lab_monitor` | Web dashboard: service health + DHCP lease lookup |
+| Monitor | `lab_monitor` | Web dashboard: service health, DHCP lease lookup, file upload to the share |
 
 ---
 
@@ -293,6 +293,13 @@ The dashboard now requires **login**. Sign in with the admin account (it reuses
 `CCP_ADMIN_USER` / `CCP_ADMIN_PASSWORD` from your `.env`). You will see:
 - **Services** — all container names, status (running/exited), health check result, uptime, restart count
 - **DHCP Leases** — IP address, MAC address, hostname, lease expiry, and time remaining for every active lease
+- **Quick links** — one-click access to the other web UIs, plus an
+  **Upload to file server** card (admin role only): click it or drop a file on
+  it and the file is stored in `data/webfs_share/`. Uploads are forwarded to
+  the iPXE Manager, so an ISO gets the automatic kernel+initrd extraction and
+  a disabled boot entry exactly as if uploaded in the manager UI — even when
+  `IPXE_MANAGER_PASSWORD` is set. The page's auto-refresh pauses while an
+  upload is running.
 
 Use the search box to quickly find a host by IP, MAC, or hostname.  
 The page auto-refreshes every 30 seconds. A JSON API is available at `/api/status` (login required).

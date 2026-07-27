@@ -8,12 +8,21 @@ from flask import (Flask, render_template, jsonify, request, session,
                    redirect, url_for, Response, flash)
 from werkzeug.security import generate_password_hash, check_password_hash
 import docker
+import requests
 
 app = Flask(__name__)
 
 LEASES_FILE      = os.environ.get('LEASES_FILE', '/data/dnsmasq.leases')
 REFRESH_INTERVAL = int(os.environ.get('REFRESH_INTERVAL', '30'))
 SESSION_MINUTES  = int(os.environ.get('MONITOR_SESSION_MINUTES', '30'))
+
+# Where dashboard file uploads are forwarded. The iPXE Manager owns the file
+# share (safe filenames, ISO kernel/initrd extraction, auto boot entries), so
+# the monitor proxies to it instead of writing to the share directly — one
+# upload path, identical behavior. Default is the compose-internal DNS name.
+IPXE_MANAGER_URL      = os.environ.get('IPXE_MANAGER_URL',
+                                       'http://ipxe-manager:8091').rstrip('/')
+IPXE_MANAGER_PASSWORD = os.environ.get('IPXE_MANAGER_PASSWORD', '')
 
 app.config.update(
     SECRET_KEY=os.environ.get('MONITOR_SECRET_KEY') or secrets.token_hex(32),
@@ -238,6 +247,48 @@ def api_status():
     containers, _ = get_containers()
     leases,     _ = get_leases()
     return jsonify({'timestamp': int(time.time()), 'containers': containers, 'leases': leases})
+
+
+class _KnownLengthStream:
+    """Adapter so requests emits an exact Content-Length for the proxied body
+    (it sizes file-like bodies via `.len`; without it the upload would be sent
+    chunked). The body still streams through in blocks, never buffered whole."""
+    def __init__(self, stream, length):
+        self._stream = stream
+        self.len = length
+
+    def read(self, *args):
+        return self._stream.read(*args)
+
+    def __iter__(self):  # requests only treats objects with __iter__ as streams
+        return iter(lambda: self._stream.read(65536), b'')
+
+
+@app.route('/api/upload', methods=['POST'])
+def api_upload():
+    # the viewer role is read-only by contract — uploads are for admins
+    if session.get('role') != 'admin':
+        return jsonify({'error': 'admin role required'}), 403
+    # Stream the browser's multipart body through to the iPXE Manager
+    # untouched (never buffered in RAM — request.form/request.files are never
+    # touched here, and the CSRF guard only parses the form when the
+    # X-CSRF-Token header is missing, which the dashboard always sends).
+    body = request.stream
+    if request.content_length:
+        body = _KnownLengthStream(body, request.content_length)
+    headers = {'Content-Type': request.content_type or 'application/octet-stream'}
+    auth = ('monitor', IPXE_MANAGER_PASSWORD) if IPXE_MANAGER_PASSWORD else None
+    try:
+        resp = requests.post(f'{IPXE_MANAGER_URL}/api/files', data=body,
+                             headers=headers, auth=auth, timeout=(10, 3600))
+    except requests.RequestException as exc:
+        return jsonify({'error': f'iPXE Manager unreachable: {exc}'}), 502
+    try:
+        name = resp.json().get('name', '?') if resp.ok else f'(HTTP {resp.status_code})'
+    except Exception:
+        name = f'(HTTP {resp.status_code})'
+    audit('upload', name)
+    return Response(resp.content, resp.status_code, mimetype='application/json')
 
 
 if __name__ == '__main__':

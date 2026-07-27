@@ -18,6 +18,15 @@
       <span class="link-url" data-url></span>
     </a>
     {% endfor %}
+    {% if cur_role == 'admin' %}
+    <label class="link-card upload-card" id="uploadCard" title="Upload a file to the file server share">
+      <span class="link-icon">&#128228;</span>
+      <span class="link-label">Upload to file server</span>
+      <span class="link-url" id="uploadStatus">ISO / kernel / initrd — click or drop</span>
+      <div class="upload-progress" id="uploadProgress"><div id="uploadFill"></div></div>
+      <input type="file" id="uploadInput" multiple hidden>
+    </label>
+    {% endif %}
   </div>
 </section>
 
@@ -81,13 +90,80 @@
   const TOTAL = {{ refresh }};
   const barEl = document.getElementById('progress-bar'), countEl = document.getElementById('countdown');
   let remaining = TOTAL;
+  let uploading = false;   // pause the auto-refresh so it can't kill an upload
   barEl.style.width = '0%';
   setInterval(() => {
+    if (uploading) return;
     remaining--;
     if (remaining <= 0) { location.reload(); return; }
     countEl.textContent = remaining;
     barEl.style.width = ((TOTAL - remaining) / TOTAL * 100) + '%';
   }, 1000);
+
+  // ── upload to file server (proxied to the iPXE Manager) ──
+  const upCard = document.getElementById('uploadCard');
+  if (upCard) {
+    const upInput  = document.getElementById('uploadInput');
+    const upStatus = document.getElementById('uploadStatus');
+    const upProg   = document.getElementById('uploadProgress');
+    const upFill   = document.getElementById('uploadFill');
+    const CSRF     = document.querySelector('meta[name=csrf-token]').content;
+    const IDLE_MSG = upStatus.textContent;
+
+    function setStatus(msg, cls) { upStatus.textContent = msg; upStatus.className = 'link-url' + (cls ? ' ' + cls : ''); }
+
+    function uploadOne(file) {
+      return new Promise(resolve => {
+        upProg.style.display = 'block'; upFill.style.width = '0%';
+        const fd = new FormData(); fd.append('file', file);
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload');
+        xhr.setRequestHeader('X-CSRF-Token', CSRF);
+        xhr.upload.onprogress = e => {
+          if (e.lengthComputable) {
+            upFill.style.width = (e.loaded / e.total * 100) + '%';
+            setStatus(`Uploading ${file.name} — ${Math.round(e.loaded / e.total * 100)}%`);
+          }
+        };
+        xhr.onload = () => {
+          let j = {}; try { j = JSON.parse(xhr.responseText); } catch {}
+          if (xhr.status === 201) {
+            if (j.kernel_entry) setStatus(`${file.name}: kernel+initrd extracted, boot entry added (disabled)`, 'ok');
+            else if (file.name.toLowerCase().endsWith('.iso')) setStatus(`${file.name} uploaded — no kernel+initrd pair found inside`, 'ok');
+            else setStatus(`${file.name} uploaded`, 'ok');
+          } else {
+            setStatus(`${file.name}: ${j.error || 'upload failed (HTTP ' + xhr.status + ')'}`, 'err');
+          }
+          resolve(xhr.status === 201);
+        };
+        xhr.onerror = () => { setStatus(`${file.name}: network error`, 'err'); resolve(false); };
+        xhr.send(fd);
+      });
+    }
+
+    async function uploadFiles(list) {
+      const files = [...(list || [])];
+      if (!files.length || uploading) return;
+      uploading = true;
+      try {
+        for (const f of files) await uploadOne(f);
+      } finally {
+        uploading = false;
+        upProg.style.display = 'none';
+        upInput.value = '';
+        remaining = TOTAL;   // fresh countdown so the result stays readable
+        setTimeout(() => setStatus(IDLE_MSG), TOTAL * 1000);
+      }
+    }
+
+    upInput.addEventListener('change', () => uploadFiles(upInput.files));
+    upCard.addEventListener('dragover',  e => { e.preventDefault(); upCard.classList.add('drag'); });
+    upCard.addEventListener('dragleave', () => upCard.classList.remove('drag'));
+    upCard.addEventListener('drop', e => {
+      e.preventDefault(); upCard.classList.remove('drag');
+      uploadFiles(e.dataTransfer.files);
+    });
+  }
   function filterLeases() {
     const q = document.getElementById('search').value.toLowerCase();
     let visible = 0;
