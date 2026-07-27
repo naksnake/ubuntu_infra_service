@@ -667,48 +667,6 @@ downloads, not the CPU. Store ISOs in `data/webfs_share/` on the SSD.
 
 ## Troubleshooting
 
-**webfs fails to deploy: `Error response from daemon: ...`**
-
-The text *after* `Error response from daemon:` identifies the cause. Run
-`docker compose up -d 2>&1 | tail -5` to see it again, then match it below:
-
-- `... Bind for 0.0.0.0:8080 failed: port is already allocated` — another
-  program (or a leftover container) already owns the webfs port on the host.
-  Find the owner with `sudo ss -ltnp 'sport = :8080'`. Either stop that
-  program, or move webfs to a free port: set `WEBFS_PORT=8081` in `.env`, then
-  `docker compose up -d && docker compose up -d --force-recreate dhcp`
-  (DHCP bakes the webfs URL into the PXE boot options, so it must be
-  re-created to pick up the new port).
-- `Conflict. The container name "/lab_webfs" is already in use by container ...`
-  — a container from an earlier run is still registered, typically because the
-  repo was previously deployed from a different directory (each service pins a
-  fixed `container_name`, so two clones collide). Remove the old containers and
-  retry: `docker rm -f lab_webfs` (repeat for any other `lab_*` leftovers shown
-  by `docker ps -a`), then `docker compose up -d --build`.
-- `Get "https://registry-1.docker.io/v2/": ...` (timeout, TLS or "no such
-  host") — the mini PC cannot reach Docker Hub to pull the `debian` base
-  image; webfs is simply the first build to hit the network. Check the WAN
-  port is cabled and DNS resolves (`ping -c1 registry-1.docker.io`), then
-  re-run `docker compose up -d --build`.
-- `... mkdir /var/lib/docker/.../var/www/htdocs/ipxe: read-only file system`
-  (often wrapped in `OCI runtime create failed`) — the nested mounts for
-  `/ipxe` and `/files` could not create their mountpoints because the parent
-  `htdocs` mount is read-only and the subdirectories were missing on the
-  host. Fixed in the repo (the directories are now tracked and created by
-  `deploy.sh`); on an older checkout run
-  `mkdir -p services/webfs/htdocs/ipxe services/webfs/htdocs/files`
-  and `docker compose up -d`.
-- `error while creating mount source path ...` (read-only file system /
-  permission denied) — Docker was installed from **snap**, which cannot
-  bind-mount the repo and `data/` paths this stack needs. Remove it
-  (`sudo snap remove docker`) and re-run `./deploy.sh`, which installs
-  `docker.io` from apt.
-
-If webfs *starts* but shows `(unhealthy)`, restarts, or serves every file as
-plain text, check `docker logs lab_webfs --tail 30`. A complaint about
-`/etc/mime.types` means the image was built before `media-types` was added
-to the webfs Dockerfile — update the repo and run `./deploy.sh rebuild`.
-
 **DHCP clients get no IP**
 - Confirm `PXE_IFACE` has the static IP: `ip addr show <PXE_IFACE>`
 - Check dnsmasq started: `docker logs lab_dhcp | head -20`
