@@ -707,6 +707,85 @@ downloads, not the CPU. Store ISOs in `data/webfs_share/` on the SSD.
 
 ---
 
+## Security
+
+The stack is built for an **isolated lab segment behind a trusted admin host**.
+These are the layers it ships with and the knobs you should set:
+
+### Network / NAT (applied automatically by `deploy.sh`)
+
+- **Stateful NAT only** — traffic from the WAN side can never *initiate* a
+  connection into the lab; only replies to lab-originated connections are
+  forwarded.
+- **Subnet-scoped, anti-spoofing rules** — forwarding and masquerading only
+  apply to packets sourced from the lab subnet, and anything else arriving on
+  the PXE interface is dropped. Rules live in Docker's `DOCKER-USER` chain
+  (re-run `./deploy.sh` or `sudo systemctl restart lab-nat.service` after
+  updating to refresh them).
+- **Kernel hardening** (`/etc/sysctl.d/99-lab-nat.conf`) — reverse-path
+  filtering, ICMP-redirect and source-route packets ignored, spoofed
+  ("martian") packets logged to the kernel log for detection
+  (`journalctl -k | grep martian`).
+
+### Web UI exposure — the most important knob
+
+By default the four web UIs are published on **all** host interfaces,
+including the WAN side. Set in `.env`:
+
+```ini
+UI_BIND=192.168.100.1        # your PXE_ROUTER_IP
+IPXE_MANAGER_PASSWORD=...    # never leave the boot-menu editor open
+```
+
+and re-run `docker compose up -d`. The UIs are then reachable only from the
+lab segment and the server itself; from your office machine, tunnel in:
+`ssh -L 8091:192.168.100.1:8091 <server>`. An unprotected iPXE Manager is the
+crown jewel for an attacker — whoever edits the boot menu controls every
+machine that PXE-boots.
+
+> **ufw users:** Docker-published container ports **bypass ufw** (Docker's
+> NAT rules run before ufw's INPUT chain), so `ufw deny 8091` does *not*
+> protect them — use `UI_BIND` instead. ufw still works for host-network
+> services: a good baseline is `default deny incoming`, `allow in on
+> <PXE_IFACE>`, and SSH allowed only from your admin network.
+
+### Login protection & sessions
+
+- **Brute-force lockout** on all three logins (Monitor, Control Panel, iPXE
+  Manager): after 5 failed attempts (10 for the manager's HTTP Basic auth)
+  from one address within 15 minutes, further attempts get HTTP 429 until the
+  window rolls over. Tune with `LOGIN_FAIL_LIMIT` / `LOGIN_FAIL_WINDOW`.
+  PXE-facing endpoints (`/menu.ipxe`, autoinstall seeds) are never locked out.
+- **Independent sessions per UI** — each app uses its own session cookie
+  (`lab_monitor_session`, `lab_ccp_session`), so logging in to one UI no
+  longer logs you out of another. Cookies are `HttpOnly` + `SameSite=Lax`;
+  every state-changing request requires a CSRF token; all responses carry
+  `X-Content-Type-Options`, `X-Frame-Options: DENY` and a no-referrer policy.
+
+### Detection — where to look
+
+| Signal | Where |
+|---|---|
+| Web logins, lockouts, uploads, file removals | `docker logs lab_monitor` (audit lines) |
+| Control Panel logins + every state change | CCP **Audit log** page (admin) / SQLite db |
+| Failed iPXE Manager auth attempts | `docker logs lab_ipxe_manager` |
+| Spoofed/martian packets | `journalctl -k \| grep -i martian` |
+| Unexpected DHCP clients | Monitor dashboard lease table |
+| Container restarts / unhealthy services | Monitor dashboard **Services** table |
+
+### What stays cleartext (by design) — and what that means
+
+PXE itself (DHCP/TFTP/HTTP boot) is unencrypted; anyone with a port on the
+**lab switch** can capture kernels, ISOs and autoinstall seeds — including
+the password **hashes** inside autoinstall profiles. Treat lab-switch access
+as equivalent to console access: use a dedicated, physically controlled
+switch (or an isolated VLAN), use strong `mkpasswd -m sha-512` hashes and
+rotate the first-boot password, and give humans the HTTPS listener
+(`COMPOSE_PROFILES=https`) for browsing the share. IPv6 is not a bypass:
+forwarding is enabled for IPv4 only.
+
+---
+
 ## Troubleshooting
 
 **DHCP clients get no IP**

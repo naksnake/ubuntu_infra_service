@@ -442,8 +442,37 @@ compose_up() {
 
 enable_ip_forwarding() {
   log "Enabling IPv4 forwarding permanently..."
-  sudo_run bash -c 'echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-lab-nat.conf'
+  # ip_forward enables the NAT; the rest hardens the router role: reverse-path
+  # filtering drops spoofed sources, redirects/source-routing are ignored so
+  # neighbours cannot re-steer traffic, and martians are logged for detection.
+  sudo_run bash -c 'cat > /etc/sysctl.d/99-lab-nat.conf <<SYSCTL
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=1
+net.ipv4.conf.default.rp_filter=1
+net.ipv4.conf.all.log_martians=1
+net.ipv4.conf.all.accept_redirects=0
+net.ipv4.conf.default.accept_redirects=0
+net.ipv4.conf.all.send_redirects=0
+net.ipv4.conf.default.send_redirects=0
+net.ipv4.conf.all.accept_source_route=0
+net.ipv4.conf.default.accept_source_route=0
+net.ipv4.icmp_echo_ignore_broadcasts=1
+SYSCTL'
   sudo_run sysctl --system >/dev/null
+}
+
+lab_cidr() {  # lab_cidr 192.168.100.1 255.255.255.0 -> 192.168.100.0/24
+  local -a ip mask net
+  IFS=. read -ra ip   <<< "$1"
+  IFS=. read -ra mask <<< "$2"
+  [ "${#ip[@]}" = 4 ] && [ "${#mask[@]}" = 4 ] || return 1
+  local i o bits=0
+  for i in 0 1 2 3; do
+    net[i]=$(( ip[i] & mask[i] ))
+    o=${mask[i]}
+    while (( o )); do bits=$(( bits + (o & 1) )); o=$(( o >> 1 )); done
+  done
+  echo "${net[0]}.${net[1]}.${net[2]}.${net[3]}/${bits}"
 }
 
 enable_nat() {
@@ -452,9 +481,15 @@ enable_nat() {
   sudo_run apt-get install -y iptables >/dev/null 2>&1 || true
 
   # interface names are baked into a tiny config the NAT script sources, so the
-  # script itself is fully static (written from a quoted heredoc, no expansion)
-  log "Writing /etc/lab-nat.conf"
-  sudo_run bash -c "printf 'WAN_IFACE=%s\nPXE_IFACE=%s\n' '${WAN_IFACE}' '${PXE_IFACE}' > /etc/lab-nat.conf"
+  # script itself is fully static (written from a quoted heredoc, no expansion).
+  # LAB_NET scopes NAT/forwarding to the lab subnet (anti-spoofing); when the
+  # subnet cannot be derived it stays empty and the legacy unscoped rules apply.
+  local lab_net=""
+  if [ -n "${PXE_ROUTER_IP:-}" ] && [ -n "${PXE_NETMASK:-}" ]; then
+    lab_net="$(lab_cidr "$PXE_ROUTER_IP" "$PXE_NETMASK" 2>/dev/null || true)"
+  fi
+  log "Writing /etc/lab-nat.conf (lab subnet: ${lab_net:-unscoped})"
+  sudo_run bash -c "printf 'WAN_IFACE=%s\nPXE_IFACE=%s\nLAB_NET=%s\n' '${WAN_IFACE}' '${PXE_IFACE}' '${lab_net}' > /etc/lab-nat.conf"
 
   local tmp; tmp="$(mktemp)"
   cat > "$tmp" <<'LABNAT'
@@ -464,27 +499,58 @@ enable_nat() {
 # a private table is not enough — the rules must live in DOCKER-USER, which
 # Docker evaluates (and preserves) ahead of its own rules. If DOCKER-USER is
 # absent (Docker not managing iptables) we fall back to the FORWARD chain.
+#
+# When LAB_NET is set (e.g. 192.168.100.0/24) everything is scoped to the lab
+# subnet: only lab-sourced packets are forwarded and masqueraded, and anything
+# else arriving on the PXE interface is dropped (anti-spoofing). Return
+# traffic from the WAN side is stateful-only, so nothing outside can initiate
+# a connection into the lab.
 # Idempotent; works with both the iptables-legacy and iptables-nft backends.
 set -euo pipefail
 [ -r /etc/lab-nat.conf ] && . /etc/lab-nat.conf
 : "${WAN_IFACE:?WAN_IFACE not set}" ; : "${PXE_IFACE:?PXE_IFACE not set}"
+LAB_NET="${LAB_NET:-}"
 ACTION="${1:-up}"
 
 if iptables -L DOCKER-USER -n >/dev/null 2>&1; then FCHAIN=DOCKER-USER; else FCHAIN=FORWARD; fi
 
+NAT_RULE=(-o "$WAN_IFACE" -j MASQUERADE)
+FWD_OUT=(-i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT)
+if [ -n "$LAB_NET" ]; then
+  NAT_RULE=(-s "$LAB_NET" -o "$WAN_IFACE" -j MASQUERADE)
+  FWD_OUT=(-i "$PXE_IFACE" -s "$LAB_NET" -o "$WAN_IFACE" -j ACCEPT)
+fi
+FWD_BACK=(-i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT)
+SPOOF=(-i "$PXE_IFACE" ! -s "${LAB_NET:-0.0.0.0/0}" -j DROP)
+
 if [ "$ACTION" = "down" ]; then
+  iptables -t nat -D POSTROUTING "${NAT_RULE[@]}" 2>/dev/null || true
   iptables -t nat -D POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null || true
+  iptables -D "$FCHAIN" "${FWD_OUT[@]}" 2>/dev/null || true
   iptables -D "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT 2>/dev/null || true
-  iptables -D "$FCHAIN" -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  iptables -D "$FCHAIN" "${FWD_BACK[@]}" 2>/dev/null || true
+  if [ -n "$LAB_NET" ]; then
+    iptables -D "$FCHAIN" "${SPOOF[@]}" 2>/dev/null || true
+  fi
   exit 0
 fi
 
-iptables -t nat -C POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null \
-  || iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
-iptables -C "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT 2>/dev/null \
-  || iptables -I "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT
-iptables -C "$FCHAIN" -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
-  || iptables -I "$FCHAIN" -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -t nat -C POSTROUTING "${NAT_RULE[@]}" 2>/dev/null \
+  || iptables -t nat -A POSTROUTING "${NAT_RULE[@]}"
+iptables -C "$FCHAIN" "${FWD_OUT[@]}" 2>/dev/null \
+  || iptables -I "$FCHAIN" "${FWD_OUT[@]}"
+iptables -C "$FCHAIN" "${FWD_BACK[@]}" 2>/dev/null \
+  || iptables -I "$FCHAIN" "${FWD_BACK[@]}"
+if [ -n "$LAB_NET" ]; then
+  # drop legacy unscoped rules a previous version may have installed
+  iptables -t nat -D POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null || true
+  iptables -D "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT 2>/dev/null || true
+  # anti-spoofing: nothing but lab-subnet sources may enter from the PXE side.
+  # -I keeps it ahead of DOCKER-USER's terminal RETURN; the ACCEPT above is
+  # disjoint (-s LAB_NET vs ! -s LAB_NET) so relative order does not matter.
+  iptables -C "$FCHAIN" "${SPOOF[@]}" 2>/dev/null \
+    || iptables -I "$FCHAIN" "${SPOOF[@]}"
+fi
 LABNAT
   sudo_run install -m 0755 "$tmp" /usr/local/sbin/lab-nat.sh
   rm -f "$tmp"

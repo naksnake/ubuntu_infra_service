@@ -34,6 +34,10 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     SESSION_REFRESH_EACH_REQUEST=True,  # sliding: each request resets the 30-min clock
+    # Browser cookies are scoped by hostname only — NOT by port — so every web
+    # UI on this host must use its own cookie name or each login overwrites
+    # the others' sessions (logging in to CCP used to log you out here).
+    SESSION_COOKIE_NAME='lab_monitor_session',
 )
 
 # ports for the dashboard quick-links (the browser fills in the host)
@@ -78,6 +82,30 @@ def audit(action, detail=''):
     sys.stderr.flush()
 
 
+# ── brute-force lockout ───────────────────────────────────────────────────────
+# After LOGIN_FAIL_LIMIT failed logins from one IP within LOGIN_FAIL_WINDOW
+# seconds, further attempts from that IP are refused (429) until the window
+# rolls over. Counters are per worker process, so the effective budget is
+# (workers x limit) — fine for slowing brute force on a lab box.
+LOGIN_FAIL_LIMIT  = int(os.environ.get('LOGIN_FAIL_LIMIT', '5'))
+LOGIN_FAIL_WINDOW = int(os.environ.get('LOGIN_FAIL_WINDOW', '900'))
+_login_fails = {}
+
+
+def _locked_out(ip):
+    now = time.time()
+    hits = [t for t in _login_fails.get(ip, []) if now - t < LOGIN_FAIL_WINDOW]
+    if hits:
+        _login_fails[ip] = hits
+    else:
+        _login_fails.pop(ip, None)
+    return len(hits) >= LOGIN_FAIL_LIMIT
+
+
+def _record_fail(ip):
+    _login_fails.setdefault(ip, []).append(time.time())
+
+
 PUBLIC_PATHS = {'/login', '/healthz', '/favicon.ico'}
 
 
@@ -106,6 +134,14 @@ def _guard():
 def _inject():
     return {'cur_user': session.get('user'), 'cur_role': session.get('role'),
             'csrf_token': session.get('csrf'), 'session_minutes': SESSION_MINUTES}
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    resp.headers.setdefault('X-Frame-Options', 'DENY')
+    resp.headers.setdefault('Referrer-Policy', 'no-referrer')
+    return resp
 
 
 # ── data (dashboard) ──────────────────────────────────────────────────────────
@@ -224,10 +260,19 @@ def favicon():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
+        # lockout keys on the real peer address — X-Forwarded-For is client-
+        # controlled here (no reverse proxy) and would be trivial to rotate
+        ip = request.remote_addr or ''
+        if _locked_out(ip):
+            audit('login', 'locked out (too many failures)')
+            flash(f'Too many failed attempts — this address is locked for '
+                  f'{LOGIN_FAIL_WINDOW // 60} minutes.')
+            return render_template('login.html'), 429
         username = (request.form.get('username') or '').strip()
         password = request.form.get('password') or ''
         rec = USERS.get(username)
         if rec and check_password_hash(rec['hash'], password):
+            _login_fails.pop(ip, None)
             session.clear()
             session['user'] = username
             session['role'] = rec['role']
@@ -236,6 +281,7 @@ def login():
             audit('login', 'success')
             nxt = request.args.get('next', '')
             return redirect(nxt if nxt.startswith('/') else url_for('dashboard'))
+        _record_fail(ip)
         audit('login', f'failed user={username!r}')
         flash('Invalid username or password.')
     return render_template('login.html')

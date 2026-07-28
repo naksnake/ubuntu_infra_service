@@ -82,6 +82,14 @@ def _reap_stale_spools(max_age=86400):
 
 # ── optional auth (everything except the PXE-facing menu endpoint) ──────────
 
+# Brute-force throttle: after LOGIN_FAIL_LIMIT wrong passwords from one IP in
+# LOGIN_FAIL_WINDOW seconds, that IP gets 429 until the window rolls over.
+# Counters are per worker process (effective budget = workers x limit).
+LOGIN_FAIL_LIMIT  = int(os.environ.get('LOGIN_FAIL_LIMIT', '10'))
+LOGIN_FAIL_WINDOW = int(os.environ.get('LOGIN_FAIL_WINDOW', '900'))
+_auth_fails = {}
+
+
 @app.before_request
 def _require_auth():
     # PXE clients fetch the menu and the autoinstall seed with no credentials,
@@ -90,11 +98,32 @@ def _require_auth():
     if (not AUTH_PASSWORD or request.path == '/menu.ipxe'
             or request.path.startswith('/autoinstall/')):
         return None
+    ip = request.remote_addr or ''
+    now = time.time()
+    hits = [t for t in _auth_fails.get(ip, []) if now - t < LOGIN_FAIL_WINDOW]
+    if len(hits) >= LOGIN_FAIL_LIMIT:
+        _auth_fails[ip] = hits
+        return Response('Too many failed attempts — try again later.\n', 429,
+                        mimetype='text/plain')
     auth = request.authorization
     if auth and auth.password == AUTH_PASSWORD:
+        _auth_fails.pop(ip, None)
         return None
+    if auth is not None:      # only count actual wrong passwords, not the
+        hits.append(now)      # browser's initial credential-less request
+        _auth_fails[ip] = hits
+        app.logger.warning('failed auth attempt from %s (%d/%d)',
+                           ip, len(hits), LOGIN_FAIL_LIMIT)
     return Response('Authentication required.', 401,
                     {'WWW-Authenticate': 'Basic realm="iPXE Manager"'})
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    resp.headers.setdefault('X-Frame-Options', 'DENY')
+    resp.headers.setdefault('Referrer-Policy', 'no-referrer')
+    return resp
 
 # ── persistence ──────────────────────────────────────────────────────────────
 

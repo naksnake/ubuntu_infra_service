@@ -5,7 +5,7 @@ services:
     build: ./services/webfs
     container_name: lab_webfs
     ports:
-      - "${WEBFS_PORT:-8080}:8080"
+      - "${UI_BIND:-0.0.0.0}:${WEBFS_PORT:-8080}:8080"
     volumes:
       # webfsd only serves files; mount everything read-only so a compromised
       # file server cannot tamper with boot assets (uploads are written by the
@@ -33,7 +33,7 @@ services:
     profiles: ["https"]
     command: ["webfsd", "-F", "-p", "8443", "-r", "/var/www/htdocs", "-f", "index.html", "-S", "-C", "/etc/webfs/webfs.pem"]
     ports:
-      - "${WEBFS_HTTPS_PORT:-8443}:8443"
+      - "${UI_BIND:-0.0.0.0}:${WEBFS_HTTPS_PORT:-8443}:8443"
     volumes:
       - ./services/webfs/htdocs:/var/www/htdocs:ro
       - ./ipxe:/var/www/htdocs/ipxe:ro
@@ -101,7 +101,7 @@ services:
     build: ./services/ipxe_manager
     container_name: lab_ipxe_manager
     ports:
-      - "${IPXE_MANAGER_PORT:-8091}:8091"
+      - "${UI_BIND:-0.0.0.0}:${IPXE_MANAGER_PORT:-8091}:8091"
     volumes:
       - ./data/webfs_share:/data/uploads:rw
       # directory mount, NOT a single-file mount — save_entries() renames a
@@ -131,7 +131,7 @@ services:
     build: ./services/monitor
     container_name: lab_monitor
     ports:
-      - "${MONITOR_PORT:-8090}:8090"
+      - "${UI_BIND:-0.0.0.0}:${MONITOR_PORT:-8090}:8090"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./data/dnsmasq.leases:/data/dnsmasq.leases:ro
@@ -168,7 +168,7 @@ services:
     build: ./services/ccp
     container_name: lab_ccp
     ports:
-      - "${CCP_PORT:-8060}:8060"
+      - "${UI_BIND:-0.0.0.0}:${CCP_PORT:-8060}:8060"
     volumes:
       # single directory bind mount holds the SQLite db, job logs, uploaded
       # files and the SSH key — no single-file mounts (which Docker would

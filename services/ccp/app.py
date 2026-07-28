@@ -31,6 +31,10 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     PERMANENT_SESSION_LIFETIME=int(os.environ.get('CCP_SESSION_HOURS', '12')) * 3600,
+    # Browser cookies are scoped by hostname only — NOT by port — so every web
+    # UI on this host needs its own cookie name, or logging in to one UI
+    # overwrites (and kills) the session of the others.
+    SESSION_COOKIE_NAME='lab_ccp_session',
 )
 
 FILES_DIR = pathlib.Path(os.environ.get('CCP_FILES_DIR', '/data/ccp/files'))
@@ -105,6 +109,33 @@ def _inject():
             'role_ok': role_ok}
 
 
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    resp.headers.setdefault('X-Frame-Options', 'DENY')
+    resp.headers.setdefault('Referrer-Policy', 'no-referrer')
+    return resp
+
+
+# ── brute-force lockout ───────────────────────────────────────────────────────
+# After LOGIN_FAIL_LIMIT failed logins from one IP within LOGIN_FAIL_WINDOW
+# seconds, further attempts from that IP get 429 until the window rolls over.
+# Counters are per worker process (effective budget = workers x limit).
+LOGIN_FAIL_LIMIT  = int(os.environ.get('LOGIN_FAIL_LIMIT', '5'))
+LOGIN_FAIL_WINDOW = int(os.environ.get('LOGIN_FAIL_WINDOW', '900'))
+_login_fails = {}
+
+
+def _locked_out(ip):
+    now = time.time()
+    hits = [t for t in _login_fails.get(ip, []) if now - t < LOGIN_FAIL_WINDOW]
+    if hits:
+        _login_fails[ip] = hits
+    else:
+        _login_fails.pop(ip, None)
+    return len(hits) >= LOGIN_FAIL_LIMIT
+
+
 @app.route('/healthz')
 def healthz():
     return Response('ok', mimetype='text/plain')
@@ -113,10 +144,19 @@ def healthz():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
+        # lockout keys on the real peer address — X-Forwarded-For is client-
+        # controlled here (no reverse proxy) and would be trivial to rotate
+        ip = request.remote_addr or ''
+        if _locked_out(ip):
+            db.audit('-', 'login', 'locked out (too many failures)', ip)
+            flash(f'Too many failed attempts — this address is locked for '
+                  f'{LOGIN_FAIL_WINDOW // 60} minutes.')
+            return render_template('login.html'), 429
         username = (request.form.get('username') or '').strip()
         password = request.form.get('password') or ''
         row = db.query('SELECT * FROM users WHERE username=?', (username,), one=True)
         if row and check_password_hash(row['password_hash'], password):
+            _login_fails.pop(ip, None)
             session.clear()
             session['uid'] = row['id']
             session['username'] = row['username']
@@ -126,7 +166,8 @@ def login():
             db.audit(username, 'login', 'success', _client_ip())
             nxt = request.args.get('next', '')
             return redirect(nxt if nxt.startswith('/') else url_for('dashboard'))
-        db.audit(username or '-', 'login', 'failed', _client_ip())
+        _login_fails.setdefault(ip, []).append(time.time())
+        db.audit(username or '-', 'login', 'failed', ip)
         flash('Invalid username or password.')
     return render_template('login.html')
 
