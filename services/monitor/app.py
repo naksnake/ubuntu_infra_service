@@ -304,7 +304,8 @@ def dashboard():
     return render_template(
         'index.html', containers=containers, leases=leases, c_err=c_err, l_err=l_err,
         now=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        refresh=REFRESH_INTERVAL, links=LINKS, monitor_space=MONITOR_UPLOAD_DIR)
+        refresh=REFRESH_INTERVAL, links=LINKS, monitor_space=MONITOR_UPLOAD_DIR,
+        webfs_port=os.environ.get('WEBFS_PORT', '8080'))
 
 
 # ── APIs ──────────────────────────────────────────────────────────────────────

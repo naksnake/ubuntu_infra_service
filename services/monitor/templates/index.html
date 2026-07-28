@@ -223,6 +223,44 @@
   }
 
   const MON_SPACE = {{ (monitor_space + '/') | tojson }};
+  const WEBFS_PORT = {{ webfs_port | tojson }};
+
+  // Build the download link from how THIS browser reaches the server (same
+  // hostname, webfs port) — a lab-side viewer gets the lab IP, a WAN-side
+  // viewer gets the WAN IP. The manager's absolute URLs use the lab IP only,
+  // which is unreachable from the office network.
+  function fileUrl(name) {
+    return `${location.protocol}//${location.hostname}:${WEBFS_PORT}/files/${encPath(name)}`;
+  }
+
+  // navigator.clipboard exists only in secure contexts (HTTPS or localhost);
+  // this dashboard is plain HTTP, so fall back to a hidden textarea +
+  // execCommand, and as a last resort show the URL in a prompt to copy by hand.
+  function copyText(text, btn) {
+    const feedback = ok => {
+      if (!btn) return;
+      const old = btn.textContent;
+      btn.textContent = ok ? 'Copied ✓' : 'Copy failed';
+      setTimeout(() => { btn.textContent = old; }, 1500);
+    };
+    const fallback = () => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed'; ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch {}
+      ta.remove();
+      if (!ok) prompt('Copy this URL:', text);
+      return ok;
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => feedback(true), () => feedback(fallback()));
+    } else {
+      feedback(fallback());
+    }
+  }
   async function loadShareFiles() {
     const body = document.getElementById('filesBody');
     try {
@@ -241,7 +279,7 @@
           <td><code>${escHtml(f.name)}</code>${f.name.startsWith(MON_SPACE) ? ' <span class="badge space">monitor</span>' : ''}</td>
           <td style="color:var(--muted)">${fmtSize(f.size)}</td>
           <td style="white-space:nowrap;text-align:right">
-            <button class="btn btn-ghost" onclick="copyUrl('${escJs(f.url)}')" title="Copy download URL">Copy URL</button>
+            <button class="btn btn-ghost" onclick="copyText(fileUrl('${escJs(f.name)}'), this)" title="${escHtml(fileUrl(f.name))}">Copy URL</button>
             ${IS_ADMIN ? `<button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
           </td>
         </tr>`).join('');
@@ -250,8 +288,6 @@
       body.innerHTML = `<tr><td colspan="3" class="empty">File server list unavailable — ${escHtml(e.message)}</td></tr>`;
     }
   }
-
-  function copyUrl(u) { navigator.clipboard.writeText(u); }
 
   async function removeFile(name) {
     const extra = name.toLowerCase().endsWith('.iso') ? '\nIts extracted kernel/initrd folder will be removed too.' : '';

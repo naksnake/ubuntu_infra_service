@@ -754,7 +754,27 @@ async function loadPreview() {
 function escHtml(s) { return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 // escape for a single-quoted JS string embedded in a double-quoted HTML attribute
 function escJs(s) { return String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;').replace(/</g,'\\x3c'); }
-function copyText(t) { navigator.clipboard.writeText(t).then(() => toast('Copied')); }
+function copyText(t) {
+  // navigator.clipboard exists only in secure contexts (HTTPS/localhost); this
+  // UI is plain HTTP, so fall back to a hidden textarea + execCommand, and as
+  // a last resort show the URL in a prompt to copy by hand.
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = t;
+    ta.style.position = 'fixed'; ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    ta.remove();
+    if (ok) toast('Copied'); else prompt('Copy this URL:', t);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(t).then(() => toast('Copied'), fallback);
+  } else {
+    fallback();
+  }
+}
 
 // modal close on backdrop click
 document.getElementById('modal').addEventListener('click', e => { if (e.target === document.getElementById('modal')) closeModal(); });
