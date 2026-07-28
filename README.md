@@ -173,9 +173,11 @@ CCP_PORT=8060
 MONITOR_PORT=8090
 MONITOR_REFRESH=30               # dashboard auto-refresh interval (seconds)
 
-# ---- iPXE Manager (optional) ----
-# Set a password to require login for the manager UI/API.
-# Leave blank for no auth. /menu.ipxe and /autoinstall/ always stay open for PXE clients.
+# ---- iPXE Manager ----
+# Admin account for the manager UI/API (HTTP Basic login). Setting a password
+# enables auth; leave it blank for no login. /menu.ipxe and /autoinstall/
+# always stay open for PXE clients.
+IPXE_MANAGER_USER=admin
 IPXE_MANAGER_PASSWORD=
 
 # ---- Cluster Control Panel (CCP) ----
@@ -407,8 +409,11 @@ time; the **iPXE Preview** tab shows the exact script clients receive.
 > You can also copy files straight into `data/webfs_share/` from the shell —
 > they appear in the manager's file list and dropdowns automatically.
 
-To password-protect the manager, set `IPXE_MANAGER_PASSWORD` in `.env`
-(PXE clients can always fetch `/menu.ipxe` and `/autoinstall/…` without a password).
+To password-protect the manager, set `IPXE_MANAGER_PASSWORD` in `.env` — the
+browser then asks for the `IPXE_MANAGER_USER` / password account (HTTP Basic;
+username defaults to `admin`). PXE clients can always fetch `/menu.ipxe` and
+`/autoinstall/…` without a password, and the Monitor dashboard forwards the
+same account automatically for its uploads and file removals.
 
 ---
 
@@ -734,7 +739,8 @@ including the WAN side. Set in `.env`:
 
 ```ini
 UI_BIND=192.168.100.1        # your PXE_ROUTER_IP
-IPXE_MANAGER_PASSWORD=...    # never leave the boot-menu editor open
+IPXE_MANAGER_USER=admin      # iPXE Manager admin account…
+IPXE_MANAGER_PASSWORD=...    # …never leave the boot-menu editor open
 ```
 
 and re-run `docker compose up -d`. The UIs are then reachable only from the

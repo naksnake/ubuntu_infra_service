@@ -116,6 +116,8 @@ services:
       # base URL PXE clients use to fetch the autoinstall seed — must point at
       # this manager (host:published-port), which serves /autoinstall/<id>/
       - MANAGER_BASE=http://${WEBFS_HOST_IP:-192.168.100.1}:${IPXE_MANAGER_PORT:-8091}
+      # admin account for the manager UI/API (auth active once the password is set)
+      - AUTH_USER=${IPXE_MANAGER_USER:-admin}
       - AUTH_PASSWORD=${IPXE_MANAGER_PASSWORD:-}
     healthcheck:
       # /menu.ipxe stays reachable even when IPXE_MANAGER_PASSWORD is set
@@ -146,6 +148,7 @@ services:
       # address — the in-container port is fixed at 8091), so ISO uploads get
       # the same kernel/initrd extraction + auto boot entry as manager uploads
       - IPXE_MANAGER_URL=http://ipxe-manager:8091
+      - IPXE_MANAGER_USER=${IPXE_MANAGER_USER:-admin}
       - IPXE_MANAGER_PASSWORD=${IPXE_MANAGER_PASSWORD:-}
       # login + RBAC for the dashboard (admin reuses the Control Panel login by
       # default; set MONITOR_VIEWER_PASSWORD to add a read-only account)

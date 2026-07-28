@@ -239,8 +239,10 @@ MONITOR_REFRESH=${MONITOR_REFRESH:-30}
 COMPOSE_PROFILES=${COMPOSE_PROFILES:-}
 
 # ==== iPXE Manager ====
-# Optional: set a password to protect the web UI and API (menu.ipxe stays open).
+# Admin account for the web UI and API (HTTP Basic). Setting a password
+# enables auth; blank disables it (menu.ipxe always stays open).
 # Quoted so a password containing spaces survives sourcing and compose parsing.
+IPXE_MANAGER_USER=${IPXE_MANAGER_USER:-admin}
 IPXE_MANAGER_PASSWORD="${IPXE_MANAGER_PASSWORD:-}"
 
 # ==== Cluster Control Panel (CCP) ====
@@ -305,6 +307,19 @@ env_wizard() {
   IPXE_MANAGER_PORT="$(prompt "IPXE_MANAGER_PORT" "${IPXE_MANAGER_PORT:-8091}")"
   CCP_PORT="$(prompt "CCP_PORT (Cluster Control Panel)" "${CCP_PORT:-8060}")"
   MONITOR_PORT="$(prompt "MONITOR_PORT" "${MONITOR_PORT:-8090}")"
+
+  # iPXE Manager admin account (a blank password leaves the manager open —
+  # fine on an isolated lab, risky if UI_BIND exposes it to the WAN side)
+  IPXE_MANAGER_USER="$(prompt "IPXE_MANAGER_USER (iPXE Manager admin login)" "${IPXE_MANAGER_USER:-admin}")"
+  while true; do
+    IPXE_MANAGER_PASSWORD="$(prompt "IPXE_MANAGER_PASSWORD (blank = no login required)" "${IPXE_MANAGER_PASSWORD:-}")"
+    [[ -z "$IPXE_MANAGER_PASSWORD" ]] && break
+    # these characters break the double-quoted value in .env / shell sourcing
+    if [[ "$IPXE_MANAGER_PASSWORD" == *['"\$`']* ]]; then
+      warn "Please avoid the characters  \"  \\  \$  \`  in the password."; continue
+    fi
+    break
+  done
 
   # Cluster Control Panel admin credentials
   CCP_ADMIN_USER="$(prompt "CCP_ADMIN_USER (Control Panel admin login)" "${CCP_ADMIN_USER:-admin}")"

@@ -23,6 +23,7 @@ SESSION_MINUTES  = int(os.environ.get('MONITOR_SESSION_MINUTES', '30'))
 # upload path, identical behavior. Default is the compose-internal DNS name.
 IPXE_MANAGER_URL      = os.environ.get('IPXE_MANAGER_URL',
                                        'http://ipxe-manager:8091').rstrip('/')
+IPXE_MANAGER_USER     = os.environ.get('IPXE_MANAGER_USER', 'admin')
 IPXE_MANAGER_PASSWORD = os.environ.get('IPXE_MANAGER_PASSWORD', '')
 # Files uploaded through this dashboard land in their own space inside the
 # share: data/webfs_share/<MONITOR_UPLOAD_DIR>/ (URLs under /files/<dir>/).
@@ -339,7 +340,7 @@ def _mgr_session():
     s = requests.Session()
     s.trust_env = False
     if IPXE_MANAGER_PASSWORD:
-        s.auth = ('monitor', IPXE_MANAGER_PASSWORD)
+        s.auth = (IPXE_MANAGER_USER, IPXE_MANAGER_PASSWORD)
     return s
 
 

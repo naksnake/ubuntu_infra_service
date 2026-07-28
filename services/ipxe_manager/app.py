@@ -1,5 +1,6 @@
 import os
 import re
+import hmac
 import json
 import time
 import uuid
@@ -29,6 +30,9 @@ UPLOAD_DIR    = pathlib.Path(os.environ.get('UPLOAD_DIR',   '/data/uploads'))
 ENTRIES_FILE  = pathlib.Path(os.environ.get('ENTRIES_FILE', '/data/state/entries.json'))
 WEBFS_BASE    = os.environ.get('WEBFS_BASE', 'http://192.168.100.1:8080')
 SERVER_IP     = os.environ.get('SERVER_IP',  '192.168.100.1')
+# Admin account for the manager UI/API (HTTP Basic). Auth is enabled by
+# setting a password; the username defaults to 'admin'.
+AUTH_USER     = os.environ.get('AUTH_USER', 'admin')
 AUTH_PASSWORD = os.environ.get('AUTH_PASSWORD', '')
 
 # Autoinstall (cloud-init NoCloud) profiles: where they are stored and the base
@@ -106,7 +110,10 @@ def _require_auth():
         return Response('Too many failed attempts — try again later.\n', 429,
                         mimetype='text/plain')
     auth = request.authorization
-    if auth and auth.password == AUTH_PASSWORD:
+    # constant-time comparison of both parts of the admin account
+    if (auth is not None
+            and hmac.compare_digest((auth.username or '').encode(), AUTH_USER.encode())
+            and hmac.compare_digest((auth.password or '').encode(), AUTH_PASSWORD.encode())):
         _auth_fails.pop(ip, None)
         return None
     if auth is not None:      # only count actual wrong passwords, not the
