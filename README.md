@@ -17,7 +17,9 @@ Steps 1–5 top to bottom and you end with a working PXE lab.
 # 0. Two NICs: WAN cabled to your router, PXE cabled to the lab switch.
 # 1. Static IP on the PXE NIC (Desktop example; details in Step 1):
 sudo nmcli con add type ethernet ifname enp2s0 con-name lab-pxe \
-     ipv4.method manual ipv4.addresses 192.168.100.1/24
+     ipv4.method manual ipv4.addresses 192.168.100.1/24 \
+     connection.autoconnect yes connection.autoconnect-priority 100 \
+     connection.autoconnect-retries 0
 sudo nmcli con up lab-pxe
 
 # 2. Get the repo and configure:
@@ -46,7 +48,7 @@ run commands/playbooks across your nodes, and `http://192.168.100.1:8090/`
 | iPXE Manager | `lab_ipxe_manager` | Web UI: upload boot files, edit the PXE boot menu, manage autoinstall profiles |
 | Cluster Control Panel | `lab_ccp` | Web UI: run ClusterShell commands + Ansible playbooks across nodes, with login/RBAC, job history, script repo, and audit log |
 | NAT | systemd `lab-nat` | Lets lab clients reach the internet via the host |
-| Monitor | `lab_monitor` | Web dashboard: service health + DHCP lease lookup |
+| Monitor | `lab_monitor` | Web dashboard: service health, DHCP lease lookup, file upload to the share |
 
 ---
 
@@ -87,11 +89,24 @@ Settings → Network GUI) instead of editing netplan files:
 ```bash
 # replace enp2s0 with your actual PXE_IFACE name
 sudo nmcli con add type ethernet ifname enp2s0 con-name lab-pxe \
-     ipv4.method manual ipv4.addresses 192.168.100.1/24
+     ipv4.method manual ipv4.addresses 192.168.100.1/24 \
+     connection.autoconnect yes connection.autoconnect-priority 100 \
+     connection.autoconnect-retries 0
 sudo nmcli con up lab-pxe
 ip addr show enp2s0             # confirm 192.168.100.1 is shown
 ```
 This survives reboots. Leave the WAN port on its normal DHCP connection.
+
+The three `autoconnect` settings matter: without them NetworkManager can drop
+the profile when the lab switch power-cycles (carrier loss) and give up
+re-activating it, or let a generic DHCP profile ("Wired connection 1") grab
+the NIC instead — the classic "my static lab IP disappeared" failure.
+`autoconnect-retries 0` means retry forever. If a generic profile keeps
+stealing the lab NIC, pin it away:
+```bash
+nmcli -f NAME,DEVICE con show                 # see who owns which NIC
+sudo nmcli con modify "Wired connection 1" connection.autoconnect no
+```
 
 **Ubuntu Server (netplan):**
 
@@ -173,9 +188,11 @@ CCP_PORT=8060
 MONITOR_PORT=8090
 MONITOR_REFRESH=30               # dashboard auto-refresh interval (seconds)
 
-# ---- iPXE Manager (optional) ----
-# Set a password to require login for the manager UI/API.
-# Leave blank for no auth. /menu.ipxe and /autoinstall/ always stay open for PXE clients.
+# ---- iPXE Manager ----
+# Admin account for the manager UI/API (HTTP Basic login). Setting a password
+# enables auth; leave it blank for no login. /menu.ipxe and /autoinstall/
+# always stay open for PXE clients.
+IPXE_MANAGER_USER=admin
 IPXE_MANAGER_PASSWORD=
 
 # ---- Cluster Control Panel (CCP) ----
@@ -208,9 +225,13 @@ The wizard will ask you to confirm each setting, then it will:
    file into `services/tftp/tftpboot/` manually and re-run)
 5. Build and start all containers with `docker compose up -d --build`
 6. Offer to enable persistent NAT via a systemd unit (`lab-nat.service`)
-7. Offer to enable stack autostart on reboot via `lab-stack.service`
+7. Offer to install the **PXE static-IP watchdog** (`lab-ip-guard.timer`) —
+   re-adds the lab IP within 30 s if NetworkManager drops it (carrier loss,
+   suspend/resume, competing DHCP profile)
+8. Offer to enable stack autostart on reboot via `lab-stack.service`
 
-**Answer yes to both the NAT and autostart prompts** to get a fully persistent lab.
+**Answer yes to the NAT, watchdog and autostart prompts** to get a fully
+persistent, self-healing lab.
 
 > The Control Panel is ready within a few seconds of the containers starting —
 > log in with `CCP_ADMIN_USER` / `CCP_ADMIN_PASSWORD` from your `.env`.
@@ -293,6 +314,23 @@ The dashboard now requires **login**. Sign in with the admin account (it reuses
 `CCP_ADMIN_USER` / `CCP_ADMIN_PASSWORD` from your `.env`). You will see:
 - **Services** — all container names, status (running/exited), health check result, uptime, restart count
 - **DHCP Leases** — IP address, MAC address, hostname, lease expiry, and time remaining for every active lease
+- **Quick links** — one-click access to the other web UIs, plus an
+  **Upload to file server** card (admin role only): click it or drop a file on
+  it and the file is stored in the monitor's own space in the share,
+  `data/webfs_share/monitor/` (URLs under `/files/monitor/`), keeping
+  dashboard uploads separate from files managed in the iPXE Manager. Uploads
+  are forwarded to the iPXE Manager, so an ISO gets the automatic
+  kernel+initrd extraction and a disabled boot entry exactly as if uploaded
+  in the manager UI — even when `IPXE_MANAGER_PASSWORD` is set. Files stream
+  straight into the share (no scratch copy in any container), and the page's
+  auto-refresh pauses while a file is being picked or uploaded.
+- **File Server** — lists everything in the `/files/` share (dashboard
+  uploads carry a `monitor` badge) with per-file **Copy URL** and — for
+  admins — **Remove**. Copy URL yields a working download link built for the
+  address you're browsing from (lab-side viewers get the lab IP, WAN-side
+  viewers the WAN IP), and copying works on plain-HTTP pages too. Removing an
+  ISO also removes its extracted kernel/initrd folder. The viewer role sees
+  the list read-only.
 
 Use the search box to quickly find a host by IP, MAC, or hostname.  
 The page auto-refreshes every 30 seconds. A JSON API is available at `/api/status` (login required).
@@ -332,10 +370,21 @@ http://192.168.100.1:8091/
 
 1. **Files tab** — upload your ISO, kernel (`vmlinuz`), or initrd
    (drag & drop or click to browse; files are stored in `data/webfs_share/`).
+   **Uploading an ISO does the rest automatically**: the manager extracts the
+   kernel + initrd out of the image into a folder named after it
+   (`data/webfs_share/<iso-name>/vmlinuz` + `initrd`) and creates a ready-made
+   **Kernel + initrd** boot entry whose command line hands the OS the ISO's
+   HTTP URL — the UEFI-friendly path, no sanboot involved:
+   ```
+   kernel http://<server>:8080/files/<iso-name>/vmlinuz initrd=initrd ip=dhcp url=http://<server>:8080/files/<name>.iso
+   initrd http://<server>:8080/files/<iso-name>/initrd
+   boot
+   ```
+   The auto-created entry starts **disabled** so the boot menu never changes
+   behind your back — enable it when you're ready.
 2. **Boot Menu tab** — click **+ Add Entry**, give it a name, pick the boot type:
    - **Kernel + initrd** — fetched over HTTP; works on **BIOS and UEFI**
      (this is the modern, recommended path)
-   - **ISO sanboot** — **BIOS firmware only** (UEFI cannot sanboot an ISO)
    - **Chainload URL** — point at another `.ipxe` script
 3. In each file field the base URL (`http://<server>:8080/files/`) is fixed —
    you type or pick **only the filename**. A live preview under the form shows
@@ -356,10 +405,18 @@ ip=dhcp url=http://192.168.100.1:8080/files/ubuntu-24.04-live-server-amd64.iso a
 boot=live fetch=http://192.168.100.1:8080/files/filesystem.squashfs ip=dhcp
 ```
 
-> **ISO shortcut:** uploading a `.iso` still auto-creates a **disabled**
-> sanboot entry (handy for BIOS clients or quick tests). For UEFI, use the
-> Kernel + initrd type as above. Kernels are never auto-added because they
-> need a matching initrd and command line.
+> **ISO shortcut:** uploading a `.iso` auto-creates a disabled
+> **Kernel + initrd** entry built from the boot files extracted out of the
+> ISO — it works on UEFI *and* BIOS, so there is no separate sanboot type
+> (sanboot was BIOS-only and cannot work on UEFI). The extractor knows the
+> standard layouts (Ubuntu/Debian `casper/` & `live/`, Debian installer
+> `install.amd/`, Fedora/RHEL `images/pxeboot/`, openSUSE, Arch); an ISO with
+> no recognizable kernel+initrd pair gets no entry — add a Kernel + initrd
+> entry by hand instead. The default command line `ip=dhcp url=<iso-url>`
+> fits Ubuntu live ISOs — for other distros edit it (e.g. `inst.repo=` for
+> Fedora/RHEL). Bare kernels are never auto-added because they need a
+> matching initrd and command line. Deleting an ISO also removes its
+> extracted folder.
 
 ### Boot order
 
@@ -374,8 +431,11 @@ time; the **iPXE Preview** tab shows the exact script clients receive.
 > You can also copy files straight into `data/webfs_share/` from the shell —
 > they appear in the manager's file list and dropdowns automatically.
 
-To password-protect the manager, set `IPXE_MANAGER_PASSWORD` in `.env`
-(PXE clients can always fetch `/menu.ipxe` and `/autoinstall/…` without a password).
+To password-protect the manager, set `IPXE_MANAGER_PASSWORD` in `.env` — the
+browser then asks for the `IPXE_MANAGER_USER` / password account (HTTP Basic;
+username defaults to `admin`). PXE clients can always fetch `/menu.ipxe` and
+`/autoinstall/…` without a password, and the Monitor dashboard forwards the
+same account automatically for its uploads and file removals.
 
 ---
 
@@ -398,16 +458,17 @@ to that entry's kernel command line. These seed URLs stay reachable even when
 
 **Steps:**
 
-1. **Files tab** — upload the Ubuntu **live-server** ISO (plus its `vmlinuz` and
-   `initrd` if you extracted them, or reference the ISO over HTTP).
+1. **Files tab** — upload the Ubuntu **live-server** ISO. The manager extracts
+   its `vmlinuz` + `initrd` and creates a disabled **Kernel + initrd** entry
+   for it automatically.
 2. **Autoinstall tab** → **+ New Profile**. The editor is pre-filled with a
    standard Ubuntu autoinstall template (identity, storage `layout: direct`, SSH
    server). Edit the hostname, user, password hash (`mkpasswd -m sha-512`), disk
    layout, and packages. It's validated as YAML on save.
-3. **Boot Menu tab** → add or edit a **Kernel + initrd** entry. Point its command
-   line at the matching ISO/rootfs, e.g.
-   `ip=dhcp url=http://192.168.100.1:8080/files/ubuntu-24.04.1-live-server-amd64.iso`,
-   then pick your profile in **Autoinstall profile**. The live preview shows the
+3. **Boot Menu tab** → edit the auto-created **Kernel + initrd** entry (its
+   command line already reads
+   `ip=dhcp url=http://192.168.100.1:8080/files/ubuntu-24.04.1-live-server-amd64.iso`)
+   and pick your profile in **Autoinstall profile**. The live preview shows the
    exact kernel line, including the appended seed URL.
 4. Enable the entry only when you're ready; the next PXE boot of that machine
    installs Ubuntu unattended per your profile.
@@ -631,10 +692,17 @@ sudo systemctl status lab-stack.service
 sudo systemctl status lab-nat.service
 ```
 
-Both units start automatically at boot. To enable them manually if you skipped the prompts:
+```bash
+# Check the PXE static-IP watchdog
+sudo systemctl status lab-ip-guard.timer
+journalctl -t lab-ip-guard          # every automatic restoration is logged
+```
+
+All units start automatically at boot. To enable them manually if you skipped the prompts:
 ```bash
 sudo systemctl enable --now lab-stack.service
 sudo systemctl enable --now lab-nat.service
+sudo systemctl enable --now lab-ip-guard.timer
 ```
 
 ---
@@ -673,12 +741,114 @@ downloads, not the CPU. Store ISOs in `data/webfs_share/` on the SSD.
 
 ---
 
+## Security
+
+The stack is built for an **isolated lab segment behind a trusted admin host**.
+These are the layers it ships with and the knobs you should set:
+
+### Network / NAT (applied automatically by `deploy.sh`)
+
+- **Stateful NAT only** — traffic from the WAN side can never *initiate* a
+  connection into the lab; only replies to lab-originated connections are
+  forwarded.
+- **Subnet-scoped, anti-spoofing rules** — forwarding and masquerading only
+  apply to packets sourced from the lab subnet, and anything else arriving on
+  the PXE interface is dropped. Rules live in Docker's `DOCKER-USER` chain
+  (re-run `./deploy.sh` or `sudo systemctl restart lab-nat.service` after
+  updating to refresh them).
+- **Kernel hardening** (`/etc/sysctl.d/99-lab-nat.conf`) — reverse-path
+  filtering, ICMP-redirect and source-route packets ignored, spoofed
+  ("martian") packets logged to the kernel log for detection
+  (`journalctl -k | grep martian`).
+
+### Web UI exposure — the most important knob
+
+By default the four web UIs are published on **all** host interfaces,
+including the WAN side. Set in `.env`:
+
+```ini
+UI_BIND=192.168.100.1        # your PXE_ROUTER_IP
+IPXE_MANAGER_USER=admin      # iPXE Manager admin account…
+IPXE_MANAGER_PASSWORD=...    # …never leave the boot-menu editor open
+```
+
+and re-run `docker compose up -d`. The UIs are then reachable only from the
+lab segment and the server itself; from your office machine, tunnel in:
+`ssh -L 8091:192.168.100.1:8091 <server>`. An unprotected iPXE Manager is the
+crown jewel for an attacker — whoever edits the boot menu controls every
+machine that PXE-boots.
+
+> **ufw users:** Docker-published container ports **bypass ufw** (Docker's
+> NAT rules run before ufw's INPUT chain), so `ufw deny 8091` does *not*
+> protect them — use `UI_BIND` instead. ufw still works for host-network
+> services: a good baseline is `default deny incoming`, `allow in on
+> <PXE_IFACE>`, and SSH allowed only from your admin network.
+
+### Login protection & sessions
+
+- **Brute-force lockout** on all three logins (Monitor, Control Panel, iPXE
+  Manager): after 5 failed attempts (10 for the manager's HTTP Basic auth)
+  from one address within 15 minutes, further attempts get HTTP 429 until the
+  window rolls over. Tune with `LOGIN_FAIL_LIMIT` / `LOGIN_FAIL_WINDOW`.
+  PXE-facing endpoints (`/menu.ipxe`, autoinstall seeds) are never locked out.
+- **Independent sessions per UI** — each app uses its own session cookie
+  (`lab_monitor_session`, `lab_ccp_session`), so logging in to one UI no
+  longer logs you out of another. Cookies are `HttpOnly` + `SameSite=Lax`;
+  every state-changing request requires a CSRF token; all responses carry
+  `X-Content-Type-Options`, `X-Frame-Options: DENY` and a no-referrer policy.
+
+### Detection — where to look
+
+| Signal | Where |
+|---|---|
+| Web logins, lockouts, uploads, file removals | `docker logs lab_monitor` (audit lines) |
+| Control Panel logins + every state change | CCP **Audit log** page (admin) / SQLite db |
+| Failed iPXE Manager auth attempts | `docker logs lab_ipxe_manager` |
+| Spoofed/martian packets | `journalctl -k \| grep -i martian` |
+| Unexpected DHCP clients | Monitor dashboard lease table |
+| Container restarts / unhealthy services | Monitor dashboard **Services** table |
+
+### What stays cleartext (by design) — and what that means
+
+PXE itself (DHCP/TFTP/HTTP boot) is unencrypted; anyone with a port on the
+**lab switch** can capture kernels, ISOs and autoinstall seeds — including
+the password **hashes** inside autoinstall profiles. Treat lab-switch access
+as equivalent to console access: use a dedicated, physically controlled
+switch (or an isolated VLAN), use strong `mkpasswd -m sha-512` hashes and
+rotate the first-boot password, and give humans the HTTPS listener
+(`COMPOSE_PROFILES=https`) for browsing the share. IPv6 is not a bypass:
+forwarding is enabled for IPv4 only.
+
+---
+
 ## Troubleshooting
 
 **DHCP clients get no IP**
 - Confirm `PXE_IFACE` has the static IP: `ip addr show <PXE_IFACE>`
 - Check dnsmasq started: `docker logs lab_dhcp | head -20`
 - Confirm no other DHCP server is on the lab segment: `sudo nmap --script broadcast-dhcp-discover`
+
+**The static IP on the PXE interface keeps disappearing**
+- Usual cause on Ubuntu Desktop: NetworkManager deactivates the profile when
+  the lab NIC loses carrier (lab switch powered off / rebooted, cable
+  unplugged, suspend/resume) and either gives up re-activating it or lets a
+  generic DHCP profile claim the NIC when the link returns.
+- Quick fix now: `sudo nmcli con up lab-pxe` (or `sudo systemctl start
+  lab-ip-guard.service` if the watchdog is installed).
+- Make the profile resilient (see Step 1):
+  ```bash
+  sudo nmcli con modify lab-pxe connection.autoconnect yes \
+       connection.autoconnect-priority 100 connection.autoconnect-retries 0
+  nmcli -f NAME,DEVICE con show     # a "Wired connection 1" on the lab NIC?
+  sudo nmcli con modify "Wired connection 1" connection.autoconnect no
+  ```
+- Install the **watchdog** if you skipped the prompt — re-run `./deploy.sh`
+  and answer yes to "Install the PXE static-IP watchdog". It checks every
+  30 s and re-adds the address whenever it is missing; each restoration is
+  visible in `journalctl -t lab-ip-guard`, so you can also see *how often*
+  (and roughly when) the address is being lost.
+- Desktop machines: make sure auto-suspend is disabled (Step 1) — suspend
+  takes the NIC down with it.
 
 **NAT not working (clients can ping gateway but not internet)**
 - Check IP forwarding is on: `cat /proc/sys/net/ipv4/ip_forward` (must be `1`)
@@ -689,6 +859,25 @@ downloads, not the CPU. Store ISOs in `data/webfs_share/` on the SSD.
 - Check the container is up: `docker ps | grep lab_ccp`
 - Check its logs: `docker logs lab_ccp 2>&1 | tail -30`
 - Confirm `CCP_ADMIN_PASSWORD` is set in `.env` (the admin is seeded on first run only)
+
+**Monitor upload card fails or shows "iPXE Manager unreachable"**
+- The card checks the monitor→manager link when the page loads and shows the
+  exact reason on the card; the same message appears in
+  `docker logs lab_monitor`.
+- Rebuild and recreate **both** containers together, then hard-reload the
+  dashboard (Ctrl+Shift+R) so the browser drops the old page's JavaScript:
+  ```bash
+  docker compose up -d --build monitor ipxe-manager
+  ```
+- Test the internal link by hand (expect `200`):
+  ```bash
+  docker exec lab_monitor python -c \
+    "import requests; print(requests.get('http://ipxe-manager:8091/menu.ipxe', timeout=5, proxies={'http': None}).status_code)"
+  ```
+- Changed `IPXE_MANAGER_PASSWORD` in `.env`? Recreate both containers — the
+  monitor sends that password with every upload.
+- HTTP proxies injected into containers by the Docker daemon (common on
+  corporate networks) are ignored for this internal call.
 
 **Containers restart repeatedly**
 - Check for missing `.env` values: `docker logs lab_dhcp | head -5`
@@ -709,8 +898,7 @@ ubuntu_infra_service/
 ├── ipxe/                        # Static iPXE scripts (manual fallbacks, served by webfs)
 │   ├── default.ipxe             # Chains to the iPXE Manager's live menu
 │   ├── menu.ipxe                # Static fallback menu
-│   ├── linux-kernel-initrd.ipxe # UEFI-friendly kernel+initrd boot
-│   └── boot-iso.ipxe            # BIOS-only ISO sanboot
+│   └── linux-kernel-initrd.ipxe # UEFI-friendly kernel+initrd boot
 │
 ├── services/
 │   ├── dhcp/                    # dnsmasq DHCP container (PXE pointers, no TFTP)
@@ -726,6 +914,8 @@ ubuntu_infra_service/
 │
 └── data/                        # Runtime data — back this up
     ├── webfs_share/             # Uploaded ISOs, kernels, initrds (served at /files/)
+    │   ├── monitor/             # Files uploaded via the Lab Monitor dashboard
+    │   └── <iso-name>/          # kernel + initrd auto-extracted from an uploaded ISO
     ├── ipxe_manager/            # Boot menu entries + autoinstall profiles (JSON)
     ├── ccp/                     # CCP SQLite db, job logs, uploaded files, SSH key
     ├── certs/                   # TLS cert + key for the optional HTTPS listener

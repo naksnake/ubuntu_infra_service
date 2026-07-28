@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir flask==3.0.3 gunicorn==22.0.0 PyYAML==6.0.2
+# pycdlib reads uploaded ISOs so the kernel/initrd can be extracted for UEFI boot
+RUN pip install --no-cache-dir flask==3.0.3 gunicorn==22.0.0 PyYAML==6.0.2 pycdlib==1.14.0
 
 WORKDIR /app
 COPY app.py .

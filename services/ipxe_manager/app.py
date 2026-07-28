@@ -1,9 +1,12 @@
 import os
 import re
+import hmac
 import json
+import time
 import uuid
 import fcntl
 import pathlib
+import tempfile
 from contextlib import contextmanager
 from urllib.parse import quote
 
@@ -12,7 +15,12 @@ try:
 except Exception:  # pragma: no cover - degrade gracefully if PyYAML is absent
     yaml = None
 
-from flask import Flask, request, jsonify, render_template, Response
+try:
+    import pycdlib  # for extracting kernel/initrd from uploaded ISOs
+except Exception:  # pragma: no cover - uploads still work, just no extraction
+    pycdlib = None
+
+from flask import Flask, Request, request, jsonify, render_template, Response
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -22,6 +30,9 @@ UPLOAD_DIR    = pathlib.Path(os.environ.get('UPLOAD_DIR',   '/data/uploads'))
 ENTRIES_FILE  = pathlib.Path(os.environ.get('ENTRIES_FILE', '/data/state/entries.json'))
 WEBFS_BASE    = os.environ.get('WEBFS_BASE', 'http://192.168.100.1:8080')
 SERVER_IP     = os.environ.get('SERVER_IP',  '192.168.100.1')
+# Admin account for the manager UI/API (HTTP Basic). Auth is enabled by
+# setting a password; the username defaults to 'admin'.
+AUTH_USER     = os.environ.get('AUTH_USER', 'admin')
 AUTH_PASSWORD = os.environ.get('AUTH_PASSWORD', '')
 
 # Autoinstall (cloud-init NoCloud) profiles: where they are stored and the base
@@ -32,7 +43,56 @@ AUTOINSTALL_FILE = pathlib.Path(
 MANAGER_PORT = os.environ.get('MANAGER_PORT', '8091')
 MANAGER_BASE = os.environ.get('MANAGER_BASE', f'http://{SERVER_IP}:{MANAGER_PORT}').rstrip('/')
 
+
+class UploadsSpoolRequest(Request):
+    """Spool multipart file parts straight into UPLOAD_DIR while they upload.
+
+    Werkzeug's default spools them to the container's /tmp, so an 8 GB ISO
+    would need 8 GB of scratch space in the overlay filesystem on top of its
+    final copy in the share. Landing in UPLOAD_DIR (the big bind-mounted disk)
+    avoids that, and lets api_upload() rename the finished spool into place
+    instead of copying it a second time. The '.spool-' dotfile prefix keeps
+    half-received files out of the file listing.
+    """
+    def _get_file_stream(self, total_content_length, content_type,
+                         filename=None, content_length=None):
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        fd, path = tempfile.mkstemp(prefix='.spool-', dir=UPLOAD_DIR)
+        os.close(fd)
+        os.chmod(path, 0o644)          # mkstemp's 0600 would be unreadable to webfs
+        return open(path, 'wb+')       # .name == path so the route can rename it
+
+
+app.request_class = UploadsSpoolRequest
+
+
+def _spool_path(file_storage):
+    """The on-disk spool behind an uploaded part, if it lives in UPLOAD_DIR."""
+    name = getattr(file_storage.stream, 'name', None)
+    if isinstance(name, str) and pathlib.Path(name).parent == UPLOAD_DIR:
+        return pathlib.Path(name)
+    return None
+
+
+def _reap_stale_spools(max_age=86400):
+    """Remove spool files orphaned by crashed/aborted uploads."""
+    try:
+        cutoff = time.time() - max_age
+        for p in UPLOAD_DIR.glob('.spool-*'):
+            if p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 # ── optional auth (everything except the PXE-facing menu endpoint) ──────────
+
+# Brute-force throttle: after LOGIN_FAIL_LIMIT wrong passwords from one IP in
+# LOGIN_FAIL_WINDOW seconds, that IP gets 429 until the window rolls over.
+# Counters are per worker process (effective budget = workers x limit).
+LOGIN_FAIL_LIMIT  = int(os.environ.get('LOGIN_FAIL_LIMIT', '10'))
+LOGIN_FAIL_WINDOW = int(os.environ.get('LOGIN_FAIL_WINDOW', '900'))
+_auth_fails = {}
+
 
 @app.before_request
 def _require_auth():
@@ -42,11 +102,35 @@ def _require_auth():
     if (not AUTH_PASSWORD or request.path == '/menu.ipxe'
             or request.path.startswith('/autoinstall/')):
         return None
+    ip = request.remote_addr or ''
+    now = time.time()
+    hits = [t for t in _auth_fails.get(ip, []) if now - t < LOGIN_FAIL_WINDOW]
+    if len(hits) >= LOGIN_FAIL_LIMIT:
+        _auth_fails[ip] = hits
+        return Response('Too many failed attempts — try again later.\n', 429,
+                        mimetype='text/plain')
     auth = request.authorization
-    if auth and auth.password == AUTH_PASSWORD:
+    # constant-time comparison of both parts of the admin account
+    if (auth is not None
+            and hmac.compare_digest((auth.username or '').encode(), AUTH_USER.encode())
+            and hmac.compare_digest((auth.password or '').encode(), AUTH_PASSWORD.encode())):
+        _auth_fails.pop(ip, None)
         return None
+    if auth is not None:      # only count actual wrong passwords, not the
+        hits.append(now)      # browser's initial credential-less request
+        _auth_fails[ip] = hits
+        app.logger.warning('failed auth attempt from %s (%d/%d)',
+                           ip, len(hits), LOGIN_FAIL_LIMIT)
     return Response('Authentication required.', 401,
                     {'WWW-Authenticate': 'Basic realm="iPXE Manager"'})
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    resp.headers.setdefault('X-Frame-Options', 'DENY')
+    resp.headers.setdefault('Referrer-Policy', 'no-referrer')
+    return resp
 
 # ── persistence ──────────────────────────────────────────────────────────────
 
@@ -54,7 +138,11 @@ def load_entries():
     if not ENTRIES_FILE.exists() or ENTRIES_FILE.stat().st_size == 0:
         return []
     try:
-        return json.loads(ENTRIES_FILE.read_text())
+        entries = json.loads(ENTRIES_FILE.read_text())
+        # The ISO sanboot type was removed (BIOS-only — useless on UEFI, where
+        # kernel+initrd with the ISO's URL is the way). Filter any legacy
+        # entries so they never reach the menu; the next save purges them.
+        return [e for e in entries if e.get('type') != 'iso']
     except Exception:
         # Corrupt JSON: preserve it instead of silently returning [] (a following
         # mutation would then persist the empty list and destroy the entries).
@@ -117,6 +205,16 @@ def _clean(value, maxlen=200):
     v = _IPXE_SEP.sub(' ', v)
     return v.strip()[:maxlen]
 
+def _safe_relpath(value):
+    """Sanitize a webfs-relative path like 'ubuntu-24.04/vmlinuz': every
+    component goes through secure_filename, so '..', absolute paths and
+    hidden files can never survive. Returns '' when nothing safe remains."""
+    parts = [p for p in str(value).replace('\\', '/').split('/') if p]
+    clean = [secure_filename(p) for p in parts]
+    if not clean or any(not c for c in clean):
+        return ''
+    return '/'.join(clean)
+
 def sanitize_fields(data):
     """Whitelist, clean and validate entry fields. Returns (fields, error)."""
     out = {}
@@ -126,14 +224,18 @@ def sanitize_fields(data):
             return None, 'name must not be empty'
         out['name'] = name
     if 'type' in data:
-        if data['type'] not in ('kernel', 'iso', 'chain'):
-            return None, 'type must be kernel, iso or chain'
+        # 'iso' (sanboot) is gone: BIOS-only, cannot work on UEFI — ISOs boot
+        # via kernel+initrd with the ISO's HTTP URL on the command line instead
+        if data['type'] not in ('kernel', 'chain'):
+            return None, 'type must be kernel or chain'
         out['type'] = data['type']
     if 'enabled' in data:
         out['enabled'] = bool(data['enabled'])
-    for k in ('kernel', 'initrd', 'iso'):
+    for k in ('kernel', 'initrd'):
         if k in data:
-            fn = secure_filename(str(data[k])) if data[k] else ''
+            # relative paths allowed: extracted ISO boot files live in a
+            # per-ISO subfolder (e.g. 'ubuntu-24.04-live-server-amd64/vmlinuz')
+            fn = _safe_relpath(data[k]) if data[k] else ''
             if data[k] and not fn:
                 return None, f'invalid {k} filename'
             out[k] = fn
@@ -157,26 +259,128 @@ def sanitize_fields(data):
 # ── file helpers ─────────────────────────────────────────────────────────────
 
 def file_url(name):
-    return f'{WEBFS_BASE}/files/{quote(name)}'
+    return f'{WEBFS_BASE}/files/{quote(name)}'   # quote() keeps '/' intact
 
 def list_files():
     result = []
     if UPLOAD_DIR.exists():
-        for f in sorted(UPLOAD_DIR.iterdir()):
+        # recurse so the boot files extracted into per-ISO subfolders
+        # ('<iso-name>/vmlinuz') show up in the UI and datalists
+        for f in sorted(UPLOAD_DIR.rglob('*')):
+            rel = f.relative_to(UPLOAD_DIR)
             # dotfiles include .<name>.uploading partials — never show them
-            if f.is_file() and not f.name.startswith('.'):
-                result.append({
-                    'name': f.name,
-                    'size': f.stat().st_size,
-                    'url':  file_url(f.name),
-                })
+            if not f.is_file() or any(p.startswith('.') for p in rel.parts):
+                continue
+            name = rel.as_posix()
+            result.append({
+                'name': name,
+                'size': f.stat().st_size,
+                'url':  file_url(name),
+            })
     return result
+
+# ── ISO boot-file extraction ─────────────────────────────────────────────────
+# UEFI firmware cannot sanboot an ISO, but every mainstream installer ISO
+# carries a PXE-bootable kernel + initrd. On upload we pull that pair out into
+# UPLOAD_DIR/<iso-stem>/ so a "Kernel + initrd" entry can boot it directly:
+#   kernel .../files/<stem>/vmlinuz ip=dhcp url=.../files/<iso>   (casper
+#   fetches the ISO itself over HTTP — no sanboot involved).
+
+_KERNEL_NAME = re.compile(r'^(vmlinuz|vmlinux|bzimage|linux)([.\-].*)?$')
+_INITRD_NAME = re.compile(r'^(initrd|initramfs)([.\-].*)?$')
+# where distros keep the netboot pair; tried in this order when several
+# directories qualify (Ubuntu/Debian-live, Debian d-i, Fedora/RHEL, openSUSE, Arch)
+_BOOT_DIR_PREFERENCE = ('casper', 'live', 'install.amd', 'install',
+                        'images/pxeboot', 'boot/x86_64/loader', 'arch/boot/x86_64')
+# never treat package archives or firmware blobs as boot files
+_EXTRACT_SKIP_DIRS = ('pool', 'dists')
+_EXTRACT_SKIP_EXT  = ('.deb', '.udeb', '.rpm', '.efi', '.sig', '.mod', '.c32')
+
+def extract_boot_files(iso_path, dest_dir):
+    """Best-effort: copy the kernel + initrd out of a distro ISO into dest_dir.
+
+    Scans the ISO for a directory holding both a kernel (vmlinuz/linux/bzImage)
+    and an initrd (initrd*/initramfs*) and extracts that pair. Returns
+    {'kernel': <basename>, 'initrd': <basename>} on success, else None —
+    any parse failure leaves the upload itself untouched.
+    """
+    if pycdlib is None:
+        return None
+    iso = pycdlib.PyCdlib()
+    try:
+        iso.open(str(iso_path))
+    except Exception:
+        app.logger.warning('%s: not a readable ISO9660 image, skipping extraction',
+                           iso_path.name)
+        return None
+    try:
+        # richest name facade available (plain ISO9660 mangles to 'VMLINUZ.;1')
+        if iso.has_udf():          kw = 'udf_path'
+        elif iso.has_rock_ridge(): kw = 'rr_path'
+        elif iso.has_joliet():     kw = 'joliet_path'
+        else:                      kw = 'iso_path'
+        dirs = {}
+        for dirpath, _subdirs, files in iso.walk(**{kw: '/'}):
+            rel = dirpath.strip('/')
+            if rel.split('/', 1)[0].lower() in _EXTRACT_SKIP_DIRS:
+                continue  # apt/yum trees are full of linux-*.deb false positives
+            for fn in files:
+                name = fn.split(';')[0].rstrip('.') if kw == 'iso_path' else fn
+                base = name.lower()
+                if base.endswith(_EXTRACT_SKIP_EXT):
+                    continue
+                bucket = dirs.setdefault(rel, {'kernel': [], 'initrd': []})
+                if _KERNEL_NAME.match(base):
+                    bucket['kernel'].append((fn, name))
+                elif _INITRD_NAME.match(base):
+                    bucket['initrd'].append((fn, name))
+
+        candidates = [d for d, b in dirs.items() if b['kernel'] and b['initrd']]
+        if not candidates:
+            return None
+
+        def dir_rank(d):
+            dl = d.lower()
+            for i, pref in enumerate(_BOOT_DIR_PREFERENCE):
+                if dl == pref or dl.endswith('/' + pref):
+                    return i
+            return len(_BOOT_DIR_PREFERENCE) + dl.count('/')
+        best = min(candidates, key=dir_rank)
+        # shortest name wins: 'vmlinuz' over 'vmlinuz.efi', 'initrd' over
+        # 'initrd.lz', 'initramfs-linux.img' over the -fallback variant
+        pick = lambda cands: min(cands, key=lambda t: len(t[1]))
+
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        out = {}
+        for (fn, name), key in ((pick(dirs[best]['kernel']), 'kernel'),
+                                (pick(dirs[best]['initrd']), 'initrd')):
+            src = '/' + (best + '/' if best else '') + fn
+            safe = secure_filename(name) or key
+            # hidden temp name: webfs must never serve a half-written boot file
+            tmp = dest_dir / f'.{safe}.{uuid.uuid4().hex}.extracting'
+            try:
+                iso.get_file_from_iso(str(tmp), **{kw: src})
+                tmp.replace(dest_dir / safe)
+            finally:
+                tmp.unlink(missing_ok=True)
+            out[key] = safe
+        app.logger.info('%s: extracted %s from /%s', iso_path.name,
+                        ' + '.join(out.values()), best)
+        return out
+    except Exception:
+        app.logger.exception('boot-file extraction failed for %s', iso_path.name)
+        return None
+    finally:
+        try:
+            iso.close()
+        except Exception:
+            pass
 
 # ── iPXE menu generator ───────────────────────────────────────────────────────
 
 def entry_body_lines(e):
     """The iPXE commands that boot a single entry (no label, no trailing goto).
-    Kernel+initrd over HTTP is the UEFI-friendly path; sanboot is BIOS-only."""
+    Kernel+initrd over HTTP works on UEFI and BIOS alike."""
     t = e.get('type', 'kernel')
     lines = []
     if t == 'kernel':
@@ -204,10 +408,6 @@ def entry_body_lines(e):
         if initrd:
             lines.append(f'initrd {file_url(initrd)} || goto failed')
         lines.append('boot || goto failed')
-    elif t == 'iso':
-        # --no-describe matches the static boot-iso.ipxe and avoids a describe
-        # step some BIOS sanboot paths choke on
-        lines.append(f'sanboot --no-describe {file_url(e.get("iso", ""))} || goto failed')
     elif t == 'chain':
         lines.append(f'chain {e.get("url", "")} || goto failed')
     return lines
@@ -293,47 +493,116 @@ def api_files():
 
 @app.route('/api/files', methods=['POST'])
 def api_upload():
+    # touching request.files parses the multipart body; file parts stream to
+    # unique '.spool-*' names inside UPLOAD_DIR (see UploadsSpoolRequest), so
+    # webfs never sees a half-written file under its final name
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
     f = request.files['file']
+    _reap_stale_spools()
+    spool = _spool_path(f)
+
+    def _discard_and_fail(msg):
+        if spool:
+            f.stream.close()
+            spool.unlink(missing_ok=True)
+        return jsonify({'error': msg}), 400
+
     filename = secure_filename(f.filename or '')
     if not filename:
-        return jsonify({'error': 'Invalid filename'}), 400
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    dest = UPLOAD_DIR / filename
-    # stream to a hidden, unique temp name so webfs never serves a half-written
-    # file and two concurrent uploads of the same name can't corrupt each other
-    tmp = UPLOAD_DIR / f'.{filename}.{uuid.uuid4().hex}.uploading'
+        return _discard_and_fail('Invalid filename')
+    # optional single-level target folder inside the share (?dir=monitor —
+    # the Lab Monitor uploads into its own space this way)
+    raw_dir = request.args.get('dir', '')
+    sub = secure_filename(raw_dir) if raw_dir else ''
+    if raw_dir and not sub:
+        return _discard_and_fail('Invalid dir')
+    base = UPLOAD_DIR / sub if sub else UPLOAD_DIR
+    relbase = f'{sub}/' if sub else ''          # prefix for share-relative paths
+    base.mkdir(parents=True, exist_ok=True)
+    dest = base / filename
     try:
-        f.save(str(tmp))
-        tmp.replace(dest)
+        if spool:
+            # already fully written to the destination filesystem — rename
+            # into place, no second copy
+            f.stream.close()
+            spool.replace(dest)
+        else:  # foreign stream (e.g. a test client): fall back to save+rename
+            tmp = base / f'.{filename}.{uuid.uuid4().hex}.uploading'
+            try:
+                f.save(str(tmp))
+                tmp.replace(dest)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
     except Exception as exc:
-        tmp.unlink(missing_ok=True)
         return jsonify({'error': f'Upload failed: {exc}'}), 500
 
-    # An ISO maps cleanly to a single sanboot entry, so auto-create one
-    # (disabled, so it never changes the boot menu until you enable it).
-    # Kernels can't be auto-added — they need a matching initrd and cmdline.
-    auto_entry = None
+    # An uploaded ISO becomes bootable automatically: kernel+initrd are
+    # extracted into <base>/<stem>/ and a "Kernel + initrd" entry (works on
+    # UEFI and BIOS) is created whose command line hands the OS the ISO's HTTP
+    # URL (ip=dhcp url=…). The entry starts disabled, so the boot menu never
+    # changes until you enable it. ISOs with no recognizable kernel+initrd pair
+    # get no entry (sanboot was removed — BIOS-only, it cannot work on UEFI).
+    # Bare kernels can't be auto-added — they need a matching initrd and cmdline.
+    kernel_entry = extracted = None
     if filename.lower().endswith('.iso'):
-        with entries_lock():
-            entries = load_entries()
-            if not any(e.get('type') == 'iso' and e.get('iso') == filename
-                       for e in entries):
-                auto_entry = {'id': 'e' + uuid.uuid4().hex[:7],
-                              'name': pathlib.Path(filename).stem,
-                              'type': 'iso', 'iso': filename, 'enabled': False}
-                entries.append(auto_entry)
-                save_entries(entries)
+        stem = pathlib.Path(filename).stem
+        extracted = extract_boot_files(dest, base / stem)
+        if extracted:
+            with entries_lock():
+                entries = load_entries()
+                kpath = f'{relbase}{stem}/{extracted["kernel"]}'
+                if not any(e.get('type') == 'kernel' and e.get('kernel') == kpath
+                           for e in entries):
+                    kernel_entry = {
+                        'id': 'e' + uuid.uuid4().hex[:7],
+                        'name': f'{stem} (kernel+initrd)',
+                        'type': 'kernel',
+                        'kernel': kpath,
+                        'initrd': f'{relbase}{stem}/{extracted["initrd"]}',
+                        # casper/subiquity fetch the ISO itself over HTTP;
+                        # adjust for other distros (inst.repo=, fetch=, …)
+                        'cmdline': f'ip=dhcp url={file_url(relbase + filename)}',
+                        'enabled': False,
+                    }
+                    entries.append(kernel_entry)
+                    save_entries(entries)
 
-    return jsonify({'name': filename, 'size': dest.stat().st_size,
-                    'url': file_url(filename), 'auto_entry': auto_entry}), 201
+    stem = pathlib.Path(filename).stem
+    return jsonify({'name': relbase + filename, 'size': dest.stat().st_size,
+                    'url': file_url(relbase + filename),
+                    'kernel_entry': kernel_entry,
+                    'extracted': extracted and {
+                        'folder': f'{relbase}{stem}',
+                        'kernel_url': file_url(f'{relbase}{stem}/{extracted["kernel"]}'),
+                        'initrd_url': file_url(f'{relbase}{stem}/{extracted["initrd"]}'),
+                    }}), 201
 
-@app.route('/api/files/<filename>', methods=['DELETE'])
+@app.route('/api/files/<path:filename>', methods=['DELETE'])
 def api_delete_file(filename):
-    path = UPLOAD_DIR / secure_filename(filename)
+    rel = _safe_relpath(filename)
+    if not rel:
+        return jsonify({'error': 'Invalid path'}), 400
+    path = UPLOAD_DIR / rel
     if path.exists() and path.is_file():
         path.unlink()
+        prune = [path.parent]
+        # deleting an ISO also removes the boot files extracted from it
+        # (works at any level: 'x.iso' -> 'x/', 'monitor/x.iso' -> 'monitor/x/')
+        if rel.lower().endswith('.iso'):
+            folder = path.parent / pathlib.Path(rel).stem
+            if folder.is_dir():
+                for f in folder.iterdir():
+                    base = f.name.lower()
+                    if f.is_file() and (_KERNEL_NAME.match(base)
+                                        or _INITRD_NAME.match(base)):
+                        f.unlink()
+                prune.insert(0, folder)   # innermost first
+        # drop now-empty folders, but never UPLOAD_DIR itself
+        for d in prune:
+            if d != UPLOAD_DIR and d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
         return jsonify({'ok': True})
     return jsonify({'error': 'Not found'}), 404
 

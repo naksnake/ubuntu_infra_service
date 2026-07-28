@@ -18,6 +18,30 @@
       <span class="link-url" data-url></span>
     </a>
     {% endfor %}
+    {% if cur_role == 'admin' %}
+    <label class="link-card upload-card" id="uploadCard" title="Upload a file to the file server share (stored in the monitor's own space)">
+      <span class="link-icon">&#128228;</span>
+      <span class="link-label">Upload to file server</span>
+      <span class="link-url" id="uploadStatus">ISO / kernel / initrd — click or drop</span>
+      <div class="upload-progress" id="uploadProgress"><div id="uploadFill"></div></div>
+      <input type="file" id="uploadInput" multiple hidden>
+    </label>
+    {% endif %}
+  </div>
+</section>
+
+<section>
+  <h2>File Server <span class="count" id="fileCount">…</span></h2>
+  <p style="color:var(--muted);font-size:11px;margin-bottom:10px">
+    Everything in the <code>/files/</code> share. Files uploaded from this dashboard live in the
+    <code>{{ monitor_space }}/</code> space{% if cur_role == 'admin' %}; <strong>Remove</strong> deletes a file from
+    the file server (an ISO's extracted kernel/initrd folder goes with it){% endif %}.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>File</th><th>Size</th><th style="width:1%"></th></tr></thead>
+      <tbody id="filesBody"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
+    </table>
   </div>
 </section>
 
@@ -73,21 +97,109 @@
 {% endblock %}
 
 {% block scripts %}<script>
-  document.querySelectorAll('.link-card').forEach(a => {
+  const CSRF = document.querySelector('meta[name=csrf-token]').content;
+  const IS_ADMIN = {{ 'true' if cur_role == 'admin' else 'false' }};
+
+  // [data-port] excludes the upload card, which is also a .link-card but has
+  // no URL line — touching it here would throw and kill this whole script
+  document.querySelectorAll('.link-card[data-port]').forEach(a => {
     const url = `${location.protocol}//${location.hostname}:${a.dataset.port}/${a.dataset.path || ''}`;
     a.href = url;
-    a.querySelector('[data-url]').textContent = url;
+    const label = a.querySelector('[data-url]');
+    if (label) label.textContent = url;
   });
   const TOTAL = {{ refresh }};
   const barEl = document.getElementById('progress-bar'), countEl = document.getElementById('countdown');
   let remaining = TOTAL;
+  let uploading = false;    // pause the auto-refresh so it can't kill an upload
+  let pickerOpen = false;   // …or reload behind the open file-picker dialog
   barEl.style.width = '0%';
   setInterval(() => {
+    if (uploading || pickerOpen) return;
     remaining--;
     if (remaining <= 0) { location.reload(); return; }
     countEl.textContent = remaining;
     barEl.style.width = ((TOTAL - remaining) / TOTAL * 100) + '%';
   }, 1000);
+
+  // ── upload to file server (proxied to the iPXE Manager) ──
+  const upCard = document.getElementById('uploadCard');
+  if (upCard) {
+    const upInput  = document.getElementById('uploadInput');
+    const upStatus = document.getElementById('uploadStatus');
+    const upProg   = document.getElementById('uploadProgress');
+    const upFill   = document.getElementById('uploadFill');
+    const IDLE_MSG = upStatus.textContent;
+
+    function setStatus(msg, cls) { upStatus.textContent = msg; upStatus.className = 'link-url' + (cls ? ' ' + cls : ''); }
+
+    function uploadOne(file) {
+      return new Promise(resolve => {
+        upProg.style.display = 'block'; upFill.style.width = '0%';
+        const fd = new FormData(); fd.append('file', file);
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload');
+        xhr.setRequestHeader('X-CSRF-Token', CSRF);
+        xhr.upload.onprogress = e => {
+          if (e.lengthComputable) {
+            upFill.style.width = (e.loaded / e.total * 100) + '%';
+            setStatus(`Uploading ${file.name} — ${Math.round(e.loaded / e.total * 100)}%`);
+          }
+        };
+        xhr.onload = () => {
+          let j = {}; try { j = JSON.parse(xhr.responseText); } catch {}
+          if (xhr.status === 201) {
+            if (j.kernel_entry) setStatus(`${file.name}: kernel+initrd extracted, boot entry added (disabled)`, 'ok');
+            else if (j.extracted) setStatus(`${file.name}: kernel+initrd re-extracted (boot entry already existed)`, 'ok');
+            else if (file.name.toLowerCase().endsWith('.iso')) setStatus(`${file.name} uploaded — no kernel+initrd pair found inside`, 'ok');
+            else setStatus(`${file.name} uploaded`, 'ok');
+          } else if (xhr.status === 401) {
+            setStatus('Session expired — reload the page and log in again', 'err');
+          } else {
+            setStatus(`${file.name}: ${j.error || 'upload failed (HTTP ' + xhr.status + ')'}`, 'err');
+          }
+          resolve(xhr.status === 201);
+        };
+        xhr.onerror = () => { setStatus(`${file.name}: network error`, 'err'); resolve(false); };
+        xhr.send(fd);
+      });
+    }
+
+    async function uploadFiles(list) {
+      const files = [...(list || [])];
+      if (!files.length || uploading) return;
+      if (!CSRF) { setStatus('Session problem — reload the page and log in again', 'err'); return; }
+      uploading = true;
+      try {
+        for (const f of files) await uploadOne(f);
+      } finally {
+        uploading = false;
+        upProg.style.display = 'none';
+        upInput.value = '';
+        remaining = TOTAL;   // fresh countdown so the result stays readable
+        setTimeout(() => setStatus(IDLE_MSG), TOTAL * 1000);
+        loadShareFiles();    // show the new file(s) right away
+      }
+    }
+
+    // freeze the auto-refresh while the picker dialog is up: a reload behind
+    // it would orphan the dialog and the chosen file would go nowhere
+    upInput.addEventListener('click', () => { pickerOpen = true; });
+    window.addEventListener('focus', () => { setTimeout(() => { pickerOpen = false; }, 500); });
+    upInput.addEventListener('change', () => { pickerOpen = false; uploadFiles(upInput.files); });
+    upCard.addEventListener('dragover',  e => { e.preventDefault(); upCard.classList.add('drag'); });
+
+    // preflight: surface a broken monitor→manager link on the card right away
+    fetch('/api/upload/check')
+      .then(r => r.json())
+      .then(j => { if (!j.ok) setStatus(j.error, 'err'); })
+      .catch(() => {});
+    upCard.addEventListener('dragleave', () => upCard.classList.remove('drag'));
+    upCard.addEventListener('drop', e => {
+      e.preventDefault(); upCard.classList.remove('drag');
+      uploadFiles(e.dataTransfer.files);
+    });
+  }
   function filterLeases() {
     const q = document.getElementById('search').value.toLowerCase();
     let visible = 0;
@@ -98,4 +210,96 @@
     });
     document.getElementById('lease-count').textContent = q ? visible : {{ leases|length }};
   }
+
+  // ── File Server section (list + remove, proxied to the iPXE Manager) ──
+  function escHtml(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  function escJs(s)   { return String(s == null ? '' : s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;').replace(/</g,'\\x3c'); }
+  function encPath(n) { return n.split('/').map(encodeURIComponent).join('/'); }
+  function fmtSize(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+    return (b / 1073741824).toFixed(2) + ' GB';
+  }
+
+  const MON_SPACE = {{ (monitor_space + '/') | tojson }};
+  const WEBFS_PORT = {{ webfs_port | tojson }};
+
+  // Build the download link from how THIS browser reaches the server (same
+  // hostname, webfs port) — a lab-side viewer gets the lab IP, a WAN-side
+  // viewer gets the WAN IP. The manager's absolute URLs use the lab IP only,
+  // which is unreachable from the office network.
+  function fileUrl(name) {
+    return `${location.protocol}//${location.hostname}:${WEBFS_PORT}/files/${encPath(name)}`;
+  }
+
+  // navigator.clipboard exists only in secure contexts (HTTPS or localhost);
+  // this dashboard is plain HTTP, so fall back to a hidden textarea +
+  // execCommand, and as a last resort show the URL in a prompt to copy by hand.
+  function copyText(text, btn) {
+    const feedback = ok => {
+      if (!btn) return;
+      const old = btn.textContent;
+      btn.textContent = ok ? 'Copied ✓' : 'Copy failed';
+      setTimeout(() => { btn.textContent = old; }, 1500);
+    };
+    const fallback = () => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed'; ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch {}
+      ta.remove();
+      if (!ok) prompt('Copy this URL:', text);
+      return ok;
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => feedback(true), () => feedback(fallback()));
+    } else {
+      feedback(fallback());
+    }
+  }
+  async function loadShareFiles() {
+    const body = document.getElementById('filesBody');
+    try {
+      const r = await fetch('/api/files');
+      const files = await r.json();
+      if (!r.ok) throw new Error(files.error || r.status);
+      document.getElementById('fileCount').textContent = files.length;
+      if (!files.length) {
+        body.innerHTML = '<tr><td colspan="3" class="empty">No files on the file server yet — use the upload card above</td></tr>';
+        return;
+      }
+      // monitor's own space first, then everything else, alphabetical
+      files.sort((a, b) => (b.name.startsWith(MON_SPACE) - a.name.startsWith(MON_SPACE)) || a.name.localeCompare(b.name));
+      body.innerHTML = files.map(f => `
+        <tr>
+          <td><code>${escHtml(f.name)}</code>${f.name.startsWith(MON_SPACE) ? ' <span class="badge space">monitor</span>' : ''}</td>
+          <td style="color:var(--muted)">${fmtSize(f.size)}</td>
+          <td style="white-space:nowrap;text-align:right">
+            <button class="btn btn-ghost" onclick="copyText(fileUrl('${escJs(f.name)}'), this)" title="${escHtml(fileUrl(f.name))}">Copy URL</button>
+            ${IS_ADMIN ? `<button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
+          </td>
+        </tr>`).join('');
+    } catch (e) {
+      document.getElementById('fileCount').textContent = '!';
+      body.innerHTML = `<tr><td colspan="3" class="empty">File server list unavailable — ${escHtml(e.message)}</td></tr>`;
+    }
+  }
+
+  async function removeFile(name) {
+    const extra = name.toLowerCase().endsWith('.iso') ? '\nIts extracted kernel/initrd folder will be removed too.' : '';
+    if (!confirm(`Remove "${name}" from the file server?` + extra)) return;
+    const r = await fetch('/api/files/' + encPath(name),
+                          { method: 'DELETE', headers: { 'X-CSRF-Token': CSRF } });
+    if (!r.ok) {
+      let j = {}; try { j = await r.json(); } catch {}
+      alert('Remove failed: ' + (j.error || 'HTTP ' + r.status));
+    }
+    loadShareFiles();
+  }
+
+  loadShareFiles();
 </script>{% endblock %}

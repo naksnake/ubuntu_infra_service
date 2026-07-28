@@ -5,7 +5,7 @@ services:
     build: ./services/webfs
     container_name: lab_webfs
     ports:
-      - "${WEBFS_PORT:-8080}:8080"
+      - "${UI_BIND:-0.0.0.0}:${WEBFS_PORT:-8080}:8080"
     volumes:
       # webfsd only serves files; mount everything read-only so a compromised
       # file server cannot tamper with boot assets (uploads are written by the
@@ -33,7 +33,7 @@ services:
     profiles: ["https"]
     command: ["webfsd", "-F", "-p", "8443", "-r", "/var/www/htdocs", "-f", "index.html", "-S", "-C", "/etc/webfs/webfs.pem"]
     ports:
-      - "${WEBFS_HTTPS_PORT:-8443}:8443"
+      - "${UI_BIND:-0.0.0.0}:${WEBFS_HTTPS_PORT:-8443}:8443"
     volumes:
       - ./services/webfs/htdocs:/var/www/htdocs:ro
       - ./ipxe:/var/www/htdocs/ipxe:ro
@@ -101,7 +101,7 @@ services:
     build: ./services/ipxe_manager
     container_name: lab_ipxe_manager
     ports:
-      - "${IPXE_MANAGER_PORT:-8091}:8091"
+      - "${UI_BIND:-0.0.0.0}:${IPXE_MANAGER_PORT:-8091}:8091"
     volumes:
       - ./data/webfs_share:/data/uploads:rw
       # directory mount, NOT a single-file mount — save_entries() renames a
@@ -116,6 +116,8 @@ services:
       # base URL PXE clients use to fetch the autoinstall seed — must point at
       # this manager (host:published-port), which serves /autoinstall/<id>/
       - MANAGER_BASE=http://${WEBFS_HOST_IP:-192.168.100.1}:${IPXE_MANAGER_PORT:-8091}
+      # admin account for the manager UI/API (auth active once the password is set)
+      - AUTH_USER=${IPXE_MANAGER_USER:-admin}
       - AUTH_PASSWORD=${IPXE_MANAGER_PASSWORD:-}
     healthcheck:
       # /menu.ipxe stays reachable even when IPXE_MANAGER_PASSWORD is set
@@ -131,7 +133,7 @@ services:
     build: ./services/monitor
     container_name: lab_monitor
     ports:
-      - "${MONITOR_PORT:-8090}:8090"
+      - "${UI_BIND:-0.0.0.0}:${MONITOR_PORT:-8090}:8090"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./data/dnsmasq.leases:/data/dnsmasq.leases:ro
@@ -142,6 +144,12 @@ services:
       - WEBFS_PORT=${WEBFS_PORT:-8080}
       - IPXE_MANAGER_PORT=${IPXE_MANAGER_PORT:-8091}
       - CCP_PORT=${CCP_PORT:-8060}
+      # dashboard uploads are proxied to the iPXE Manager (compose-internal
+      # address — the in-container port is fixed at 8091), so ISO uploads get
+      # the same kernel/initrd extraction + auto boot entry as manager uploads
+      - IPXE_MANAGER_URL=http://ipxe-manager:8091
+      - IPXE_MANAGER_USER=${IPXE_MANAGER_USER:-admin}
+      - IPXE_MANAGER_PASSWORD=${IPXE_MANAGER_PASSWORD:-}
       # login + RBAC for the dashboard (admin reuses the Control Panel login by
       # default; set MONITOR_VIEWER_PASSWORD to add a read-only account)
       - MONITOR_SECRET_KEY=${MONITOR_SECRET_KEY}
@@ -163,7 +171,7 @@ services:
     build: ./services/ccp
     container_name: lab_ccp
     ports:
-      - "${CCP_PORT:-8060}:8060"
+      - "${UI_BIND:-0.0.0.0}:${CCP_PORT:-8060}:8060"
     volumes:
       # single directory bind mount holds the SQLite db, job logs, uploaded
       # files and the SSH key — no single-file mounts (which Docker would

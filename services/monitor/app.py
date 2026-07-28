@@ -3,11 +3,13 @@ import sys
 import time
 import secrets
 import datetime
+from urllib.parse import quote
 
 from flask import (Flask, render_template, jsonify, request, session,
                    redirect, url_for, Response, flash)
 from werkzeug.security import generate_password_hash, check_password_hash
 import docker
+import requests
 
 app = Flask(__name__)
 
@@ -15,12 +17,28 @@ LEASES_FILE      = os.environ.get('LEASES_FILE', '/data/dnsmasq.leases')
 REFRESH_INTERVAL = int(os.environ.get('REFRESH_INTERVAL', '30'))
 SESSION_MINUTES  = int(os.environ.get('MONITOR_SESSION_MINUTES', '30'))
 
+# Where dashboard file uploads are forwarded. The iPXE Manager owns the file
+# share (safe filenames, ISO kernel/initrd extraction, auto boot entries), so
+# the monitor proxies to it instead of writing to the share directly — one
+# upload path, identical behavior. Default is the compose-internal DNS name.
+IPXE_MANAGER_URL      = os.environ.get('IPXE_MANAGER_URL',
+                                       'http://ipxe-manager:8091').rstrip('/')
+IPXE_MANAGER_USER     = os.environ.get('IPXE_MANAGER_USER', 'admin')
+IPXE_MANAGER_PASSWORD = os.environ.get('IPXE_MANAGER_PASSWORD', '')
+# Files uploaded through this dashboard land in their own space inside the
+# share: data/webfs_share/<MONITOR_UPLOAD_DIR>/ (URLs under /files/<dir>/).
+MONITOR_UPLOAD_DIR    = os.environ.get('MONITOR_UPLOAD_DIR', 'monitor')
+
 app.config.update(
     SECRET_KEY=os.environ.get('MONITOR_SECRET_KEY') or secrets.token_hex(32),
     PERMANENT_SESSION_LIFETIME=SESSION_MINUTES * 60,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     SESSION_REFRESH_EACH_REQUEST=True,  # sliding: each request resets the 30-min clock
+    # Browser cookies are scoped by hostname only — NOT by port — so every web
+    # UI on this host must use its own cookie name or each login overwrites
+    # the others' sessions (logging in to CCP used to log you out here).
+    SESSION_COOKIE_NAME='lab_monitor_session',
 )
 
 # ports for the dashboard quick-links (the browser fills in the host)
@@ -65,7 +83,31 @@ def audit(action, detail=''):
     sys.stderr.flush()
 
 
-PUBLIC_PATHS = {'/login', '/healthz'}
+# ── brute-force lockout ───────────────────────────────────────────────────────
+# After LOGIN_FAIL_LIMIT failed logins from one IP within LOGIN_FAIL_WINDOW
+# seconds, further attempts from that IP are refused (429) until the window
+# rolls over. Counters are per worker process, so the effective budget is
+# (workers x limit) — fine for slowing brute force on a lab box.
+LOGIN_FAIL_LIMIT  = int(os.environ.get('LOGIN_FAIL_LIMIT', '5'))
+LOGIN_FAIL_WINDOW = int(os.environ.get('LOGIN_FAIL_WINDOW', '900'))
+_login_fails = {}
+
+
+def _locked_out(ip):
+    now = time.time()
+    hits = [t for t in _login_fails.get(ip, []) if now - t < LOGIN_FAIL_WINDOW]
+    if hits:
+        _login_fails[ip] = hits
+    else:
+        _login_fails.pop(ip, None)
+    return len(hits) >= LOGIN_FAIL_LIMIT
+
+
+def _record_fail(ip):
+    _login_fails.setdefault(ip, []).append(time.time())
+
+
+PUBLIC_PATHS = {'/login', '/healthz', '/favicon.ico'}
 
 
 @app.before_request
@@ -77,7 +119,13 @@ def _guard():
             return jsonify({'error': 'authentication required'}), 401
         return redirect(url_for('login', next=request.path))
     if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
-        token = request.headers.get('X-CSRF-Token') or request.form.get('_csrf')
+        token = request.headers.get('X-CSRF-Token')
+        if not token and request.mimetype == 'application/x-www-form-urlencoded':
+            # Only look inside urlencoded bodies for the token. Parsing a
+            # multipart body here would spool the whole upload to disk AND
+            # consume the stream /api/upload must forward — the proxied POST
+            # would then hang forever waiting for body bytes that never come.
+            token = request.form.get('_csrf')
         if not token or token != session.get('csrf'):
             return jsonify({'error': 'invalid or missing CSRF token'}), 403
     return None
@@ -87,6 +135,14 @@ def _guard():
 def _inject():
     return {'cur_user': session.get('user'), 'cur_role': session.get('role'),
             'csrf_token': session.get('csrf'), 'session_minutes': SESSION_MINUTES}
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    resp.headers.setdefault('X-Frame-Options', 'DENY')
+    resp.headers.setdefault('Referrer-Policy', 'no-referrer')
+    return resp
 
 
 # ── data (dashboard) ──────────────────────────────────────────────────────────
@@ -192,13 +248,32 @@ def healthz():
     return Response('ok', mimetype='text/plain')
 
 
+@app.route('/favicon.ico')
+def favicon():
+    # without this every browser visit logs a 404 for the tab icon
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+           '<circle cx="8" cy="8" r="7" fill="none" stroke="#38bdf8" stroke-width="2"/>'
+           '<circle cx="8" cy="8" r="3" fill="#38bdf8"/></svg>')
+    return Response(svg, mimetype='image/svg+xml',
+                    headers={'Cache-Control': 'public, max-age=86400'})
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
+        # lockout keys on the real peer address — X-Forwarded-For is client-
+        # controlled here (no reverse proxy) and would be trivial to rotate
+        ip = request.remote_addr or ''
+        if _locked_out(ip):
+            audit('login', 'locked out (too many failures)')
+            flash(f'Too many failed attempts — this address is locked for '
+                  f'{LOGIN_FAIL_WINDOW // 60} minutes.')
+            return render_template('login.html'), 429
         username = (request.form.get('username') or '').strip()
         password = request.form.get('password') or ''
         rec = USERS.get(username)
         if rec and check_password_hash(rec['hash'], password):
+            _login_fails.pop(ip, None)
             session.clear()
             session['user'] = username
             session['role'] = rec['role']
@@ -207,6 +282,7 @@ def login():
             audit('login', 'success')
             nxt = request.args.get('next', '')
             return redirect(nxt if nxt.startswith('/') else url_for('dashboard'))
+        _record_fail(ip)
         audit('login', f'failed user={username!r}')
         flash('Invalid username or password.')
     return render_template('login.html')
@@ -228,7 +304,8 @@ def dashboard():
     return render_template(
         'index.html', containers=containers, leases=leases, c_err=c_err, l_err=l_err,
         now=datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        refresh=REFRESH_INTERVAL, links=LINKS)
+        refresh=REFRESH_INTERVAL, links=LINKS, monitor_space=MONITOR_UPLOAD_DIR,
+        webfs_port=os.environ.get('WEBFS_PORT', '8080'))
 
 
 # ── APIs ──────────────────────────────────────────────────────────────────────
@@ -238,6 +315,117 @@ def api_status():
     containers, _ = get_containers()
     leases,     _ = get_leases()
     return jsonify({'timestamp': int(time.time()), 'containers': containers, 'leases': leases})
+
+
+class _KnownLengthStream:
+    """Adapter so requests emits an exact Content-Length for the proxied body
+    (it sizes file-like bodies via `.len`; without it the upload would be sent
+    chunked). The body still streams through in blocks, never buffered whole."""
+    def __init__(self, stream, length):
+        self._stream = stream
+        self.len = length
+
+    def read(self, *args):
+        return self._stream.read(*args)
+
+    def __iter__(self):  # requests only treats objects with __iter__ as streams
+        return iter(lambda: self._stream.read(65536), b'')
+
+
+def _mgr_session():
+    """HTTP session for monitor→manager calls on the compose network.
+    trust_env=False: a Docker daemon that injects corporate HTTP(S)_PROXY
+    variables into containers would otherwise send this internal request to
+    the proxy, which cannot resolve 'ipxe-manager' — the call would hang or
+    fail even though both containers are healthy."""
+    s = requests.Session()
+    s.trust_env = False
+    if IPXE_MANAGER_PASSWORD:
+        s.auth = (IPXE_MANAGER_USER, IPXE_MANAGER_PASSWORD)
+    return s
+
+
+def _mgr_error(exc):
+    msg = f'iPXE Manager unreachable from the monitor container: {exc}'
+    sys.stderr.write(f'[monitor][upload] {msg}\n')
+    sys.stderr.flush()
+    return msg
+
+
+@app.route('/api/upload', methods=['POST'])
+def api_upload():
+    # the viewer role is read-only by contract — uploads are for admins
+    if session.get('role') != 'admin':
+        return jsonify({'error': 'admin role required'}), 403
+    # Stream the browser's multipart body through to the iPXE Manager
+    # untouched (never buffered in RAM — request.form/request.files are never
+    # touched here, and the CSRF guard only parses the form when the
+    # X-CSRF-Token header is missing, which the dashboard always sends).
+    body = request.stream
+    if request.content_length:
+        body = _KnownLengthStream(body, request.content_length)
+    headers = {'Content-Type': request.content_type or 'application/octet-stream'}
+    try:
+        # ?dir= puts dashboard uploads in the monitor's own space in the share
+        resp = _mgr_session().post(
+            f'{IPXE_MANAGER_URL}/api/files?dir={quote(MONITOR_UPLOAD_DIR)}',
+            data=body, headers=headers, timeout=(10, 3600))
+    except requests.RequestException as exc:
+        return jsonify({'error': _mgr_error(exc)}), 502
+    try:
+        name = resp.json().get('name', '?') if resp.ok else f'(HTTP {resp.status_code})'
+    except Exception:
+        name = f'(HTTP {resp.status_code})'
+    audit('upload', name)
+    return Response(resp.content, resp.status_code, mimetype='application/json')
+
+
+@app.route('/api/files')
+def api_files():
+    """File-server listing for the dashboard's File Server section (all
+    logged-in roles — the viewer sees it read-only)."""
+    try:
+        resp = _mgr_session().get(f'{IPXE_MANAGER_URL}/api/files', timeout=10)
+    except requests.RequestException as exc:
+        return jsonify({'error': _mgr_error(exc)}), 502
+    return Response(resp.content, resp.status_code, mimetype='application/json')
+
+
+@app.route('/api/files/<path:name>', methods=['DELETE'])
+def api_delete_file(name):
+    # removal is a state change — admins only, like uploads
+    if session.get('role') != 'admin':
+        return jsonify({'error': 'admin role required'}), 403
+    try:
+        resp = _mgr_session().delete(f'{IPXE_MANAGER_URL}/api/files/{quote(name)}',
+                                     timeout=30)
+    except requests.RequestException as exc:
+        return jsonify({'error': _mgr_error(exc)}), 502
+    audit('delete_file', f'{name} (HTTP {resp.status_code})')
+    return Response(resp.content, resp.status_code, mimetype='application/json')
+
+
+@app.route('/api/upload/check')
+def api_upload_check():
+    """Preflight for the dashboard upload card: proves the monitor container
+    can reach AND authenticate to the iPXE Manager, so a broken link shows up
+    on the card at page load instead of as a dead upload. The same reason is
+    written to the container log (docker logs lab_monitor)."""
+    if session.get('role') != 'admin':
+        return jsonify({'ok': False, 'error': 'admin role required'}), 403
+    try:
+        r = _mgr_session().get(f'{IPXE_MANAGER_URL}/api/config', timeout=5)
+    except requests.RequestException as exc:
+        return jsonify({'ok': False, 'error': _mgr_error(exc)})
+    if r.status_code == 401:
+        return jsonify({'ok': False, 'error':
+                        'iPXE Manager rejected the password — set the same '
+                        'IPXE_MANAGER_PASSWORD for both containers in .env, then '
+                        'run: docker compose up -d monitor ipxe-manager'})
+    if not r.ok:
+        return jsonify({'ok': False,
+                        'error': f'iPXE Manager answered HTTP {r.status_code}'})
+    return jsonify({'ok': True})
 
 
 if __name__ == '__main__':

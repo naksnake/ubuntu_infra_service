@@ -239,8 +239,10 @@ MONITOR_REFRESH=${MONITOR_REFRESH:-30}
 COMPOSE_PROFILES=${COMPOSE_PROFILES:-}
 
 # ==== iPXE Manager ====
-# Optional: set a password to protect the web UI and API (menu.ipxe stays open).
+# Admin account for the web UI and API (HTTP Basic). Setting a password
+# enables auth; blank disables it (menu.ipxe always stays open).
 # Quoted so a password containing spaces survives sourcing and compose parsing.
+IPXE_MANAGER_USER=${IPXE_MANAGER_USER:-admin}
 IPXE_MANAGER_PASSWORD="${IPXE_MANAGER_PASSWORD:-}"
 
 # ==== Cluster Control Panel (CCP) ====
@@ -305,6 +307,19 @@ env_wizard() {
   IPXE_MANAGER_PORT="$(prompt "IPXE_MANAGER_PORT" "${IPXE_MANAGER_PORT:-8091}")"
   CCP_PORT="$(prompt "CCP_PORT (Cluster Control Panel)" "${CCP_PORT:-8060}")"
   MONITOR_PORT="$(prompt "MONITOR_PORT" "${MONITOR_PORT:-8090}")"
+
+  # iPXE Manager admin account (a blank password leaves the manager open —
+  # fine on an isolated lab, risky if UI_BIND exposes it to the WAN side)
+  IPXE_MANAGER_USER="$(prompt "IPXE_MANAGER_USER (iPXE Manager admin login)" "${IPXE_MANAGER_USER:-admin}")"
+  while true; do
+    IPXE_MANAGER_PASSWORD="$(prompt "IPXE_MANAGER_PASSWORD (blank = no login required)" "${IPXE_MANAGER_PASSWORD:-}")"
+    [[ -z "$IPXE_MANAGER_PASSWORD" ]] && break
+    # these characters break the double-quoted value in .env / shell sourcing
+    if [[ "$IPXE_MANAGER_PASSWORD" == *['"\$`']* ]]; then
+      warn "Please avoid the characters  \"  \\  \$  \`  in the password."; continue
+    fi
+    break
+  done
 
   # Cluster Control Panel admin credentials
   CCP_ADMIN_USER="$(prompt "CCP_ADMIN_USER (Control Panel admin login)" "${CCP_ADMIN_USER:-admin}")"
@@ -442,8 +457,37 @@ compose_up() {
 
 enable_ip_forwarding() {
   log "Enabling IPv4 forwarding permanently..."
-  sudo_run bash -c 'echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-lab-nat.conf'
+  # ip_forward enables the NAT; the rest hardens the router role: reverse-path
+  # filtering drops spoofed sources, redirects/source-routing are ignored so
+  # neighbours cannot re-steer traffic, and martians are logged for detection.
+  sudo_run bash -c 'cat > /etc/sysctl.d/99-lab-nat.conf <<SYSCTL
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=1
+net.ipv4.conf.default.rp_filter=1
+net.ipv4.conf.all.log_martians=1
+net.ipv4.conf.all.accept_redirects=0
+net.ipv4.conf.default.accept_redirects=0
+net.ipv4.conf.all.send_redirects=0
+net.ipv4.conf.default.send_redirects=0
+net.ipv4.conf.all.accept_source_route=0
+net.ipv4.conf.default.accept_source_route=0
+net.ipv4.icmp_echo_ignore_broadcasts=1
+SYSCTL'
   sudo_run sysctl --system >/dev/null
+}
+
+lab_cidr() {  # lab_cidr 192.168.100.1 255.255.255.0 -> 192.168.100.0/24
+  local -a ip mask net
+  IFS=. read -ra ip   <<< "$1"
+  IFS=. read -ra mask <<< "$2"
+  [ "${#ip[@]}" = 4 ] && [ "${#mask[@]}" = 4 ] || return 1
+  local i o bits=0
+  for i in 0 1 2 3; do
+    net[i]=$(( ip[i] & mask[i] ))
+    o=${mask[i]}
+    while (( o )); do bits=$(( bits + (o & 1) )); o=$(( o >> 1 )); done
+  done
+  echo "${net[0]}.${net[1]}.${net[2]}.${net[3]}/${bits}"
 }
 
 enable_nat() {
@@ -452,9 +496,15 @@ enable_nat() {
   sudo_run apt-get install -y iptables >/dev/null 2>&1 || true
 
   # interface names are baked into a tiny config the NAT script sources, so the
-  # script itself is fully static (written from a quoted heredoc, no expansion)
-  log "Writing /etc/lab-nat.conf"
-  sudo_run bash -c "printf 'WAN_IFACE=%s\nPXE_IFACE=%s\n' '${WAN_IFACE}' '${PXE_IFACE}' > /etc/lab-nat.conf"
+  # script itself is fully static (written from a quoted heredoc, no expansion).
+  # LAB_NET scopes NAT/forwarding to the lab subnet (anti-spoofing); when the
+  # subnet cannot be derived it stays empty and the legacy unscoped rules apply.
+  local lab_net=""
+  if [ -n "${PXE_ROUTER_IP:-}" ] && [ -n "${PXE_NETMASK:-}" ]; then
+    lab_net="$(lab_cidr "$PXE_ROUTER_IP" "$PXE_NETMASK" 2>/dev/null || true)"
+  fi
+  log "Writing /etc/lab-nat.conf (lab subnet: ${lab_net:-unscoped})"
+  sudo_run bash -c "printf 'WAN_IFACE=%s\nPXE_IFACE=%s\nLAB_NET=%s\n' '${WAN_IFACE}' '${PXE_IFACE}' '${lab_net}' > /etc/lab-nat.conf"
 
   local tmp; tmp="$(mktemp)"
   cat > "$tmp" <<'LABNAT'
@@ -464,27 +514,58 @@ enable_nat() {
 # a private table is not enough — the rules must live in DOCKER-USER, which
 # Docker evaluates (and preserves) ahead of its own rules. If DOCKER-USER is
 # absent (Docker not managing iptables) we fall back to the FORWARD chain.
+#
+# When LAB_NET is set (e.g. 192.168.100.0/24) everything is scoped to the lab
+# subnet: only lab-sourced packets are forwarded and masqueraded, and anything
+# else arriving on the PXE interface is dropped (anti-spoofing). Return
+# traffic from the WAN side is stateful-only, so nothing outside can initiate
+# a connection into the lab.
 # Idempotent; works with both the iptables-legacy and iptables-nft backends.
 set -euo pipefail
 [ -r /etc/lab-nat.conf ] && . /etc/lab-nat.conf
 : "${WAN_IFACE:?WAN_IFACE not set}" ; : "${PXE_IFACE:?PXE_IFACE not set}"
+LAB_NET="${LAB_NET:-}"
 ACTION="${1:-up}"
 
 if iptables -L DOCKER-USER -n >/dev/null 2>&1; then FCHAIN=DOCKER-USER; else FCHAIN=FORWARD; fi
 
+NAT_RULE=(-o "$WAN_IFACE" -j MASQUERADE)
+FWD_OUT=(-i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT)
+if [ -n "$LAB_NET" ]; then
+  NAT_RULE=(-s "$LAB_NET" -o "$WAN_IFACE" -j MASQUERADE)
+  FWD_OUT=(-i "$PXE_IFACE" -s "$LAB_NET" -o "$WAN_IFACE" -j ACCEPT)
+fi
+FWD_BACK=(-i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT)
+SPOOF=(-i "$PXE_IFACE" ! -s "${LAB_NET:-0.0.0.0/0}" -j DROP)
+
 if [ "$ACTION" = "down" ]; then
+  iptables -t nat -D POSTROUTING "${NAT_RULE[@]}" 2>/dev/null || true
   iptables -t nat -D POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null || true
+  iptables -D "$FCHAIN" "${FWD_OUT[@]}" 2>/dev/null || true
   iptables -D "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT 2>/dev/null || true
-  iptables -D "$FCHAIN" -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+  iptables -D "$FCHAIN" "${FWD_BACK[@]}" 2>/dev/null || true
+  if [ -n "$LAB_NET" ]; then
+    iptables -D "$FCHAIN" "${SPOOF[@]}" 2>/dev/null || true
+  fi
   exit 0
 fi
 
-iptables -t nat -C POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null \
-  || iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
-iptables -C "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT 2>/dev/null \
-  || iptables -I "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT
-iptables -C "$FCHAIN" -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
-  || iptables -I "$FCHAIN" -i "$WAN_IFACE" -o "$PXE_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -t nat -C POSTROUTING "${NAT_RULE[@]}" 2>/dev/null \
+  || iptables -t nat -A POSTROUTING "${NAT_RULE[@]}"
+iptables -C "$FCHAIN" "${FWD_OUT[@]}" 2>/dev/null \
+  || iptables -I "$FCHAIN" "${FWD_OUT[@]}"
+iptables -C "$FCHAIN" "${FWD_BACK[@]}" 2>/dev/null \
+  || iptables -I "$FCHAIN" "${FWD_BACK[@]}"
+if [ -n "$LAB_NET" ]; then
+  # drop legacy unscoped rules a previous version may have installed
+  iptables -t nat -D POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null || true
+  iptables -D "$FCHAIN" -i "$PXE_IFACE" -o "$WAN_IFACE" -j ACCEPT 2>/dev/null || true
+  # anti-spoofing: nothing but lab-subnet sources may enter from the PXE side.
+  # -I keeps it ahead of DOCKER-USER's terminal RETURN; the ACCEPT above is
+  # disjoint (-s LAB_NET vs ! -s LAB_NET) so relative order does not matter.
+  iptables -C "$FCHAIN" "${SPOOF[@]}" 2>/dev/null \
+    || iptables -I "$FCHAIN" "${SPOOF[@]}"
+fi
 LABNAT
   sudo_run install -m 0755 "$tmp" /usr/local/sbin/lab-nat.sh
   rm -f "$tmp"
@@ -521,6 +602,83 @@ nat_wizard() {
     enable_nat
   else
     log "NAT not enabled."
+  fi
+}
+
+enable_ip_guard() {
+  # NetworkManager (Ubuntu Desktop) drops the static PXE address when the lab
+  # switch loses carrier or after suspend/resume, and does not always restore
+  # it — DHCP/TFTP/NAT all die with it. This watchdog re-adds the address
+  # within 30 seconds whenever it is missing, whatever removed it.
+  local bits cidr
+  cidr="$(lab_cidr "${PXE_ROUTER_IP:?PXE_ROUTER_IP not set}" "${PXE_NETMASK:?PXE_NETMASK not set}")" \
+    || die "Cannot derive prefix from PXE_NETMASK=${PXE_NETMASK}"
+  bits="${cidr#*/}"
+
+  log "Writing /etc/lab-ipguard.conf"
+  sudo_run bash -c "printf 'PXE_IFACE=%s\nPXE_ADDR=%s\n' '${PXE_IFACE:?}' '${PXE_ROUTER_IP}/${bits}' > /etc/lab-ipguard.conf"
+
+  local tmp; tmp="$(mktemp)"
+  cat > "$tmp" <<'IPGUARD'
+#!/usr/bin/env bash
+# Restores the static PXE address if it disappears (NetworkManager dropping
+# the profile on carrier loss, suspend/resume, a competing DHCP profile...).
+# Safe to run at any time: does nothing when the address is already present.
+set -euo pipefail
+[ -r /etc/lab-ipguard.conf ] && . /etc/lab-ipguard.conf
+: "${PXE_IFACE:?PXE_IFACE not set}" ; : "${PXE_ADDR:?PXE_ADDR not set}"
+
+# NIC not present (e.g. USB adapter unplugged): nothing to guard
+ip link show dev "$PXE_IFACE" >/dev/null 2>&1 || exit 0
+
+ip link set dev "$PXE_IFACE" up 2>/dev/null || true
+if ! ip -4 addr show dev "$PXE_IFACE" | grep -qF "inet ${PXE_ADDR%/*}/"; then
+  ip addr add "$PXE_ADDR" dev "$PXE_IFACE" 2>/dev/null || true
+  logger -t lab-ip-guard "re-added ${PXE_ADDR} on ${PXE_IFACE} (address was missing)" 2>/dev/null || true
+fi
+IPGUARD
+  sudo_run install -m 0755 "$tmp" /usr/local/sbin/lab-ip-guard.sh
+  rm -f "$tmp"
+
+  tmp="$(mktemp)"
+  cat > "$tmp" <<'IPGUARDSVC'
+[Unit]
+Description=Restore the lab PXE static IP if it disappears
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lab-ip-guard.sh
+IPGUARDSVC
+  sudo_run install -m 0644 "$tmp" /etc/systemd/system/lab-ip-guard.service
+  rm -f "$tmp"
+
+  tmp="$(mktemp)"
+  cat > "$tmp" <<'IPGUARDTMR'
+[Unit]
+Description=Check the lab PXE static IP every 30 seconds
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=30s
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+IPGUARDTMR
+  sudo_run install -m 0644 "$tmp" /etc/systemd/system/lab-ip-guard.timer
+  rm -f "$tmp"
+
+  sudo_run systemctl daemon-reload
+  sudo_run systemctl enable --now lab-ip-guard.timer
+  sudo_run systemctl start lab-ip-guard.service
+  log "PXE IP guard enabled. Verify:  systemctl status lab-ip-guard.timer ; journalctl -t lab-ip-guard"
+}
+
+ip_guard_wizard() {
+  if prompt_yesno "Install the PXE static-IP watchdog (restores ${PXE_ROUTER_IP:-the lab IP} if it disappears — recommended)?" "Y"; then
+    enable_ip_guard
+  else
+    log "PXE IP guard not installed."
   fi
 }
 
@@ -598,6 +756,7 @@ main() {
   maybe_clean_existing
   compose_up
   nat_wizard
+  ip_guard_wizard
 
   if prompt_yesno "Enable autostart on boot (systemd lab-stack.service)?"; then
     enable_autostart

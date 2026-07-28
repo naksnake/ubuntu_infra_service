@@ -52,6 +52,14 @@
   .link-card{display:flex;flex-direction:column;gap:2px;padding:14px 16px;background:#161f33;border:1px solid var(--border);border-radius:8px;color:var(--text);transition:border-color .15s,transform .15s}
   .link-card:hover{border-color:var(--accent);transform:translateY(-1px)}
   .link-icon{font-size:20px;color:var(--accent)}.link-label{font-weight:600}.link-url{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .badge.space{background:rgba(56,189,248,.12);color:var(--accent);text-transform:none}
+  .btn-del{background:transparent;border:1px solid var(--border);color:var(--red);font-weight:500}
+  .btn-del:hover{background:rgba(239,68,68,.1);border-color:var(--red)}
+  .upload-card{cursor:pointer;border-style:dashed}
+  .upload-card.drag{border-color:var(--accent);background:rgba(56,189,248,.06)}
+  .upload-card .ok{color:var(--green)}.upload-card .err{color:var(--red)}
+  .upload-progress{display:none;height:3px;background:var(--border);border-radius:2px;margin-top:8px;overflow:hidden}
+  .upload-progress div{height:100%;width:0;background:var(--accent);transition:width .2s}
 
   .table-wrap{overflow-x:auto;border-radius:8px;border:1px solid var(--border)}
   table{width:100%;border-collapse:collapse}
