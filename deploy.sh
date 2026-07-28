@@ -605,6 +605,83 @@ nat_wizard() {
   fi
 }
 
+enable_ip_guard() {
+  # NetworkManager (Ubuntu Desktop) drops the static PXE address when the lab
+  # switch loses carrier or after suspend/resume, and does not always restore
+  # it — DHCP/TFTP/NAT all die with it. This watchdog re-adds the address
+  # within 30 seconds whenever it is missing, whatever removed it.
+  local bits cidr
+  cidr="$(lab_cidr "${PXE_ROUTER_IP:?PXE_ROUTER_IP not set}" "${PXE_NETMASK:?PXE_NETMASK not set}")" \
+    || die "Cannot derive prefix from PXE_NETMASK=${PXE_NETMASK}"
+  bits="${cidr#*/}"
+
+  log "Writing /etc/lab-ipguard.conf"
+  sudo_run bash -c "printf 'PXE_IFACE=%s\nPXE_ADDR=%s\n' '${PXE_IFACE:?}' '${PXE_ROUTER_IP}/${bits}' > /etc/lab-ipguard.conf"
+
+  local tmp; tmp="$(mktemp)"
+  cat > "$tmp" <<'IPGUARD'
+#!/usr/bin/env bash
+# Restores the static PXE address if it disappears (NetworkManager dropping
+# the profile on carrier loss, suspend/resume, a competing DHCP profile...).
+# Safe to run at any time: does nothing when the address is already present.
+set -euo pipefail
+[ -r /etc/lab-ipguard.conf ] && . /etc/lab-ipguard.conf
+: "${PXE_IFACE:?PXE_IFACE not set}" ; : "${PXE_ADDR:?PXE_ADDR not set}"
+
+# NIC not present (e.g. USB adapter unplugged): nothing to guard
+ip link show dev "$PXE_IFACE" >/dev/null 2>&1 || exit 0
+
+ip link set dev "$PXE_IFACE" up 2>/dev/null || true
+if ! ip -4 addr show dev "$PXE_IFACE" | grep -qF "inet ${PXE_ADDR%/*}/"; then
+  ip addr add "$PXE_ADDR" dev "$PXE_IFACE" 2>/dev/null || true
+  logger -t lab-ip-guard "re-added ${PXE_ADDR} on ${PXE_IFACE} (address was missing)" 2>/dev/null || true
+fi
+IPGUARD
+  sudo_run install -m 0755 "$tmp" /usr/local/sbin/lab-ip-guard.sh
+  rm -f "$tmp"
+
+  tmp="$(mktemp)"
+  cat > "$tmp" <<'IPGUARDSVC'
+[Unit]
+Description=Restore the lab PXE static IP if it disappears
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lab-ip-guard.sh
+IPGUARDSVC
+  sudo_run install -m 0644 "$tmp" /etc/systemd/system/lab-ip-guard.service
+  rm -f "$tmp"
+
+  tmp="$(mktemp)"
+  cat > "$tmp" <<'IPGUARDTMR'
+[Unit]
+Description=Check the lab PXE static IP every 30 seconds
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=30s
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+IPGUARDTMR
+  sudo_run install -m 0644 "$tmp" /etc/systemd/system/lab-ip-guard.timer
+  rm -f "$tmp"
+
+  sudo_run systemctl daemon-reload
+  sudo_run systemctl enable --now lab-ip-guard.timer
+  sudo_run systemctl start lab-ip-guard.service
+  log "PXE IP guard enabled. Verify:  systemctl status lab-ip-guard.timer ; journalctl -t lab-ip-guard"
+}
+
+ip_guard_wizard() {
+  if prompt_yesno "Install the PXE static-IP watchdog (restores ${PXE_ROUTER_IP:-the lab IP} if it disappears — recommended)?" "Y"; then
+    enable_ip_guard
+  else
+    log "PXE IP guard not installed."
+  fi
+}
+
 enable_autostart() {
   local unit="/etc/systemd/system/lab-stack.service"
   local repo_dir="$ROOT_DIR"
@@ -679,6 +756,7 @@ main() {
   maybe_clean_existing
   compose_up
   nat_wizard
+  ip_guard_wizard
 
   if prompt_yesno "Enable autostart on boot (systemd lab-stack.service)?"; then
     enable_autostart

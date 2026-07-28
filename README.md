@@ -17,7 +17,9 @@ Steps 1–5 top to bottom and you end with a working PXE lab.
 # 0. Two NICs: WAN cabled to your router, PXE cabled to the lab switch.
 # 1. Static IP on the PXE NIC (Desktop example; details in Step 1):
 sudo nmcli con add type ethernet ifname enp2s0 con-name lab-pxe \
-     ipv4.method manual ipv4.addresses 192.168.100.1/24
+     ipv4.method manual ipv4.addresses 192.168.100.1/24 \
+     connection.autoconnect yes connection.autoconnect-priority 100 \
+     connection.autoconnect-retries 0
 sudo nmcli con up lab-pxe
 
 # 2. Get the repo and configure:
@@ -87,11 +89,24 @@ Settings → Network GUI) instead of editing netplan files:
 ```bash
 # replace enp2s0 with your actual PXE_IFACE name
 sudo nmcli con add type ethernet ifname enp2s0 con-name lab-pxe \
-     ipv4.method manual ipv4.addresses 192.168.100.1/24
+     ipv4.method manual ipv4.addresses 192.168.100.1/24 \
+     connection.autoconnect yes connection.autoconnect-priority 100 \
+     connection.autoconnect-retries 0
 sudo nmcli con up lab-pxe
 ip addr show enp2s0             # confirm 192.168.100.1 is shown
 ```
 This survives reboots. Leave the WAN port on its normal DHCP connection.
+
+The three `autoconnect` settings matter: without them NetworkManager can drop
+the profile when the lab switch power-cycles (carrier loss) and give up
+re-activating it, or let a generic DHCP profile ("Wired connection 1") grab
+the NIC instead — the classic "my static lab IP disappeared" failure.
+`autoconnect-retries 0` means retry forever. If a generic profile keeps
+stealing the lab NIC, pin it away:
+```bash
+nmcli -f NAME,DEVICE con show                 # see who owns which NIC
+sudo nmcli con modify "Wired connection 1" connection.autoconnect no
+```
 
 **Ubuntu Server (netplan):**
 
@@ -210,9 +225,13 @@ The wizard will ask you to confirm each setting, then it will:
    file into `services/tftp/tftpboot/` manually and re-run)
 5. Build and start all containers with `docker compose up -d --build`
 6. Offer to enable persistent NAT via a systemd unit (`lab-nat.service`)
-7. Offer to enable stack autostart on reboot via `lab-stack.service`
+7. Offer to install the **PXE static-IP watchdog** (`lab-ip-guard.timer`) —
+   re-adds the lab IP within 30 s if NetworkManager drops it (carrier loss,
+   suspend/resume, competing DHCP profile)
+8. Offer to enable stack autostart on reboot via `lab-stack.service`
 
-**Answer yes to both the NAT and autostart prompts** to get a fully persistent lab.
+**Answer yes to the NAT, watchdog and autostart prompts** to get a fully
+persistent, self-healing lab.
 
 > The Control Panel is ready within a few seconds of the containers starting —
 > log in with `CCP_ADMIN_USER` / `CCP_ADMIN_PASSWORD` from your `.env`.
@@ -673,10 +692,17 @@ sudo systemctl status lab-stack.service
 sudo systemctl status lab-nat.service
 ```
 
-Both units start automatically at boot. To enable them manually if you skipped the prompts:
+```bash
+# Check the PXE static-IP watchdog
+sudo systemctl status lab-ip-guard.timer
+journalctl -t lab-ip-guard          # every automatic restoration is logged
+```
+
+All units start automatically at boot. To enable them manually if you skipped the prompts:
 ```bash
 sudo systemctl enable --now lab-stack.service
 sudo systemctl enable --now lab-nat.service
+sudo systemctl enable --now lab-ip-guard.timer
 ```
 
 ---
@@ -801,6 +827,28 @@ forwarding is enabled for IPv4 only.
 - Confirm `PXE_IFACE` has the static IP: `ip addr show <PXE_IFACE>`
 - Check dnsmasq started: `docker logs lab_dhcp | head -20`
 - Confirm no other DHCP server is on the lab segment: `sudo nmap --script broadcast-dhcp-discover`
+
+**The static IP on the PXE interface keeps disappearing**
+- Usual cause on Ubuntu Desktop: NetworkManager deactivates the profile when
+  the lab NIC loses carrier (lab switch powered off / rebooted, cable
+  unplugged, suspend/resume) and either gives up re-activating it or lets a
+  generic DHCP profile claim the NIC when the link returns.
+- Quick fix now: `sudo nmcli con up lab-pxe` (or `sudo systemctl start
+  lab-ip-guard.service` if the watchdog is installed).
+- Make the profile resilient (see Step 1):
+  ```bash
+  sudo nmcli con modify lab-pxe connection.autoconnect yes \
+       connection.autoconnect-priority 100 connection.autoconnect-retries 0
+  nmcli -f NAME,DEVICE con show     # a "Wired connection 1" on the lab NIC?
+  sudo nmcli con modify "Wired connection 1" connection.autoconnect no
+  ```
+- Install the **watchdog** if you skipped the prompt — re-run `./deploy.sh`
+  and answer yes to "Install the PXE static-IP watchdog". It checks every
+  30 s and re-adds the address whenever it is missing; each restoration is
+  visible in `journalctl -t lab-ip-guard`, so you can also see *how often*
+  (and roughly when) the address is being lost.
+- Desktop machines: make sure auto-suspend is disabled (Step 1) — suspend
+  takes the NIC down with it.
 
 **NAT not working (clients can ping gateway but not internet)**
 - Check IP forwarding is on: `cat /proc/sys/net/ipv4/ip_forward` (must be `1`)
