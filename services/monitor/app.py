@@ -211,6 +211,11 @@ def get_leases():
                     mac       = parts[1].upper()
                     ip        = parts[2]
                     hostname  = parts[3] if parts[3] != '*' else '(unknown)'
+                    if ':' in ip:
+                        # DHCPv6 lease (PXE_ENABLE_IPV6=1): the line reads
+                        # <expiry> <iaid> <ipv6> <hostname> <duid> — show the
+                        # client DUID where the MAC would be.
+                        mac = parts[4].upper() if len(parts) > 4 else '(DUID unknown)'
                     remaining = expiry_ts - now
                     if expiry_ts == 0:
                         # dnsmasq writes 0 for "infinite" leases (static hosts

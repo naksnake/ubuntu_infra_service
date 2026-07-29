@@ -77,6 +77,11 @@ services:
       - PXE_LEASE_TIME=${PXE_LEASE_TIME:-12h}
       - PXE_ROUTER_IP=${PXE_ROUTER_IP}
       - DNS_SERVER=${DNS_SERVER}
+      # IPv6 on the lab segment — opt-in, IPv4-only by default (see .env.example)
+      - PXE_ENABLE_IPV6=${PXE_ENABLE_IPV6:-0}
+      - PXE_IPV6_RANGE_START=${PXE_IPV6_RANGE_START:-}
+      - PXE_IPV6_RANGE_END=${PXE_IPV6_RANGE_END:-}
+      - PXE_IPV6_PREFIX_LEN=${PXE_IPV6_PREFIX_LEN:-64}
       - WEBFS_HOST_IP=${WEBFS_HOST_IP}
       - WEBFS_PORT=${WEBFS_PORT:-8080}
       - TFTP_SERVER_IP=${TFTP_SERVER_IP}

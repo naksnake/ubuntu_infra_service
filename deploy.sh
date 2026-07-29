@@ -58,6 +58,32 @@ prompt_ip() {
   done
 }
 
+# Pragmatic IPv6 validation: hex groups, right group count, at most one '::'.
+# No embedded-IPv4 or zone-index forms — dnsmasq re-validates at startup.
+valid_ipv6() {
+  local ip="$1" g n=0
+  [[ "$ip" =~ ^[0-9A-Fa-f:]+$ && "$ip" == *:* && "$ip" != *:::* ]] || return 1
+  [[ "$(grep -o '::' <<< "$ip" | wc -l)" -le 1 ]] || return 1
+  # a lone leading/trailing colon is only valid as part of '::'
+  [[ "$ip" != :* || "$ip" == ::* ]] || return 1
+  [[ "$ip" != *: || "$ip" == *:: ]] || return 1
+  local IFS=':'
+  for g in $ip; do
+    [[ "${#g}" -le 4 ]] || return 1
+    n=$((n + 1))
+  done
+  if [[ "$ip" == *::* ]]; then (( n <= 8 )); else (( n == 8 )); fi
+}
+
+prompt_ip6() {
+  local msg="$1" def="$2" ans
+  while true; do
+    ans="$(prompt "$msg" "$def")"
+    valid_ipv6 "$ans" && { echo "$ans"; return; }
+    warn "Not a valid IPv6 address: $ans"
+  done
+}
+
 sudo_run() {
   if [[ $EUID -eq 0 ]]; then
     "$@"
@@ -225,6 +251,16 @@ WEBFS_HOST_IP=${WEBFS_HOST_IP}
 TFTP_SERVER_IP=${TFTP_SERVER_IP}
 DNS_SERVER=${DNS_SERVER}
 
+# ==== IPv6 on the lab segment ====
+# 0 = IPv4-only (default): DHCPv4 only, and the IP watchdog keeps IPv6 off on
+# PXE_IFACE. 1 = also run stateful DHCPv6 + router advertisements with the
+# range below (lab-local only — NAT/forwarding stay IPv4-only).
+PXE_ENABLE_IPV6=${PXE_ENABLE_IPV6:-0}
+PXE_ROUTER_IP6=${PXE_ROUTER_IP6:-fd00:100::1}
+PXE_IPV6_RANGE_START=${PXE_IPV6_RANGE_START:-fd00:100::10}
+PXE_IPV6_RANGE_END=${PXE_IPV6_RANGE_END:-fd00:100::200}
+PXE_IPV6_PREFIX_LEN=${PXE_IPV6_PREFIX_LEN:-64}
+
 # ==== Ports ====
 WEBFS_PORT=${WEBFS_PORT}
 WEBFS_HTTPS_PORT=${WEBFS_HTTPS_PORT:-8443}
@@ -302,6 +338,24 @@ env_wizard() {
   WEBFS_HOST_IP="$(prompt_ip "WEBFS_HOST_IP (clients reach webfs here)" "${WEBFS_HOST_IP:-192.168.100.1}")"
   TFTP_SERVER_IP="$(prompt_ip "TFTP_SERVER_IP" "${TFTP_SERVER_IP:-192.168.100.1}")"
   DNS_SERVER="$(prompt_ip "DNS_SERVER" "${DNS_SERVER:-8.8.8.8}")"
+
+  # IPv6 on the lab segment — opt-in; the default keeps the lab IPv4-only
+  # (no DHCPv6/RA, and the IP watchdog turns IPv6 off on PXE_IFACE).
+  local v6_default="N"
+  [[ "${PXE_ENABLE_IPV6:-0}" == "1" ]] && v6_default="Y"
+  if prompt_yesno "Enable IPv6 on the lab segment (DHCPv6 + router advertisements)?" "$v6_default"; then
+    PXE_ENABLE_IPV6=1
+    PXE_ROUTER_IP6="$(prompt_ip6 "PXE_ROUTER_IP6 (host's IPv6 on PXE_IFACE)" "${PXE_ROUTER_IP6:-fd00:100::1}")"
+    PXE_IPV6_RANGE_START="$(prompt_ip6 "PXE_IPV6_RANGE_START" "${PXE_IPV6_RANGE_START:-fd00:100::10}")"
+    PXE_IPV6_RANGE_END="$(prompt_ip6 "PXE_IPV6_RANGE_END" "${PXE_IPV6_RANGE_END:-fd00:100::200}")"
+    while true; do
+      PXE_IPV6_PREFIX_LEN="$(prompt "PXE_IPV6_PREFIX_LEN" "${PXE_IPV6_PREFIX_LEN:-64}")"
+      [[ "$PXE_IPV6_PREFIX_LEN" =~ ^[0-9]+$ ]] && (( PXE_IPV6_PREFIX_LEN >= 1 && PXE_IPV6_PREFIX_LEN <= 128 )) && break
+      warn "Prefix length must be a number between 1 and 128."
+    done
+  else
+    PXE_ENABLE_IPV6=0
+  fi
 
   WEBFS_PORT="$(prompt "WEBFS_PORT" "${WEBFS_PORT:-8080}")"
   IPXE_MANAGER_PORT="$(prompt "IPXE_MANAGER_PORT" "${IPXE_MANAGER_PORT:-8091}")"
@@ -610,13 +664,18 @@ enable_ip_guard() {
   # switch loses carrier or after suspend/resume, and does not always restore
   # it — DHCP/TFTP/NAT all die with it. This watchdog re-adds the address
   # within 30 seconds whenever it is missing, whatever removed it.
-  local bits cidr
+  # It also owns the interface's IPv6 policy: PXE_ADDR6 set = keep IPv6 up
+  # with that address (for DHCPv6/RA); empty = keep IPv6 off (IPv4-only lab).
+  local bits cidr addr6=""
   cidr="$(lab_cidr "${PXE_ROUTER_IP:?PXE_ROUTER_IP not set}" "${PXE_NETMASK:?PXE_NETMASK not set}")" \
     || die "Cannot derive prefix from PXE_NETMASK=${PXE_NETMASK}"
   bits="${cidr#*/}"
+  if [[ "${PXE_ENABLE_IPV6:-0}" == "1" && -n "${PXE_ROUTER_IP6:-}" ]]; then
+    addr6="${PXE_ROUTER_IP6}/${PXE_IPV6_PREFIX_LEN:-64}"
+  fi
 
-  log "Writing /etc/lab-ipguard.conf"
-  sudo_run bash -c "printf 'PXE_IFACE=%s\nPXE_ADDR=%s\n' '${PXE_IFACE:?}' '${PXE_ROUTER_IP}/${bits}' > /etc/lab-ipguard.conf"
+  log "Writing /etc/lab-ipguard.conf (IPv6: ${addr6:-off — IPv4-only})"
+  sudo_run bash -c "printf 'PXE_IFACE=%s\nPXE_ADDR=%s\nPXE_ADDR6=%s\n' '${PXE_IFACE:?}' '${PXE_ROUTER_IP}/${bits}' '${addr6}' > /etc/lab-ipguard.conf"
 
   local tmp; tmp="$(mktemp)"
   cat > "$tmp" <<'IPGUARD'
@@ -635,6 +694,32 @@ ip link set dev "$PXE_IFACE" up 2>/dev/null || true
 if ! ip -4 addr show dev "$PXE_IFACE" | grep -qF "inet ${PXE_ADDR%/*}/"; then
   ip addr add "$PXE_ADDR" dev "$PXE_IFACE" 2>/dev/null || true
   logger -t lab-ip-guard "re-added ${PXE_ADDR} on ${PXE_IFACE} (address was missing)" 2>/dev/null || true
+fi
+
+# IPv6 policy. PXE_ADDR6 empty means the lab is IPv4-only: keep IPv6 fully
+# disabled on the NIC so nothing (not even link-local) answers over v6.
+# PXE_ADDR6 set means dual-stack: keep IPv6 on and the router address present
+# (dnsmasq needs an address inside the DHCPv6 prefix to serve it).
+# Written via /proc, not `sysctl -w`: sysctl mangles interface names that
+# contain dots (VLAN interfaces like eth0.100).
+V6KNOB="/proc/sys/net/ipv6/conf/${PXE_IFACE}/disable_ipv6"
+if [ -e "$V6KNOB" ]; then
+  if [ -z "${PXE_ADDR6:-}" ]; then
+    if [ "$(cat "$V6KNOB")" != "1" ]; then
+      echo 1 > "$V6KNOB" 2>/dev/null || true
+      logger -t lab-ip-guard "disabled IPv6 on ${PXE_IFACE} (lab is IPv4-only)" 2>/dev/null || true
+    fi
+  else
+    if [ "$(cat "$V6KNOB")" != "0" ]; then
+      echo 0 > "$V6KNOB" 2>/dev/null || true
+      logger -t lab-ip-guard "enabled IPv6 on ${PXE_IFACE}" 2>/dev/null || true
+    fi
+    # exact-address match (/128) — `to` also canonicalizes textual forms
+    if [ -z "$(ip -6 addr show dev "$PXE_IFACE" to "${PXE_ADDR6%/*}/128" 2>/dev/null)" ]; then
+      ip addr add "$PXE_ADDR6" dev "$PXE_IFACE" 2>/dev/null || true
+      logger -t lab-ip-guard "re-added ${PXE_ADDR6} on ${PXE_IFACE} (address was missing)" 2>/dev/null || true
+    fi
+  fi
 fi
 IPGUARD
   sudo_run install -m 0755 "$tmp" /usr/local/sbin/lab-ip-guard.sh
@@ -773,6 +858,11 @@ main() {
   echo "Monitor:       http://${WEBFS_HOST_IP:-<host>}:${MONITOR_PORT:-8090}/   (service health + DHCP leases)"
   echo "Control Panel: http://${WEBFS_HOST_IP:-<host>}:${CCP_PORT:-8060}/   (ClusterShell + Ansible, login: ${CCP_ADMIN_USER:-admin})"
   echo
+  if [[ "${PXE_ENABLE_IPV6:-0}" == "1" ]]; then
+    log "Lab IPv6: ENABLED — DHCPv6 range ${PXE_IPV6_RANGE_START:-?} – ${PXE_IPV6_RANGE_END:-?} (router ${PXE_ROUTER_IP6:-?})."
+  else
+    log "Lab IPv6: disabled — the lab segment is served over IPv4 only (PXE_ENABLE_IPV6=0)."
+  fi
   warn "Reminder: DHCP is running on PXE_IFACE=${PXE_IFACE:-<PXE_IFACE>}. Ensure no other DHCP server exists on that lab segment."
 }
 
