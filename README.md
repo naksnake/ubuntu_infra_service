@@ -577,10 +577,13 @@ To grow (or move) the pool **within the same subnet**, you do not need to
 restart the full stack — only the DHCP container is recycled:
 
 ```bash
-# With arguments:
+# IPv4 pool:
 ./update-dhcp-range.sh 192.168.100.10 192.168.100.250
 
-# Interactive:
+# IPv6 pool (used when PXE_ENABLE_IPV6=1 — the family is auto-detected):
+./update-dhcp-range.sh fd00:100::10 fd00:100::4ff
+
+# Interactive (IPv4, plus IPv6 when it is enabled):
 ./update-dhcp-range.sh
 ```
 
@@ -623,7 +626,9 @@ immediately, or wait up to 30 s for the watchdog timer). dnsmasq then runs
 stateful DHCPv6 and router advertisements on the lab interface; v6 leases
 appear in the same Monitor lease table with the client DUID in the MAC
 column. The `fd00::/8` prefix is private ULA space — pick your own random
-prefix (RFC 4193) if this lab ever connects to another network.
+prefix (RFC 4193) if this lab ever connects to another network. To change
+the v6 pool later, `./update-dhcp-range.sh fd00:100::10 fd00:100::4ff`
+updates `.env` and recycles only the DHCP container.
 
 Notes:
 - **Lab IPv6 stays lab-local.** NAT and forwarding remain IPv4-only, so v6
