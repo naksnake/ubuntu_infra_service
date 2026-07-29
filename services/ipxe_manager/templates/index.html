@@ -65,9 +65,23 @@ header span { color: var(--muted); font-size: 12px; }
 .file-list { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
 .file-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: #0d1117; border: 1px solid var(--border); border-radius: var(--radius); }
 .file-row .file-icon { font-size: 16px; flex-shrink: 0; }
-.file-row .file-name { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row .file-name { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--text); word-break: break-all; min-width: 0; }
 .file-row .file-size { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .file-row .file-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.file-row.in-group { margin-left: 24px; }
+/* one collapsible header per folder, so a deep share stays scannable */
+.file-group-head { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: #10151d; border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; user-select: none; }
+.file-group-head:hover { border-color: var(--accent); }
+.file-group-head.static { cursor: default; }
+.file-group-head.static:hover { border-color: var(--border); }
+.file-group-head .chev { color: var(--muted); width: 12px; flex-shrink: 0; font-size: 11px; transition: transform .15s; }
+.file-group-head .chev.open { transform: rotate(90deg); }
+.file-group-head .g-name { flex: 1; font-family: var(--mono); font-size: 12px; font-weight: 600; word-break: break-all; min-width: 0; }
+.file-group-head .g-meta { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.file-filter { background: #0d1117; border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: var(--mono); font-size: 12px; padding: 5px 10px; outline: none; width: 240px; max-width: 45vw; transition: border-color .15s; }
+.file-filter:focus { border-color: var(--accent); }
+.count-chip { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 6px; }
+mark { background: rgba(79,195,247,.3); color: inherit; border-radius: 3px; padding: 0 1px; }
 
 /* ── entry list ── */
 .entry-list { display: flex; flex-direction: column; gap: 8px; }
@@ -183,8 +197,11 @@ header span { color: var(--muted); font-size: 12px; }
 
     <div class="section">
       <div class="section-head">
-        <h2>Uploaded Files</h2>
-        <button class="btn btn-ghost btn-sm" onclick="loadFiles()">&#8635; Refresh</button>
+        <h2>Uploaded Files<span class="count-chip" id="fileCount"></span></h2>
+        <div class="row">
+          <input id="fileFilter" class="file-filter" type="search" placeholder="Filter files &amp; folders…" autocomplete="off">
+          <button class="btn btn-ghost btn-sm" onclick="loadFiles()">&#8635; Refresh</button>
+        </div>
       </div>
       <div class="section-body" style="padding-top:10px">
         <div id="fileList"><div class="empty"><span class="icon">&#128193;</span>No files yet</div></div>
@@ -414,19 +431,97 @@ function fileIcon(name) {
   return '📄';
 }
 
-function renderFiles() {
-  const el = document.getElementById('fileList');
-  if (!_files.length) { el.innerHTML = '<div class="empty"><span class="icon">📁</span>No files uploaded yet</div>'; return; }
-  el.innerHTML = _files.map(f => `
-    <div class="file-row">
+// ── grouped file list: every folder collapses into one summary row, loose
+//    root files interleave alphabetically so an ISO sits right next to the
+//    folder extracted from it. Open/filter state lives in sessionStorage so
+//    it survives a page reload. ──
+const FILES_OPEN_KEY = 'ipxe.files.open', FILES_QUERY_KEY = 'ipxe.files.q';
+let _openDirs = new Set();
+try { _openDirs = new Set(JSON.parse(sessionStorage.getItem(FILES_OPEN_KEY) || '[]')); } catch {}
+const fileFilter = document.getElementById('fileFilter');
+fileFilter.value = sessionStorage.getItem(FILES_QUERY_KEY) || '';
+fileFilter.addEventListener('input', () => {
+  sessionStorage.setItem(FILES_QUERY_KEY, fileFilter.value);
+  renderFiles();
+});
+
+function saveOpenDirs() { sessionStorage.setItem(FILES_OPEN_KEY, JSON.stringify([..._openDirs])); }
+function toggleDir(d) {
+  if (_openDirs.has(d)) _openDirs.delete(d); else _openDirs.add(d);
+  saveOpenDirs();
+  renderFiles();
+}
+
+// escaped HTML with every case-insensitive match of the filter highlighted
+function hl(text, q) {
+  if (!q) return escHtml(text);
+  let out = '', i = 0;
+  const lower = text.toLowerCase();
+  for (let at = lower.indexOf(q); at !== -1; at = lower.indexOf(q, i)) {
+    out += escHtml(text.slice(i, at)) + '<mark>' + escHtml(text.slice(at, at + q.length)) + '</mark>';
+    i = at + q.length;
+  }
+  return out + escHtml(text.slice(i));
+}
+
+function fileRowHtml(f, q, inGroup) {
+  const base = f.name.slice(f.name.lastIndexOf('/') + 1);
+  return `
+    <div class="file-row${inGroup ? ' in-group' : ''}">
       <span class="file-icon">${fileIcon(f.name)}</span>
-      <span class="file-name" title="${escHtml(f.url)}">${escHtml(f.name)}</span>
+      <span class="file-name" title="${escHtml(f.url)}">${hl(base, q)}</span>
       <span class="file-size">${fmtSize(f.size)}</span>
       <div class="file-actions">
         <button class="btn btn-ghost btn-sm" onclick="copyText('${escJs(f.url)}')" title="Copy URL">&#128203;</button>
         <button class="btn btn-danger btn-sm" onclick="deleteFile('${escJs(f.name)}')">&#128465;</button>
       </div>
-    </div>`).join('');
+    </div>`;
+}
+
+function renderFiles() {
+  const el = document.getElementById('fileList');
+  const countEl = document.getElementById('fileCount');
+  const q = fileFilter.value.trim().toLowerCase();
+  if (!_files.length) {
+    countEl.textContent = '';
+    el.innerHTML = '<div class="empty"><span class="icon">📁</span>No files uploaded yet</div>';
+    return;
+  }
+  const shown = q ? _files.filter(f => f.name.toLowerCase().includes(q)) : _files;
+  countEl.textContent = q ? `${shown.length} / ${_files.length}` : `${_files.length}`;
+  if (!shown.length) {
+    el.innerHTML = `<div class="empty"><span class="icon">🔍</span>No files match “${escHtml(fileFilter.value.trim())}”</div>`;
+    return;
+  }
+  // bucket by containing folder ('' = share root)
+  const dirs = new Map();
+  for (const f of shown) {
+    const cut = f.name.lastIndexOf('/');
+    const d = cut === -1 ? '' : f.name.slice(0, cut);
+    if (!dirs.has(d)) dirs.set(d, []);
+    dirs.get(d).push(f);
+  }
+  const items = [];
+  for (const [d, fs] of dirs) {
+    if (d === '') fs.forEach(f => items.push({ label: f.name, file: f }));
+    else items.push({ label: d, dir: d, files: fs.sort((a, b) => a.name.localeCompare(b.name)) });
+  }
+  items.sort((a, b) => a.label.localeCompare(b.label));
+
+  const out = [];
+  for (const it of items) {
+    if (it.file) { out.push(fileRowHtml(it.file, q, false)); continue; }
+    const open = q ? true : _openDirs.has(it.dir);   // the filter looks inside every folder
+    const total = it.files.reduce((s, f) => s + f.size, 0);
+    out.push(`
+      <div class="file-group-head${q ? ' static' : ''}"${q ? '' : ` onclick="toggleDir('${escJs(it.dir)}')"`}>
+        <span class="chev${open ? ' open' : ''}">&#9656;</span>
+        <span class="g-name">${hl(it.dir, q)}/</span>
+        <span class="g-meta">${it.files.length} file${it.files.length === 1 ? '' : 's'} · ${fmtSize(total)}</span>
+      </div>`);
+    if (open) it.files.forEach(f => out.push(fileRowHtml(f, q, true)));
+  }
+  el.innerHTML = `<div class="file-list" style="margin-top:4px">${out.join('')}</div>`;
 }
 
 function populateFileDatalist() {
@@ -459,6 +554,8 @@ function uploadOne(file) {
       bar.style.display = 'none';
       if (xhr.status === 201) {
         let j = {}; try { j = JSON.parse(xhr.responseText); } catch {}
+        // unfold the extraction folder so the new vmlinuz/initrd are visible
+        if (j.extracted && j.extracted.folder) { _openDirs.add(j.extracted.folder); saveOpenDirs(); }
         if (j.kernel_entry) toast('Uploaded ' + file.name + ' — extracted kernel+initrd to ' + j.extracted.folder + '/ and added a boot entry (disabled)');
         else if (file.name.toLowerCase().endsWith('.iso')) toast('Uploaded ' + file.name + ' — no kernel+initrd pair found inside, add an entry manually');
         else toast('Uploaded ' + file.name);
