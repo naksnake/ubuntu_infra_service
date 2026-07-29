@@ -6,6 +6,8 @@ log-dhcp
 log-facility=-
 
 dhcp-leasefile=/data/dnsmasq.leases
+# DHCPv4 pool. The lab is IPv4-only by default; with PXE_ENABLE_IPV6=1 the
+# entrypoint appends a DHCPv6 dhcp-range + enable-ra after rendering this.
 dhcp-range=${PXE_RANGE_START},${PXE_RANGE_END},${PXE_NETMASK},${PXE_LEASE_TIME}
 
 # Fixed IP-to-MAC reservations (one per line: <mac>,<ip>[,<hostname>][,<lease>]).

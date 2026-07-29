@@ -55,6 +55,25 @@
   .badge.space{background:rgba(56,189,248,.12);color:var(--accent);text-transform:none}
   .btn-del{background:transparent;border:1px solid var(--border);color:var(--red);font-weight:500}
   .btn-del:hover{background:rgba(239,68,68,.1);border-color:var(--red)}
+
+  /* file server table: folders fold into one summary row, long names wrap */
+  .files-table td{padding:7px 14px}
+  .files-table td.name{white-space:normal;word-break:break-all}
+  .files-table td.name .dim{color:var(--muted)}
+  .files-table td.name strong{font-weight:500}
+  .files-table td.name.in-group{padding-left:36px}
+  .files-table .size-col{text-align:right;white-space:nowrap}
+  .files-table td.size-col{color:var(--muted);font-size:12px}
+  .files-table .actions{white-space:nowrap;text-align:right}
+  .files-table .actions .btn{padding:3px 9px;font-size:11px;opacity:.65;transition:opacity .15s}
+  .files-table tr:hover .actions .btn{opacity:1}
+  .group-row td{background:rgba(255,255,255,.025);cursor:pointer;user-select:none}
+  .group-row:hover td{background:rgba(56,189,248,.06)}
+  .group-row.static td{cursor:default}
+  .group-row .chev{display:inline-block;width:16px;color:var(--muted);transition:transform .15s}
+  .group-row .chev.open{transform:rotate(90deg)}
+  .group-row .count{margin:0 4px}
+  mark{background:rgba(56,189,248,.3);color:inherit;border-radius:3px;padding:0 1px}
   .upload-card{cursor:pointer;border-style:dashed}
   .upload-card.drag{border-color:var(--accent);background:rgba(56,189,248,.06)}
   .upload-card .ok{color:var(--green)}.upload-card .err{color:var(--red)}
@@ -76,8 +95,8 @@
   tr.expired td{color:var(--muted)}
   .empty{text-align:center;color:var(--muted);padding:32px}
   .search-wrap{margin-bottom:10px}
-  #search{width:100%;max-width:360px;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;font-size:13px;outline:none}
-  #search:focus{border-color:var(--accent)}
+  input.search{width:100%;max-width:360px;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;font-size:13px;outline:none}
+  input.search:focus{border-color:var(--accent)}
   .error-banner{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:#fca5a5;padding:10px 14px;border-radius:6px;margin-bottom:12px;font-size:12px}
   #progress-bar{position:fixed;top:0;left:0;height:3px;background:var(--accent);transition:width 1s linear;z-index:100}
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}

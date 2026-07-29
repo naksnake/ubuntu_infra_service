@@ -181,6 +181,13 @@ WEBFS_HOST_IP=192.168.100.1      # same as PXE_ROUTER_IP
 TFTP_SERVER_IP=192.168.100.1     # same as PXE_ROUTER_IP
 DNS_SERVER=8.8.8.8
 
+# ---- IPv6 (optional; the lab is IPv4-only when 0) ----
+PXE_ENABLE_IPV6=0                # 1 = also serve DHCPv6 + router advertisements
+PXE_ROUTER_IP6=fd00:100::1       # host's IPv6 on PXE_IFACE (assigned by the IP watchdog)
+PXE_IPV6_RANGE_START=fd00:100::10
+PXE_IPV6_RANGE_END=fd00:100::200
+PXE_IPV6_PREFIX_LEN=64
+
 # ---- Ports ----
 WEBFS_PORT=8080
 IPXE_MANAGER_PORT=8091
@@ -570,10 +577,13 @@ To grow (or move) the pool **within the same subnet**, you do not need to
 restart the full stack — only the DHCP container is recycled:
 
 ```bash
-# With arguments:
+# IPv4 pool:
 ./update-dhcp-range.sh 192.168.100.10 192.168.100.250
 
-# Interactive:
+# IPv6 pool (used when PXE_ENABLE_IPV6=1 — the family is auto-detected):
+./update-dhcp-range.sh fd00:100::10 fd00:100::4ff
+
+# Interactive (IPv4, plus IPv6 when it is enabled):
 ./update-dhcp-range.sh
 ```
 
@@ -593,6 +603,42 @@ widen the subnet itself, e.g. to a /23 (`192.168.100.0–192.168.101.255`,
 3. Re-render and restart DHCP: `docker compose up -d --force-recreate dhcp`.
 4. Clients pick the new mask up as their leases renew; reboot or re-plug a
    client to force it immediately.
+
+### IPv6 on the lab segment (optional)
+
+The lab is **IPv4-only by default**: `PXE_ENABLE_IPV6=0` means dnsmasq serves
+DHCPv4 only, and the PXE IP watchdog keeps IPv6 switched off on `PXE_IFACE`
+entirely — lab machines get no v6 path to the server, not even link-local.
+
+To hand out IPv6 addresses too, set in `.env`:
+
+```ini
+PXE_ENABLE_IPV6=1
+PXE_ROUTER_IP6=fd00:100::1        # host's IPv6 on the lab NIC
+PXE_IPV6_RANGE_START=fd00:100::10 # first DHCPv6 address
+PXE_IPV6_RANGE_END=fd00:100::200  # last DHCPv6 address
+PXE_IPV6_PREFIX_LEN=64
+```
+
+then apply with `docker compose up -d --force-recreate dhcp` (plus
+`sudo systemctl start lab-ip-guard.service` to assign `PXE_ROUTER_IP6`
+immediately, or wait up to 30 s for the watchdog timer). dnsmasq then runs
+stateful DHCPv6 and router advertisements on the lab interface; v6 leases
+appear in the same Monitor lease table with the client DUID in the MAC
+column. The `fd00::/8` prefix is private ULA space — pick your own random
+prefix (RFC 4193) if this lab ever connects to another network. To change
+the v6 pool later, `./update-dhcp-range.sh fd00:100::10 fd00:100::4ff`
+updates `.env` and recycles only the DHCP container.
+
+Notes:
+- **Lab IPv6 stays lab-local.** NAT and forwarding remain IPv4-only, so v6
+  never becomes a route around the IPv4 firewall; clients reach the internet
+  via IPv4 exactly as before.
+- If you skipped the IP watchdog during deploy, assign the address yourself:
+  `sudo ip addr add fd00:100::1/64 dev <PXE_IFACE>` — without an address in
+  the DHCPv6 prefix on that interface, dnsmasq ignores the v6 range.
+- PXE network boot keeps using IPv4; the v6 addresses are for the installed
+  systems and lab-internal traffic.
 
 ---
 
@@ -817,7 +863,9 @@ as equivalent to console access: use a dedicated, physically controlled
 switch (or an isolated VLAN), use strong `mkpasswd -m sha-512` hashes and
 rotate the first-boot password, and give humans the HTTPS listener
 (`COMPOSE_PROFILES=https`) for browsing the share. IPv6 is not a bypass:
-forwarding is enabled for IPv4 only.
+by default it is disabled on the lab interface altogether
+(`PXE_ENABLE_IPV6=0`), and even when enabled, NAT and forwarding stay
+IPv4-only.
 
 ---
 
