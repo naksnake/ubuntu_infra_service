@@ -37,9 +37,12 @@
     <code>{{ monitor_space }}/</code> space{% if cur_role == 'admin' %}; <strong>Remove</strong> deletes a file from
     the file server (an ISO's extracted kernel/initrd folder goes with it){% endif %}.
   </p>
+  <div class="search-wrap">
+    <input id="fileSearch" class="search" type="search" placeholder="Filter files — name or folder…" autocomplete="off">
+  </div>
   <div class="table-wrap">
-    <table>
-      <thead><tr><th>File</th><th>Size</th><th style="width:1%"></th></tr></thead>
+    <table class="files-table">
+      <thead><tr><th>File</th><th class="size-col">Size</th><th style="width:1%"></th></tr></thead>
       <tbody id="filesBody"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody>
     </table>
   </div>
@@ -73,7 +76,7 @@
   <h2>DHCP Leases <span class="count" id="lease-count">{{ leases|length }}</span></h2>
   {% if l_err %}<div class="error-banner">{{ l_err }}</div>{% endif %}
   <div class="search-wrap">
-    <input id="search" type="search" placeholder="Search IP, MAC, hostname…" autocomplete="off" oninput="filterLeases()">
+    <input id="search" class="search" type="search" placeholder="Search IP, MAC, hostname…" autocomplete="off" oninput="filterLeases()">
   </div>
   <div class="table-wrap">
     <table id="leases-table">
@@ -113,9 +116,14 @@
   let remaining = TOTAL;
   let uploading = false;    // pause the auto-refresh so it can't kill an upload
   let pickerOpen = false;   // …or reload behind the open file-picker dialog
+  let typing = false;       // …or eat what's being typed into a search box
+  document.querySelectorAll('input.search').forEach(el => {
+    el.addEventListener('focus', () => { typing = true; });
+    el.addEventListener('blur',  () => { typing = false; });
+  });
   barEl.style.width = '0%';
   setInterval(() => {
-    if (uploading || pickerOpen) return;
+    if (uploading || pickerOpen || typing) return;
     remaining--;
     if (remaining <= 0) { location.reload(); return; }
     countEl.textContent = remaining;
@@ -178,7 +186,9 @@
         upInput.value = '';
         remaining = TOTAL;   // fresh countdown so the result stays readable
         setTimeout(() => setStatus(IDLE_MSG), TOTAL * 1000);
-        loadShareFiles();    // show the new file(s) right away
+        openGroups.add(MON_TOP);   // unfold the monitor folder…
+        saveOpenGroups();
+        loadShareFiles();          // …and show the new file(s) right away
       }
     }
 
@@ -223,6 +233,7 @@
   }
 
   const MON_SPACE = {{ (monitor_space + '/') | tojson }};
+  const MON_TOP = MON_SPACE.split('/')[0];   // top-level folder of the monitor's space
   const WEBFS_PORT = {{ webfs_port | tojson }};
 
   // Build the download link from how THIS browser reaches the server (same
@@ -261,28 +272,111 @@
       feedback(fallback());
     }
   }
+  // ── grouped file list: each top-level folder collapses into one summary
+  //    row so a big share stays scannable. Open/closed state and the filter
+  //    text live in sessionStorage because this page reloads itself every
+  //    refresh interval and would otherwise forget them. ──
+  const FILES_OPEN_KEY = 'monitor.files.open', FILES_QUERY_KEY = 'monitor.files.q';
+  let allFiles = [];
+  let openGroups = new Set();
+  try { openGroups = new Set(JSON.parse(sessionStorage.getItem(FILES_OPEN_KEY) || '[]')); } catch {}
+  const fileSearch = document.getElementById('fileSearch');
+  fileSearch.value = sessionStorage.getItem(FILES_QUERY_KEY) || '';
+  fileSearch.addEventListener('input', () => {
+    sessionStorage.setItem(FILES_QUERY_KEY, fileSearch.value);
+    renderFiles();
+  });
+
+  function saveOpenGroups() { sessionStorage.setItem(FILES_OPEN_KEY, JSON.stringify([...openGroups])); }
+  function toggleGroup(g) {
+    if (openGroups.has(g)) openGroups.delete(g); else openGroups.add(g);
+    saveOpenGroups();
+    renderFiles();
+  }
+
+  // escaped HTML with every case-insensitive match of the filter highlighted
+  function hl(text, q) {
+    if (!q) return escHtml(text);
+    let out = '', i = 0;
+    const lower = text.toLowerCase();
+    for (let at = lower.indexOf(q); at !== -1; at = lower.indexOf(q, i)) {
+      out += escHtml(text.slice(i, at)) + '<mark>' + escHtml(text.slice(at, at + q.length)) + '</mark>';
+      i = at + q.length;
+    }
+    return out + escHtml(text.slice(i));
+  }
+
+  // "sub/dir/" dimmed, file name emphasized; long names wrap in place
+  // instead of forcing the whole table to scroll sideways
+  function nameHtml(rel, q) {
+    const cut = rel.lastIndexOf('/');
+    const dir = cut === -1 ? '' : rel.slice(0, cut + 1);
+    return (dir ? `<span class="dim">${hl(dir, q)}</span>` : '') + `<strong>${hl(rel.slice(cut + 1), q)}</strong>`;
+  }
+
+  function renderFiles() {
+    const body = document.getElementById('filesBody');
+    const q = fileSearch.value.trim().toLowerCase();
+    if (!allFiles.length) {
+      document.getElementById('fileCount').textContent = 0;
+      body.innerHTML = '<tr><td colspan="3" class="empty">No files on the file server yet — use the upload card above</td></tr>';
+      return;
+    }
+    const shown = q ? allFiles.filter(f => f.name.toLowerCase().includes(q)) : allFiles;
+    document.getElementById('fileCount').textContent = q ? `${shown.length} / ${allFiles.length}` : allFiles.length;
+    if (!shown.length) {
+      body.innerHTML = `<tr><td colspan="3" class="empty">No files match “${escHtml(fileSearch.value.trim())}”</td></tr>`;
+      return;
+    }
+    // bucket by top-level folder; '' collects files sitting in the share root
+    const buckets = new Map();
+    for (const f of shown) {
+      const cut = f.name.indexOf('/');
+      const g = cut === -1 ? '' : f.name.slice(0, cut);
+      if (!buckets.has(g)) buckets.set(g, []);
+      buckets.get(g).push(f);
+    }
+    const order = [...buckets.keys()].sort((a, b) =>
+      (b === MON_TOP) - (a === MON_TOP) ||   // dashboard's own uploads first
+      (a === '') - (b === '') ||             // loose root files last
+      a.localeCompare(b));
+    const rows = [];
+    for (const g of order) {
+      const files = buckets.get(g).sort((a, b) => a.name.localeCompare(b.name));
+      const open = q ? true : openGroups.has(g);   // the filter looks inside every folder
+      const total = files.reduce((s, f) => s + f.size, 0);
+      rows.push(`
+        <tr class="group-row${q ? ' static' : ''}"${q ? '' : ` onclick="toggleGroup('${escJs(g)}')"`}>
+          <td class="name"><span class="chev${open ? ' open' : ''}">&#9656;</span>${g ? hl(g, q) + '/' : '<span class="dim">share root</span>'}
+            <span class="count">${files.length}</span>${g === MON_TOP ? ' <span class="badge space">monitor</span>' : ''}</td>
+          <td class="size-col">${fmtSize(total)}</td>
+          <td></td>
+        </tr>`);
+      if (!open) continue;
+      for (const f of files) {
+        const rel = g ? f.name.slice(g.length + 1) : f.name;
+        rows.push(`
+        <tr>
+          <td class="name in-group">${nameHtml(rel, q)}</td>
+          <td class="size-col">${fmtSize(f.size)}</td>
+          <td class="actions">
+            <button class="btn btn-ghost" onclick="copyText(fileUrl('${escJs(f.name)}'), this)" title="${escHtml(fileUrl(f.name))}">Copy URL</button>
+            ${IS_ADMIN ? `<button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
+          </td>
+        </tr>`);
+      }
+    }
+    body.innerHTML = rows.join('');
+  }
+
   async function loadShareFiles() {
     const body = document.getElementById('filesBody');
     try {
       const r = await fetch('/api/files');
       const files = await r.json();
       if (!r.ok) throw new Error(files.error || r.status);
-      document.getElementById('fileCount').textContent = files.length;
-      if (!files.length) {
-        body.innerHTML = '<tr><td colspan="3" class="empty">No files on the file server yet — use the upload card above</td></tr>';
-        return;
-      }
-      // monitor's own space first, then everything else, alphabetical
-      files.sort((a, b) => (b.name.startsWith(MON_SPACE) - a.name.startsWith(MON_SPACE)) || a.name.localeCompare(b.name));
-      body.innerHTML = files.map(f => `
-        <tr>
-          <td><code>${escHtml(f.name)}</code>${f.name.startsWith(MON_SPACE) ? ' <span class="badge space">monitor</span>' : ''}</td>
-          <td style="color:var(--muted)">${fmtSize(f.size)}</td>
-          <td style="white-space:nowrap;text-align:right">
-            <button class="btn btn-ghost" onclick="copyText(fileUrl('${escJs(f.name)}'), this)" title="${escHtml(fileUrl(f.name))}">Copy URL</button>
-            ${IS_ADMIN ? `<button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
-          </td>
-        </tr>`).join('');
+      allFiles = files;
+      renderFiles();
     } catch (e) {
       document.getElementById('fileCount').textContent = '!';
       body.innerHTML = `<tr><td colspan="3" class="empty">File server list unavailable — ${escHtml(e.message)}</td></tr>`;
