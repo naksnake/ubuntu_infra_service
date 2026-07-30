@@ -133,6 +133,28 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # ── Docker API proxy (read-only, for the monitor) ─────────────────────────
+  # The monitor must never hold the raw docker.sock: the socket's API is
+  # root-equivalent on the host regardless of a :ro mount (ro only protects
+  # the socket file, not what the API will do), and the monitor also carries
+  # the CCP/iPXE-Manager admin credentials in its environment. This HAProxy
+  # proxy exposes exactly the read-only endpoints the dashboard uses —
+  # container list/inspect and image name lookup — and denies everything
+  # else (POST/DELETE, exec, volumes, networks, ...). It lives on an
+  # internal-only network that just the monitor can reach.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    container_name: lab_docker_proxy
+    environment:
+      - CONTAINERS=1   # GET /containers/* (list + inspect)
+      - IMAGES=1       # GET /images/*    (dashboard shows image names)
+      - POST=0         # no write methods, ever
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker-api
+    restart: unless-stopped
+
   # ── Monitor dashboard (service health + DHCP lookup) ──────────────────────
   monitor:
     build: ./services/monitor
@@ -140,9 +162,16 @@ services:
     ports:
       - "${UI_BIND:-0.0.0.0}:${MONITOR_PORT:-8090}:8090"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./data/dnsmasq.leases:/data/dnsmasq.leases:ro
+    networks:
+      - default
+      - docker-api
+    depends_on:
+      - docker-socket-proxy
     environment:
+      # container status comes through the read-only socket proxy above —
+      # docker.from_env() honors DOCKER_HOST, no code change needed
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
       - LEASES_FILE=/data/dnsmasq.leases
       - REFRESH_INTERVAL=${MONITOR_REFRESH:-30}
       # ports for the dashboard quick-links (host-relative in the browser)
@@ -201,3 +230,9 @@ services:
       retries: 3
       start_period: 8s
     restart: unless-stopped
+
+networks:
+  # carries only monitor→docker-socket-proxy traffic; internal: no route out,
+  # and no other container joins it
+  docker-api:
+    internal: true

@@ -8,6 +8,7 @@ reachable SSH hosts; conn='ssh' nodes are executed in parallel through
 ClusterShell (shell jobs) or ansible-playbook (playbook jobs).
 """
 import os
+import re
 import json
 import time
 import shlex
@@ -79,7 +80,7 @@ def _run(job_id, kind, spec):
 # ── shell / ClusterShell ─────────────────────────────────────────────────────
 
 def _run_shell(job_id, spec, log):
-    nodes = _resolve_nodes(spec.get('node_ids', []))
+    nodes = _resolve_nodes(spec.get('node_ids', []), log)
     command = spec.get('command', '')
     if not nodes:
         log.write('[ccp] no target nodes resolved\n')
@@ -156,7 +157,7 @@ def _run_shell_clustershell(remote, command, log):
 # ── ansible ──────────────────────────────────────────────────────────────────
 
 def _run_ansible(job_id, spec, log):
-    nodes = _resolve_nodes(spec.get('node_ids', []))
+    nodes = _resolve_nodes(spec.get('node_ids', []), log)
     playbook = spec.get('playbook', '')
     extra_vars = spec.get('extra_vars', '')
     if not nodes:
@@ -217,9 +218,34 @@ def _run_ansible(job_id, spec, log):
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _resolve_nodes(node_ids):
+# Node fields end up in a ClusterShell NodeSet and an Ansible inventory file
+# (whitespace, newlines, '=' or NodeSet brackets there would inject arbitrary
+# inventory variables/hosts). The API validates them on insert, but the SQLite
+# db sits on a host bind mount, so rows can be written outside the API —
+# re-check here and refuse to run against anything that doesn't conform.
+_SAFE_NAME = re.compile(r'[A-Za-z0-9._-]{1,63}\Z')
+_SAFE_ADDR = re.compile(r'[A-Za-z0-9._:-]{1,255}\Z')
+_SAFE_USER = re.compile(r'[A-Za-z0-9._-]{1,32}\Z')
+
+
+def _resolve_nodes(node_ids, log=None):
     if not node_ids:
         return []
     marks = ','.join('?' for _ in node_ids)
     rows = db.query(f'SELECT * FROM nodes WHERE id IN ({marks})', tuple(node_ids))
-    return [dict(r) for r in rows]
+    nodes = []
+    for r in rows:
+        n = dict(r)
+        try:
+            port_ok = 1 <= int(n.get('ssh_port') or 0) <= 65535
+        except (TypeError, ValueError):
+            port_ok = False
+        if (_SAFE_NAME.fullmatch(str(n.get('name') or ''))
+                and _SAFE_ADDR.fullmatch(str(n.get('address') or ''))
+                and _SAFE_USER.fullmatch(str(n.get('ssh_user') or ''))
+                and port_ok):
+            nodes.append(n)
+        elif log:
+            log.write(f'[ccp] skipping node id={n.get("id")} '
+                      f'({n.get("name")!r}): unsafe name/address/user/port\n')
+    return nodes

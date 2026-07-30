@@ -49,6 +49,7 @@ run commands/playbooks across your nodes, and `http://192.168.100.1:8090/`
 | Cluster Control Panel | `lab_ccp` | Web UI: run ClusterShell commands + Ansible playbooks across nodes, with login/RBAC, job history, script repo, and audit log |
 | NAT | systemd `lab-nat` | Lets lab clients reach the internet via the host |
 | Monitor | `lab_monitor` | Web dashboard: service health, DHCP lease lookup, file upload to the share |
+| Docker API proxy | `lab_docker_proxy` | Read-only Docker API for the monitor (the raw socket is never mounted into a web-facing container) |
 
 ---
 
@@ -251,12 +252,13 @@ persistent, self-healing lab.
 ```bash
 docker ps
 ```
-Expected output — all six containers should show `Up`:
+Expected output — all seven containers should show `Up`:
 ```
 CONTAINER ID   IMAGE                STATUS                     NAMES
 ...            lab_ipxe_manager     Up X minutes (healthy)     lab_ipxe_manager
 ...            lab_ccp              Up X minutes (healthy)     lab_ccp
 ...            lab_monitor          Up X minutes (healthy)     lab_monitor
+...            lab_docker_proxy     Up X minutes               lab_docker_proxy
 ...            lab_webfs            Up X minutes (healthy)     lab_webfs
 ...            lab_dhcp             Up X minutes (healthy)     lab_dhcp
 ...            lab_tftp             Up X minutes (healthy)     lab_tftp
@@ -829,6 +831,26 @@ machine that PXE-boots.
 > protect them — use `UI_BIND` instead. ufw still works for host-network
 > services: a good baseline is `default deny incoming`, `allow in on
 > <PXE_IFACE>`, and SSH allowed only from your admin network.
+
+### Container privilege boundaries
+
+- **No web-facing container holds the Docker socket.** The monitor's Services
+  table needs container status, but the raw `docker.sock` API is
+  root-equivalent on the host (a `:ro` mount only protects the socket *file*,
+  not what the API will do). The dashboard therefore talks to
+  `lab_docker_proxy` — an HAProxy-based filter
+  ([tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy))
+  that permits exactly the read-only container/image endpoints the dashboard
+  uses and denies everything else. The proxy lives on an `internal:`
+  compose network that only the monitor can reach, so a compromised container
+  elsewhere in the stack (or a bug in the monitor itself) cannot escalate
+  through the Docker API to the host or to other containers' credentials.
+- **The CCP job runner re-validates node rows before use.** Node
+  names/addresses/SSH users are allowlist-checked at the API when added *and*
+  again inside the executor before they are written into a ClusterShell
+  invocation or a generated Ansible inventory — a database row edited outside
+  the API (the SQLite file lives on a host bind mount) is skipped with a note
+  in the job log instead of executed.
 
 ### Login protection & sessions
 
