@@ -19,7 +19,11 @@
     </a>
     {% endfor %}
     {% if cur_role == 'admin' %}
-    <label class="link-card upload-card" id="uploadCard" title="Upload files or a whole folder to the file server share (stored in the monitor's own space)">
+    {# for= is REQUIRED: a label activates its first labelable descendant,
+       and the folder <button> below is labelable and comes first — without
+       the explicit binding every card click would open the FOLDER picker,
+       which can't select plain files at all #}
+    <label class="link-card upload-card" id="uploadCard" for="uploadInput" title="Upload files or a whole folder to the file server share (stored in the monitor's own space)">
       <span class="link-icon">&#128228;</span>
       <span class="link-label">Upload to file server</span>
       <span class="link-url" id="uploadStatus">ISO / kernel / initrd — click or drop</span>
