@@ -19,7 +19,11 @@
     </a>
     {% endfor %}
     {% if cur_role == 'admin' %}
-    <label class="link-card upload-card" id="uploadCard" title="Upload files or a whole folder to the file server share (stored in the monitor's own space)">
+    {# for= is REQUIRED: a label activates its first labelable descendant,
+       and the folder <button> below is labelable and comes first — without
+       the explicit binding every card click would open the FOLDER picker,
+       which can't select plain files at all #}
+    <label class="link-card upload-card" id="uploadCard" for="uploadInput" title="Upload files or a whole folder to the file server share (stored in the monitor's own space)">
       <span class="link-icon">&#128228;</span>
       <span class="link-label">Upload to file server</span>
       <span class="link-url" id="uploadStatus">ISO / kernel / initrd — click or drop</span>
@@ -50,27 +54,31 @@
   </div>
 </section>
 
-<section>
-  <h2>Services <span class="count">{{ containers|length }}</span></h2>
-  {% if c_err %}<div class="error-banner">Docker socket error: {{ c_err }}</div>{% endif %}
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>Container</th><th>Status</th><th>Health</th><th>Uptime</th><th>Restarts</th><th>Image</th></tr></thead>
-      <tbody>
-        {% for c in containers %}
-        <tr>
-          <td><span class="dot {{ c.status }}"></span><code>{{ c.name }}</code></td>
-          <td><span class="badge {{ c.status }}">{{ c.status }}</span></td>
-          <td>{% if c.health != 'none' %}<span class="badge {{ c.health }}">{{ c.health }}</span>{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
-          <td>{{ c.uptime }}</td>
-          <td>{% if c.restarts > 0 %}<span style="color:var(--yellow)">{{ c.restarts }}</span>{% else %}0{% endif %}</td>
-          <td style="color:var(--muted);font-size:12px">{{ c.image }}</td>
-        </tr>
-        {% else %}
-        <tr><td colspan="6" class="empty">No containers found</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
+<section data-collapse="services">
+  <h2 class="sec-toggle" onclick="toggleSection(this.parentElement)" title="Click to hide or show this section">
+    <span class="chev open">&#9656;</span>Services <span class="count">{{ containers|length }}</span>
+  </h2>
+  <div class="sec-body">
+    {% if c_err %}<div class="error-banner">Docker socket error: {{ c_err }}</div>{% endif %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Container</th><th>Status</th><th>Health</th><th>Uptime</th><th>Restarts</th><th>Image</th></tr></thead>
+        <tbody>
+          {% for c in containers %}
+          <tr>
+            <td><span class="dot {{ c.status }}"></span><code>{{ c.name }}</code></td>
+            <td><span class="badge {{ c.status }}">{{ c.status }}</span></td>
+            <td>{% if c.health != 'none' %}<span class="badge {{ c.health }}">{{ c.health }}</span>{% else %}<span style="color:var(--muted)">—</span>{% endif %}</td>
+            <td>{{ c.uptime }}</td>
+            <td>{% if c.restarts > 0 %}<span style="color:var(--yellow)">{{ c.restarts }}</span>{% else %}0{% endif %}</td>
+            <td style="color:var(--muted);font-size:12px">{{ c.image }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="6" class="empty">No containers found</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   </div>
 </section>
 
@@ -282,6 +290,25 @@
       collectDropped(e.dataTransfer).then(uploadFiles);
     });
   }
+  // ── collapsible sections (data-collapse): heading click hides/shows the
+  //    body; the choice lives in sessionStorage because this page reloads
+  //    itself every refresh interval and would otherwise pop back open ──
+  const SEC_KEY = 'monitor.sections.closed';
+  let closedSecs = new Set();
+  try { closedSecs = new Set(JSON.parse(sessionStorage.getItem(SEC_KEY) || '[]')); } catch {}
+  function applySection(sec) {
+    const closed = closedSecs.has(sec.dataset.collapse);
+    sec.querySelector('.sec-body').style.display = closed ? 'none' : '';
+    sec.querySelector('.sec-toggle .chev').classList.toggle('open', !closed);
+  }
+  function toggleSection(sec) {
+    const id = sec.dataset.collapse;
+    if (closedSecs.has(id)) closedSecs.delete(id); else closedSecs.add(id);
+    sessionStorage.setItem(SEC_KEY, JSON.stringify([...closedSecs]));
+    applySection(sec);
+  }
+  document.querySelectorAll('section[data-collapse]').forEach(applySection);
+
   function filterLeases() {
     const q = document.getElementById('search').value.toLowerCase();
     let visible = 0;
@@ -422,7 +449,8 @@
           <td class="name"><span class="chev${open ? ' open' : ''}">&#9656;</span>${g ? hl(g, q) + '/' : '<span class="dim">share root</span>'}
             <span class="count">${files.length}</span>${g === MON_TOP ? ' <span class="badge space">monitor</span>' : ''}</td>
           <td class="size-col">${fmtSize(total)}</td>
-          <td></td>
+          <td class="actions">${g ? `<a class="btn btn-ghost" href="/api/download/folder/${encPath(g)}"
+            onclick="event.stopPropagation()" title="Download the whole ${escHtml(g)}/ folder as a .zip">Download .zip</a>` : ''}</td>
         </tr>`);
       if (!open) continue;
       for (const f of files) {
@@ -432,6 +460,7 @@
           <td class="name in-group">${nameHtml(rel, q)}</td>
           <td class="size-col">${fmtSize(f.size)}</td>
           <td class="actions">
+            <a class="btn btn-ghost" href="/api/download/file/${encPath(f.name)}" title="Download ${escHtml(f.name)}">Download</a>
             <button class="btn btn-ghost" onclick="copyText(fileUrl('${escJs(f.name)}'), this)" title="${escHtml(fileUrl(f.name))}">Copy URL</button>
             ${IS_ADMIN ? `<button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
           </td>

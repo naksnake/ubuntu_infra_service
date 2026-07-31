@@ -19,4 +19,8 @@ EXPOSE 8080
 
 # webfsd flags: -b is basic-auth (user:pass) and -c is max-connections —
 # neither is a bind address nor a config file. Binds all interfaces by default.
-CMD ["webfsd", "-F", "-p", "8080", "-r", "/var/www/htdocs", "-f", "index.html"]
+# -m: default Content-Type for extensions missing from /etc/mime.types
+# (.run installers, .ipxe, ...). webfsd's built-in default is text/plain,
+# which makes browsers RENDER those files instead of downloading them.
+CMD ["webfsd", "-F", "-p", "8080", "-r", "/var/www/htdocs", "-f", "index.html", \
+     "-m", "application/octet-stream"]

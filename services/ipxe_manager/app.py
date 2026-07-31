@@ -6,6 +6,7 @@ import time
 import uuid
 import fcntl
 import pathlib
+import zipfile
 import tempfile
 from contextlib import contextmanager
 from urllib.parse import quote
@@ -20,7 +21,8 @@ try:
 except Exception:  # pragma: no cover - uploads still work, just no extraction
     pycdlib = None
 
-from flask import Flask, Request, request, jsonify, render_template, Response
+from flask import (Flask, Request, request, jsonify, render_template, Response,
+                   send_file)
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -580,6 +582,97 @@ def api_upload():
                         'kernel_url': file_url(f'{relbase}{stem}/{extracted["kernel"]}'),
                         'initrd_url': file_url(f'{relbase}{stem}/{extracted["initrd"]}'),
                     }}), 201
+
+# ── folder download (streaming ZIP) ─────────────────────────────────────────
+
+class _ZipStreamBuffer:
+    """Unseekable write sink for ZipFile that hands finished bytes to a
+    generator. No seek() on purpose: ZipFile then writes data descriptors
+    instead of rewinding, so the archive can stream without ever existing
+    as a whole — on disk or in RAM. tell() is required for offsets."""
+    def __init__(self):
+        self._chunks = []
+        self._pos = 0
+
+    def write(self, data):
+        self._chunks.append(bytes(data))
+        self._pos += len(data)
+        return len(data)
+
+    def tell(self):
+        return self._pos
+
+    def flush(self):
+        pass
+
+    def drain(self):
+        out = b''.join(self._chunks)
+        self._chunks.clear()
+        return out
+
+
+def _iter_zip(base, top):
+    """Yield a ZIP of every visible file under base, with entries rooted at
+    top/ (so extraction recreates the folder). Files are copied in 64 KiB
+    chunks — a multi-GB ISO never sits in memory — and stay ZIP_STORED:
+    ISOs/initrds are already compressed, so deflating would only burn CPU."""
+    buf = _ZipStreamBuffer()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED, allowZip64=True) as zf:
+        for f in sorted(base.rglob('*')):
+            rel = f.relative_to(base)
+            # skip .spool-* / .*.uploading partials and other dotfiles, like the listing does
+            if not f.is_file() or any(p.startswith('.') for p in rel.parts):
+                continue
+            info = zipfile.ZipInfo.from_file(f, f'{top}/{rel.as_posix()}')
+            with open(f, 'rb') as src, zf.open(info, 'w') as dst:
+                while True:
+                    chunk = src.read(1 << 16)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    data = buf.drain()
+                    if data:
+                        yield data
+            data = buf.drain()
+            if data:
+                yield data
+    tail = buf.drain()   # central directory, written on ZipFile close
+    if tail:
+        yield tail
+
+
+@app.route('/api/files/download/<path:filename>')
+def api_download_file(filename):
+    """Serve one share file with Content-Disposition: attachment. webfs picks
+    the Content-Type by extension and renders unknown ones (.run, .sh, ...)
+    inline as text — this endpoint exists so the Lab Monitor's Download
+    button always saves the file, whatever its type. conditional=True gives
+    Range support, so big downloads are resumable."""
+    rel = _safe_relpath(filename)
+    if not rel:
+        return jsonify({'error': 'Invalid path'}), 400
+    path = UPLOAD_DIR / rel
+    if not path.is_file():
+        return jsonify({'error': 'Not found'}), 404
+    return send_file(path, as_attachment=True,
+                     download_name=pathlib.PurePosixPath(rel).name,
+                     conditional=True)
+
+
+@app.route('/api/files/archive')
+def api_archive():
+    """Stream a whole share folder as <folder>.zip (?dir=monitor/netboot).
+    Used by the Lab Monitor's per-folder Download button."""
+    rel = _safe_relpath(request.args.get('dir', ''))
+    if not rel:
+        return jsonify({'error': 'Invalid or missing dir'}), 400
+    base = UPLOAD_DIR / rel
+    if not base.is_dir():
+        return jsonify({'error': 'Not found'}), 404
+    top = pathlib.PurePosixPath(rel).name
+    return Response(_iter_zip(base, top), mimetype='application/zip',
+                    headers={'Content-Disposition': f'attachment; filename="{top}.zip"'})
+
 
 @app.route('/api/files/<path:filename>', methods=['DELETE'])
 def api_delete_file(filename):
