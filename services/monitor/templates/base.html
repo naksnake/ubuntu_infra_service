@@ -47,6 +47,12 @@
   section{margin-bottom:36px}
   section h2{font-size:1rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:10px}
   .count{background:var(--border);color:var(--text);border-radius:12px;padding:1px 8px;font-size:11px}
+  /* collapsible sections: the whole heading is the toggle */
+  section h2.sec-toggle{cursor:pointer;user-select:none;gap:4px}
+  section h2.sec-toggle:hover{color:var(--text)}
+  section h2.sec-toggle .chev{display:inline-block;width:16px;transition:transform .15s}
+  section h2.sec-toggle .chev.open{transform:rotate(90deg)}
+  section h2.sec-toggle .count{margin-left:6px}
 
   .links{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
   .link-card{display:flex;flex-direction:column;gap:2px;padding:14px 16px;background:#161f33;border:1px solid var(--border);border-radius:8px;color:var(--text);transition:border-color .15s,transform .15s}

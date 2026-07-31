@@ -321,7 +321,10 @@ http://192.168.100.1:8090/
 ```
 The dashboard now requires **login**. Sign in with the admin account (it reuses
 `CCP_ADMIN_USER` / `CCP_ADMIN_PASSWORD` from your `.env`). You will see:
-- **Services** — all container names, status (running/exited), health check result, uptime, restart count
+- **Services** — all container names, status (running/exited), health check
+  result, uptime, restart count. Click the heading to collapse or expand the
+  table — the choice sticks across the page's auto-refresh (the container
+  count stays visible in the heading while collapsed)
 - **DHCP Leases** — IP address, MAC address, hostname, lease expiry, and time remaining for every active lease
 - **Quick links** — one-click access to the other web UIs, plus an
   **Upload to file server** card (admin role only): click it or drop files on
