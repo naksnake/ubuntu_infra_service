@@ -8,6 +8,7 @@ from urllib.parse import quote
 from flask import (Flask, render_template, jsonify, request, session,
                    redirect, url_for, Response, flash)
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 import docker
 import requests
 
@@ -357,11 +358,32 @@ def _mgr_error(exc):
     return msg
 
 
+def _safe_relpath(value):
+    """Mirror of the iPXE Manager's path sanitizer: every component goes
+    through secure_filename, so '..', absolute paths and hidden components
+    can never survive. Returns '' when nothing safe remains."""
+    parts = [p for p in str(value).replace('\\', '/').split('/') if p]
+    clean = [secure_filename(p) for p in parts]
+    if not clean or any(not c for c in clean):
+        return ''
+    return '/'.join(clean)
+
+
 @app.route('/api/upload', methods=['POST'])
 def api_upload():
     # the viewer role is read-only by contract — uploads are for admins
     if session.get('role') != 'admin':
         return jsonify({'error': 'admin role required'}), 403
+    # Folder uploads: the dashboard sends each file's folder path (from
+    # webkitRelativePath / drag-and-drop traversal) in ?subdir=. It becomes a
+    # subfolder inside the monitor's space, so the uploaded folder structure
+    # is recreated under /files/<MONITOR_UPLOAD_DIR>/ and can never point
+    # outside it. The manager sanitizes the combined dir= again on its side.
+    raw_sub = request.args.get('subdir', '')
+    subdir = _safe_relpath(raw_sub) if raw_sub else ''
+    if raw_sub and not subdir:
+        return jsonify({'error': 'invalid subdir'}), 400
+    target_dir = f'{MONITOR_UPLOAD_DIR}/{subdir}' if subdir else MONITOR_UPLOAD_DIR
     # Stream the browser's multipart body through to the iPXE Manager
     # untouched (never buffered in RAM — request.form/request.files are never
     # touched here, and the CSRF guard only parses the form when the
@@ -373,7 +395,7 @@ def api_upload():
     try:
         # ?dir= puts dashboard uploads in the monitor's own space in the share
         resp = _mgr_session().post(
-            f'{IPXE_MANAGER_URL}/api/files?dir={quote(MONITOR_UPLOAD_DIR)}',
+            f'{IPXE_MANAGER_URL}/api/files?dir={quote(target_dir)}',
             data=body, headers=headers, timeout=(10, 3600))
     except requests.RequestException as exc:
         return jsonify({'error': _mgr_error(exc)}), 502
