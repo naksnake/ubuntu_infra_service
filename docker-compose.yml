@@ -31,7 +31,9 @@ services:
     build: ./services/webfs
     container_name: lab_webfs_https
     profiles: ["https"]
-    command: ["webfsd", "-F", "-p", "8443", "-r", "/var/www/htdocs", "-f", "index.html", "-S", "-C", "/etc/webfs/webfs.pem"]
+    # -m matches the plain-HTTP listener: unknown extensions (.run, …) download
+    # as octet-stream instead of rendering as text
+    command: ["webfsd", "-F", "-p", "8443", "-r", "/var/www/htdocs", "-f", "index.html", "-S", "-C", "/etc/webfs/webfs.pem", "-m", "application/octet-stream"]
     ports:
       - "${UI_BIND:-0.0.0.0}:${WEBFS_HTTPS_PORT:-8443}:8443"
     volumes:

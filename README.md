@@ -340,7 +340,9 @@ The dashboard now requires **login**. Sign in with the admin account (it reuses
   uploads carry a `monitor` badge) with per-file **Download** and
   **Copy URL**, a per-folder **Download .zip** (the whole folder streams as
   a ZIP archive — nothing is staged on disk or in RAM), and — for admins —
-  **Remove**. Copy URL yields a working download link built for the address
+  **Remove**. Download always *saves* the file whatever its type — a
+  `.run` installer or a text file streams with an attachment header
+  (resumable) instead of rendering in the browser tab. Copy URL yields a working download link built for the address
   you're browsing from (lab-side viewers get the lab IP, WAN-side viewers
   the WAN IP), and copying works on plain-HTTP pages too. Removing an ISO
   also removes its extracted kernel/initrd folder. The viewer role sees the

@@ -21,7 +21,8 @@ try:
 except Exception:  # pragma: no cover - uploads still work, just no extraction
     pycdlib = None
 
-from flask import Flask, Request, request, jsonify, render_template, Response
+from flask import (Flask, Request, request, jsonify, render_template, Response,
+                   send_file)
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -638,6 +639,24 @@ def _iter_zip(base, top):
     tail = buf.drain()   # central directory, written on ZipFile close
     if tail:
         yield tail
+
+
+@app.route('/api/files/download/<path:filename>')
+def api_download_file(filename):
+    """Serve one share file with Content-Disposition: attachment. webfs picks
+    the Content-Type by extension and renders unknown ones (.run, .sh, ...)
+    inline as text — this endpoint exists so the Lab Monitor's Download
+    button always saves the file, whatever its type. conditional=True gives
+    Range support, so big downloads are resumable."""
+    rel = _safe_relpath(filename)
+    if not rel:
+        return jsonify({'error': 'Invalid path'}), 400
+    path = UPLOAD_DIR / rel
+    if not path.is_file():
+        return jsonify({'error': 'Not found'}), 404
+    return send_file(path, as_attachment=True,
+                     download_name=pathlib.PurePosixPath(rel).name,
+                     conditional=True)
 
 
 @app.route('/api/files/archive')

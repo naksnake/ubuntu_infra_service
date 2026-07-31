@@ -437,7 +437,7 @@
           <td class="name in-group">${nameHtml(rel, q)}</td>
           <td class="size-col">${fmtSize(f.size)}</td>
           <td class="actions">
-            <a class="btn btn-ghost" href="${escHtml(fileUrl(f.name))}" download title="Download ${escHtml(f.name)}">Download</a>
+            <a class="btn btn-ghost" href="/api/download/file/${encPath(f.name)}" title="Download ${escHtml(f.name)}">Download</a>
             <button class="btn btn-ghost" onclick="copyText(fileUrl('${escJs(f.name)}'), this)" title="${escHtml(fileUrl(f.name))}">Copy URL</button>
             ${IS_ADMIN ? `<button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
           </td>
