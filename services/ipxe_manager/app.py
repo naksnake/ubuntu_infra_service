@@ -511,10 +511,12 @@ def api_upload():
     filename = secure_filename(f.filename or '')
     if not filename:
         return _discard_and_fail('Invalid filename')
-    # optional single-level target folder inside the share (?dir=monitor —
-    # the Lab Monitor uploads into its own space this way)
+    # optional target folder inside the share, possibly nested (?dir=monitor,
+    # ?dir=monitor/netboot/efi — the Lab Monitor uploads into its own space
+    # and recreates uploaded folder structures this way); every path component
+    # is sanitized, so '..' and hidden/absolute components can never survive
     raw_dir = request.args.get('dir', '')
-    sub = secure_filename(raw_dir) if raw_dir else ''
+    sub = _safe_relpath(raw_dir) if raw_dir else ''
     if raw_dir and not sub:
         return _discard_and_fail('Invalid dir')
     base = UPLOAD_DIR / sub if sub else UPLOAD_DIR

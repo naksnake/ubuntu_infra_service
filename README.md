@@ -324,11 +324,14 @@ The dashboard now requires **login**. Sign in with the admin account (it reuses
 - **Services** — all container names, status (running/exited), health check result, uptime, restart count
 - **DHCP Leases** — IP address, MAC address, hostname, lease expiry, and time remaining for every active lease
 - **Quick links** — one-click access to the other web UIs, plus an
-  **Upload to file server** card (admin role only): click it or drop a file on
-  it and the file is stored in the monitor's own space in the share,
+  **Upload to file server** card (admin role only): click it or drop files on
+  it and they are stored in the monitor's own space in the share,
   `data/webfs_share/monitor/` (URLs under `/files/monitor/`), keeping
-  dashboard uploads separate from files managed in the iPXE Manager. Uploads
-  are forwarded to the iPXE Manager, so an ISO gets the automatic
+  dashboard uploads separate from files managed in the iPXE Manager.
+  **Whole folders work too** — use the card's *upload a whole folder* link or
+  drop a directory on the card, and its structure is recreated under
+  `/files/monitor/<folder>/…` (dotfile junk like `.DS_Store` is skipped).
+  Uploads are forwarded to the iPXE Manager, so an ISO gets the automatic
   kernel+initrd extraction and a disabled boot entry exactly as if uploaded
   in the manager UI — even when `IPXE_MANAGER_PASSWORD` is set. Files stream
   straight into the share (no scratch copy in any container), and the page's
