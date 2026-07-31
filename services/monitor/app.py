@@ -418,6 +418,40 @@ def api_files():
     return Response(resp.content, resp.status_code, mimetype='application/json')
 
 
+@app.route('/api/download/folder/<path:folder>')
+def api_download_folder(folder):
+    """Stream a share folder as a .zip through the manager (which owns the
+    share mount). Read-only, so the viewer role may use it too — same as
+    the file listing and Copy URL."""
+    rel = _safe_relpath(folder)
+    if not rel:
+        return jsonify({'error': 'invalid folder'}), 400
+    try:
+        resp = _mgr_session().get(
+            f'{IPXE_MANAGER_URL}/api/files/archive?dir={quote(rel)}',
+            stream=True, timeout=(10, 3600))
+    except requests.RequestException as exc:
+        return jsonify({'error': _mgr_error(exc)}), 502
+    if resp.status_code != 200:
+        status = resp.status_code
+        try:
+            err = resp.json().get('error', f'HTTP {status}')
+        except Exception:
+            err = f'HTTP {status}'
+        resp.close()
+        return jsonify({'error': err}), status
+    audit('download_folder', rel)
+
+    def _pump():
+        try:
+            yield from resp.iter_content(65536)
+        finally:
+            resp.close()
+    name = rel.rsplit('/', 1)[-1]
+    return Response(_pump(), mimetype='application/zip',
+                    headers={'Content-Disposition': f'attachment; filename="{name}.zip"'})
+
+
 @app.route('/api/files/<path:name>', methods=['DELETE'])
 def api_delete_file(name):
     # removal is a state change — admins only, like uploads

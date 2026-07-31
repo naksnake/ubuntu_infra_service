@@ -337,12 +337,14 @@ The dashboard now requires **login**. Sign in with the admin account (it reuses
   straight into the share (no scratch copy in any container), and the page's
   auto-refresh pauses while a file is being picked or uploaded.
 - **File Server** — lists everything in the `/files/` share (dashboard
-  uploads carry a `monitor` badge) with per-file **Copy URL** and — for
-  admins — **Remove**. Copy URL yields a working download link built for the
-  address you're browsing from (lab-side viewers get the lab IP, WAN-side
-  viewers the WAN IP), and copying works on plain-HTTP pages too. Removing an
-  ISO also removes its extracted kernel/initrd folder. The viewer role sees
-  the list read-only.
+  uploads carry a `monitor` badge) with per-file **Download** and
+  **Copy URL**, a per-folder **Download .zip** (the whole folder streams as
+  a ZIP archive — nothing is staged on disk or in RAM), and — for admins —
+  **Remove**. Copy URL yields a working download link built for the address
+  you're browsing from (lab-side viewers get the lab IP, WAN-side viewers
+  the WAN IP), and copying works on plain-HTTP pages too. Removing an ISO
+  also removes its extracted kernel/initrd folder. The viewer role sees the
+  list read-only (downloads included).
 
 Use the search box to quickly find a host by IP, MAC, or hostname.  
 The page auto-refreshes every 30 seconds. A JSON API is available at `/api/status` (login required).

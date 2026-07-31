@@ -426,7 +426,8 @@
           <td class="name"><span class="chev${open ? ' open' : ''}">&#9656;</span>${g ? hl(g, q) + '/' : '<span class="dim">share root</span>'}
             <span class="count">${files.length}</span>${g === MON_TOP ? ' <span class="badge space">monitor</span>' : ''}</td>
           <td class="size-col">${fmtSize(total)}</td>
-          <td></td>
+          <td class="actions">${g ? `<a class="btn btn-ghost" href="/api/download/folder/${encPath(g)}"
+            onclick="event.stopPropagation()" title="Download the whole ${escHtml(g)}/ folder as a .zip">Download .zip</a>` : ''}</td>
         </tr>`);
       if (!open) continue;
       for (const f of files) {
@@ -436,6 +437,7 @@
           <td class="name in-group">${nameHtml(rel, q)}</td>
           <td class="size-col">${fmtSize(f.size)}</td>
           <td class="actions">
+            <a class="btn btn-ghost" href="${escHtml(fileUrl(f.name))}" download title="Download ${escHtml(f.name)}">Download</a>
             <button class="btn btn-ghost" onclick="copyText(fileUrl('${escJs(f.name)}'), this)" title="${escHtml(fileUrl(f.name))}">Copy URL</button>
             ${IS_ADMIN ? `<button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
           </td>
