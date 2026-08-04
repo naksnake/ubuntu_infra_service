@@ -509,6 +509,52 @@ def api_delete_file(name):
     return Response(resp.content, resp.status_code, mimetype='application/json')
 
 
+@app.route('/api/folders', methods=['POST'])
+def api_mkdir():
+    # folder creation is a state change — admins only, like uploads/deletes
+    if session.get('role') != 'admin':
+        return jsonify({'error': 'admin role required'}), 403
+    body = request.get_json(silent=True) or {}
+    try:
+        resp = _mgr_session().post(f'{IPXE_MANAGER_URL}/api/folders',
+                                   json=body, timeout=30)
+    except requests.RequestException as exc:
+        return jsonify({'error': _mgr_error(exc)}), 502
+    audit('mkdir', f'{body.get("dir","")}/{body.get("name","")} '
+                   f'(HTTP {resp.status_code})')
+    return Response(resp.content, resp.status_code, mimetype='application/json')
+
+
+@app.route('/api/folders/<path:folder>', methods=['DELETE'])
+def api_delete_folder(folder):
+    if session.get('role') != 'admin':
+        return jsonify({'error': 'admin role required'}), 403
+    # pass ?recursive= through unchanged so the manager decides empty-vs-force
+    qs = '?recursive=1' if request.args.get('recursive') in ('1', 'true', 'yes') else ''
+    try:
+        resp = _mgr_session().delete(
+            f'{IPXE_MANAGER_URL}/api/folders/{quote(folder)}{qs}', timeout=120)
+    except requests.RequestException as exc:
+        return jsonify({'error': _mgr_error(exc)}), 502
+    audit('delete_folder', f'{folder} (HTTP {resp.status_code})')
+    return Response(resp.content, resp.status_code, mimetype='application/json')
+
+
+@app.route('/api/files/move', methods=['POST'])
+def api_move():
+    if session.get('role') != 'admin':
+        return jsonify({'error': 'admin role required'}), 403
+    body = request.get_json(silent=True) or {}
+    try:
+        resp = _mgr_session().post(f'{IPXE_MANAGER_URL}/api/files/move',
+                                   json=body, timeout=120)
+    except requests.RequestException as exc:
+        return jsonify({'error': _mgr_error(exc)}), 502
+    audit('move', f'{body.get("src","")} -> {body.get("dst","")} '
+                  f'(HTTP {resp.status_code})')
+    return Response(resp.content, resp.status_code, mimetype='application/json')
+
+
 @app.route('/api/upload/check')
 def api_upload_check():
     """Preflight for the dashboard upload card: proves the monitor container

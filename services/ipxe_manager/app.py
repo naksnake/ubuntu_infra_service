@@ -6,6 +6,7 @@ import time
 import uuid
 import fcntl
 import pathlib
+import shutil
 import zipfile
 import tempfile
 from contextlib import contextmanager
@@ -36,6 +37,48 @@ SERVER_IP     = os.environ.get('SERVER_IP',  '192.168.100.1')
 # setting a password; the username defaults to 'admin'.
 AUTH_USER     = os.environ.get('AUTH_USER', 'admin')
 AUTH_PASSWORD = os.environ.get('AUTH_PASSWORD', '')
+
+# ── upload whitelist ─────────────────────────────────────────────────────────
+# The netboot share only ever needs boot artifacts, so uploads are restricted
+# to those. This is enforced HERE, in the share owner, so the rule holds for
+# EVERY path into the share — the Lab Monitor proxy, the direct API, or curl —
+# not just the dashboard. A front-end-only check would be trivially bypassed.
+#
+# Tokens are matched case-insensitively against the sanitized final filename.
+# Two kinds of token:
+#   * extension tokens (iso, gz, cpio) match a trailing '.<token>', so compound
+#     names like 'rootfs.cpio.gz' or 'initrd.gz' are accepted on their suffix;
+#   * name tokens (vmlinuz, rootfs) match kernels/root-filesystems that usually
+#     carry NO extension — 'vmlinuz', 'vmlinuz-6.8.0-40-generic', 'rootfs',
+#     'rootfs.squashfs', 'vmlinuz.efi' all match by name prefix.
+# Override the whole set with IPXE_ALLOWED_UPLOADS="iso,gz,cpio,vmlinuz,rootfs".
+# NOTE: this gates content ENTERING the share (uploads). It does not re-check
+# files already present — ISO auto-extraction legitimately writes 'initrd',
+# and move/rename operate on files that were admitted once already.
+_NAME_TOKENS = {'vmlinuz', 'vmlinux', 'bzimage', 'linux', 'rootfs',
+                'initrd', 'initramfs'}
+_ALLOWED = [t.strip().lower().lstrip('.')
+            for t in os.environ.get('IPXE_ALLOWED_UPLOADS',
+                                    'iso,gz,cpio,vmlinuz,rootfs').split(',')
+            if t.strip()]
+ALLOWED_EXTS  = tuple(t for t in _ALLOWED if t not in _NAME_TOKENS)
+ALLOWED_NAMES = tuple(t for t in _ALLOWED if t in _NAME_TOKENS)
+
+
+def upload_allowed(filename):
+    """True if `filename` (a sanitized basename) may enter the netboot share."""
+    low = filename.lower()
+    if any(low.endswith('.' + ext) for ext in ALLOWED_EXTS):
+        return True
+    return any(low == nm or low.startswith(nm + '-') or low.startswith(nm + '.')
+               for nm in ALLOWED_NAMES)
+
+
+def _upload_reject_msg():
+    exts = ' '.join('.' + e for e in ALLOWED_EXTS)
+    names = ' '.join(ALLOWED_NAMES)
+    return ('file type not allowed for the netboot share — permitted: '
+            f'{exts}{" " if exts and names else ""}{names}').strip()
 
 # Autoinstall (cloud-init NoCloud) profiles: where they are stored and the base
 # URL PXE clients use to fetch the seed. MANAGER_BASE must point at THIS service
@@ -513,6 +556,10 @@ def api_upload():
     filename = secure_filename(f.filename or '')
     if not filename:
         return _discard_and_fail('Invalid filename')
+    # enforce the boot-artifact whitelist on the sanitized name, before any
+    # folder is created or the spool is renamed into place
+    if not upload_allowed(filename):
+        return _discard_and_fail(_upload_reject_msg())
     # optional target folder inside the share, possibly nested (?dir=monitor,
     # ?dir=monitor/netboot/efi — the Lab Monitor uploads into its own space
     # and recreates uploaded folder structures this way); every path component
@@ -672,6 +719,132 @@ def api_archive():
     top = pathlib.PurePosixPath(rel).name
     return Response(_iter_zip(base, top), mimetype='application/zip',
                     headers={'Content-Disposition': f'attachment; filename="{top}.zip"'})
+
+
+def _within_share(p):
+    """Belt-and-braces containment: p (which need not exist yet) must resolve
+    to UPLOAD_DIR or somewhere beneath it. _safe_relpath already blocks
+    traversal at the string level; this catches anything that slips past,
+    including symlinked parents."""
+    try:
+        rp = p.resolve()
+    except Exception:
+        return False
+    base = UPLOAD_DIR.resolve()
+    return rp == base or rp.is_relative_to(base)
+
+
+def _rewrite_entry_paths(old_rel, new_rel):
+    """After a move/rename, keep auto-created boot entries valid by rewriting
+    kernel/initrd paths that referenced the old location (exact file, or any
+    file beneath a moved folder)."""
+    changed = False
+    with entries_lock():
+        entries = load_entries()
+        for e in entries:
+            for k in ('kernel', 'initrd'):
+                v = e.get(k) or ''
+                if v == old_rel:
+                    e[k] = new_rel
+                    changed = True
+                elif v.startswith(old_rel + '/'):
+                    e[k] = new_rel + v[len(old_rel):]
+                    changed = True
+        if changed:
+            save_entries(entries)
+    return changed
+
+
+def _prune_dangling_entries():
+    """Drop kernel entries whose kernel file no longer exists in the share
+    (e.g. after a recursive folder delete removed the ISO's boot files)."""
+    with entries_lock():
+        entries = load_entries()
+        kept = [e for e in entries
+                if e.get('type') != 'kernel' or not e.get('kernel')
+                or (UPLOAD_DIR / e['kernel']).is_file()]
+        if len(kept) != len(entries):
+            save_entries(kept)
+
+
+@app.route('/api/folders', methods=['POST'])
+def api_mkdir():
+    """Create an empty folder in the share. Body: {dir?: parent, name: leaf}."""
+    d = request.get_json(silent=True) or {}
+    raw_parent = d.get('dir', '') or ''
+    parent = _safe_relpath(raw_parent) if raw_parent else ''
+    if raw_parent and not parent:
+        return jsonify({'error': 'Invalid dir'}), 400
+    name = _safe_relpath(d.get('name', '') or '')
+    if not name or '/' in name:
+        return jsonify({'error': 'Invalid folder name'}), 400
+    rel = f'{parent}/{name}' if parent else name
+    target = UPLOAD_DIR / rel
+    if not _within_share(target):
+        return jsonify({'error': 'Invalid path'}), 400
+    if target.exists():
+        return jsonify({'error': 'Already exists'}), 409
+    try:
+        target.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        return jsonify({'error': 'Already exists'}), 409
+    return jsonify({'ok': True, 'path': rel}), 201
+
+
+@app.route('/api/folders/<path:folder>', methods=['DELETE'])
+def api_delete_folder(folder):
+    """Delete a share folder. Empty-only by default; ?recursive=1 forces a
+    recursive delete and then prunes any now-dangling boot entries."""
+    rel = _safe_relpath(folder)
+    if not rel:
+        return jsonify({'error': 'Invalid path'}), 400
+    target = UPLOAD_DIR / rel
+    if not _within_share(target) or not target.is_dir():
+        return jsonify({'error': 'Not found'}), 404
+    recursive = request.args.get('recursive', '') in ('1', 'true', 'yes')
+    if any(target.iterdir()) and not recursive:
+        return jsonify({'error': 'Folder is not empty'}), 409
+    try:
+        if recursive:
+            shutil.rmtree(target)
+        else:
+            target.rmdir()
+    except OSError as exc:
+        return jsonify({'error': f'Delete failed: {exc}'}), 500
+    _prune_dangling_entries()
+    return jsonify({'ok': True})
+
+
+@app.route('/api/files/move', methods=['POST'])
+def api_move():
+    """Move or rename a file or folder within the share. Body: {src, dst}.
+    Never overwrites; rewrites boot-entry paths so auto-created entries stay
+    valid across a rename. Does NOT re-apply the upload whitelist — src was
+    admitted once already (or written by ISO extraction)."""
+    d = request.get_json(silent=True) or {}
+    src = _safe_relpath(d.get('src', '') or '')
+    dst = _safe_relpath(d.get('dst', '') or '')
+    if not src or not dst:
+        return jsonify({'error': 'src and dst are required'}), 400
+    if src == dst:
+        return jsonify({'error': 'src and dst are the same'}), 400
+    sp, dp = UPLOAD_DIR / src, UPLOAD_DIR / dst
+    if not _within_share(sp) or not _within_share(dp):
+        return jsonify({'error': 'Invalid path'}), 400
+    if not sp.exists():
+        return jsonify({'error': 'Source not found'}), 404
+    # refuse to move a folder into its own subtree (would recurse/vanish)
+    if sp.is_dir() and (dst == src or dst.startswith(src + '/')):
+        return jsonify({'error': 'Cannot move a folder into itself'}), 400
+    if dp.exists():
+        return jsonify({'error': 'Destination already exists'}), 409
+    try:
+        dp.parent.mkdir(parents=True, exist_ok=True)
+        sp.rename(dp)
+    except OSError as exc:
+        return jsonify({'error': f'Move failed: {exc}'}), 500
+    _rewrite_entry_paths(src, dst)
+    return jsonify({'ok': True, 'from': src, 'to': dst})
 
 
 @app.route('/api/files/<path:filename>', methods=['DELETE'])

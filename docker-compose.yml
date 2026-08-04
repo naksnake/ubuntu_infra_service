@@ -221,6 +221,9 @@ services:
       - CCP_DB=/data/ccp/ccp.db
       - CCP_JOBS_DIR=/data/ccp/jobs
       - CCP_FILES_DIR=/data/ccp/files
+      # default per-user storage quota in MB (0 = unlimited); users.quota_mb
+      # overrides per user
+      - CCP_USER_QUOTA_MB=${CCP_USER_QUOTA_MB:-10240}
       - CCP_SSH_KEY=/data/ccp/ssh/id_ccp
       # hard per-job wall-clock cap (seconds) so a hung command/playbook can't
       # pin a worker thread forever

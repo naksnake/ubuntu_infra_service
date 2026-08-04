@@ -36,6 +36,8 @@ data/dnsmasq.leases
 
 # iPXE Manager state (runtime data)
 data/ipxe_manager/
-
+*efi
+*kpxe
 # Cluster Control Panel state: SQLite db, job logs, uploads, SSH key (secrets)
 data/ccp/
+

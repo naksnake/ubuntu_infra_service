@@ -1,16 +1,49 @@
 {% extends "base.html" %}
-{% block heading %}Files{% endblock %}
+{% block heading %}My files{% endblock %}
 {% block body %}
-{% if role_ok('operator') %}
 <div class="card">
-  <h2>Upload</h2>
+  <h2>Upload to
+    {% for name, path in crumbs %}
+      {%- if not loop.last -%}
+        <a href="{{ url_for('files_page', folder=path or None) }}">{{ name }}</a> /
+      {%- else -%}
+        {{ name }}
+      {%- endif %}
+    {% endfor %}
+  </h2>
+  <p><small>Only you can see these files.
+    {% if quota_mb %}Using {{ used_mb }} of {{ quota_mb }} MB.{% endif %}</small></p>
   <input type="file" id="file-input">
-  <div style="margin-top:12px"><button class="btn" onclick="upload()">⬆ Upload</button>
-    <span id="up-status" style="margin-left:10px"></span></div>
+  <div style="margin-top:12px">
+    <button class="btn" onclick="upload()">⬆ Upload here</button>
+    <span id="up-status" style="margin-left:10px"></span>
+  </div>
+  <div style="margin-top:12px">
+    <input type="text" id="new-folder" placeholder="new folder name"
+           maxlength="64" style="width:220px">
+    <button class="btn btn-ghost" onclick="mkdir()">＋ New folder</button>
+  </div>
 </div>
-{% endif %}
+
 <div class="card">
-  <h2>Shared files ({{ files|length }})</h2>
+  <h2>Folders ({{ folders|length }})</h2>
+  <table>
+    <thead><tr><th>Name</th><th></th></tr></thead>
+    <tbody>
+      {% for d in folders %}
+      <tr>
+        <td class="mono">📁 <a href="{{ url_for('files_page', folder=d.path) }}">{{ d.name }}</a></td>
+        <td><button class="btn btn-danger btn-sm"
+              onclick='del({{ url_for("api_delete_folder", relpath=d.path)|tojson }},
+                           {{ ("Delete empty folder " ~ d.name ~ "?")|tojson }})'>Delete</button></td>
+      </tr>
+      {% else %}<tr><td colspan="2" class="empty">No subfolders here.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Files ({{ files|length }})</h2>
   <table>
     <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th></th></tr></thead>
     <tbody>
@@ -20,25 +53,40 @@
         <td>{{ f.size | filesizeformat }}</td>
         <td><small>{{ f.mtime | tstime }}</small></td>
         <td>
-          <a class="btn btn-ghost btn-sm" href="{{ url_for('download_file', filename=f.name) }}">Download</a>
-          {% if role_ok('operator') %}<button class="btn btn-danger btn-sm" onclick="del('/api/files/{{ f.name|urlencode }}','Delete {{ f.name }}?')">Delete</button>{% endif %}
+          <a class="btn btn-ghost btn-sm" href="{{ url_for('download_file', relpath=f.path) }}">Download</a>
+          <button class="btn btn-danger btn-sm"
+            onclick='del({{ url_for("api_delete_file", relpath=f.path)|tojson }},
+                         {{ ("Delete " ~ f.name ~ "?")|tojson }})'>Delete</button>
         </td>
       </tr>
-      {% else %}<tr><td colspan="4" class="empty">No files uploaded yet.</td></tr>{% endfor %}
+      {% else %}<tr><td colspan="4" class="empty">No files in this folder yet.</td></tr>{% endfor %}
     </tbody>
   </table>
 </div>
 {% endblock %}
 {% block scripts %}<script>
+const REL = {{ rel|tojson }};
+
 async function upload(){
   const inp=document.getElementById('file-input');
   if(!inp.files.length){toast('Choose a file first',true);return;}
-  const fd=new FormData();fd.append('file',inp.files[0]);
+  const fd=new FormData();
+  fd.append('file',inp.files[0]);
+  fd.append('folder',REL);
   document.getElementById('up-status').textContent='Uploading…';
   try{
     const res=await fetch('/api/files',{method:'POST',headers:{'X-CSRF-Token':CSRF},body:fd});
     const d=await res.json();if(!res.ok)throw new Error(d.error||('HTTP '+res.status));
     toast('Uploaded');location.reload();
   }catch(e){document.getElementById('up-status').textContent='';toast(e.message,true);}
+}
+
+async function mkdir(){
+  const name=document.getElementById('new-folder').value.trim();
+  if(!name){toast('Enter a folder name',true);return;}
+  try{
+    await api('POST','/api/files/mkdir',{folder:REL,name});
+    toast('Folder created');location.reload();
+  }catch(e){toast(e.message,true);}
 }
 </script>{% endblock %}

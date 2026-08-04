@@ -60,6 +60,20 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at INTEGER
 );
 
+-- Metadata for uploaded files. The filesystem remains the source of truth for
+-- existence/size (listings walk the disk); these rows add ownership, upload
+-- time and quota reporting, and power future features (sharing, admin usage
+-- reports) without another disk walk.
+CREATE TABLE IF NOT EXISTS files (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    relpath     TEXT NOT NULL,               -- 'folder/sub/name.ext' under the user root
+    size        INTEGER NOT NULL DEFAULT 0,
+    uploaded_at INTEGER NOT NULL,
+    UNIQUE(owner_id, relpath)
+);
+CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner_id);
+
 CREATE TABLE IF NOT EXISTS audit (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     ts       INTEGER NOT NULL,
@@ -77,6 +91,7 @@ def _connect():
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA busy_timeout=30000')
+    conn.execute('PRAGMA foreign_keys=ON')
     return conn
 
 
@@ -115,6 +130,13 @@ def init_db():
     conn = _connect()
     conn.executescript(SCHEMA)
     conn.commit()
+
+    # migration for databases created before per-user file spaces:
+    # NULL quota_mb means "use the CCP_USER_QUOTA_MB default".
+    cols = [r['name'] for r in conn.execute('PRAGMA table_info(users)')]
+    if 'quota_mb' not in cols:
+        conn.execute('ALTER TABLE users ADD COLUMN quota_mb INTEGER')
+        conn.commit()
 
     # The single worker runs jobs in in-process threads; if it restarts, those
     # threads are gone, so any job still marked 'running' is orphaned. Reap them

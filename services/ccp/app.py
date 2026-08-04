@@ -4,9 +4,17 @@ playbooks, keep a script repository, browse job history and audit logs, and
 share files — all behind session login with role-based access control.
 
 Roles (increasing privilege): viewer < operator < admin
-  viewer   — read-only: nodes, jobs + output, scripts, download files
-  operator — viewer + run jobs, manage nodes/scripts, upload/delete files
+  viewer   — read-only on cluster ops: nodes, jobs + output, scripts
+  operator — viewer + run jobs, manage nodes/scripts
   admin    — operator + manage users, view audit log, delete jobs
+
+Files: every authenticated user gets a private per-user file space under
+CCP_FILES_DIR/<username>/ (auto-created on first use, subfolders supported).
+A user can only ever see or touch paths inside their own root — the root is
+derived from the server-side session, never from request data, and every
+client-supplied path is validated segment-by-segment and containment-checked
+after resolution. To restrict uploads to operators again, re-add
+@require('operator') on the file mutation routes below.
 """
 import os
 import re
@@ -17,7 +25,7 @@ import secrets
 import pathlib
 
 from flask import (Flask, request, session, redirect, url_for, render_template,
-                   jsonify, Response, abort, send_from_directory, flash)
+                   jsonify, Response, abort, send_file, flash)
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -38,6 +46,20 @@ app.config.update(
 )
 
 FILES_DIR = pathlib.Path(os.environ.get('CCP_FILES_DIR', '/data/ccp/files'))
+# Default per-user quota in MB; 0 disables the quota. users.quota_mb (nullable)
+# overrides this per user.
+USER_QUOTA_MB = int(os.environ.get('CCP_USER_QUOTA_MB', '10240'))
+
+# A username doubles as an on-disk directory name, so it must be a single safe
+# path segment: ASCII, starts with alphanumeric (no dot-prefixed / hidden
+# names), and contains no separators. Enforced both at user creation and again
+# every time a storage path is derived (defense in depth).
+USERNAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,31}')
+# Same shape for every folder / file path segment a client may supply.
+SEGMENT_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
+MAX_TREE_DEPTH = 8          # max folder nesting below the user root
+MAX_RELPATH_LEN = 512       # max total length of a client-supplied rel path
+
 ROLES = ('viewer', 'operator', 'admin')
 _RANK = {r: i for i, r in enumerate(ROLES)}
 
@@ -237,7 +259,31 @@ def scripts_page():
 
 @app.route('/files')
 def files_page():
-    return render_template('files.html', files=_list_files())
+    rel = _safe_rel(request.args.get('folder', ''))
+    root = _user_root()
+    cur = _inside(root, rel)
+    if not cur.is_dir():
+        abort(404)
+    folders, files = [], []
+    for e in sorted(cur.iterdir(), key=lambda p: p.name.lower()):
+        if e.name.startswith('.') or e.is_symlink():
+            continue                      # hide temp files; never follow links
+        if e.is_dir():
+            folders.append({'name': e.name,
+                            'path': str(rel / e.name)})
+        elif e.is_file():
+            st = e.stat()
+            files.append({'name': e.name, 'path': str(rel / e.name),
+                          'size': st.st_size, 'mtime': int(st.st_mtime)})
+    # breadcrumb: [('Home', ''), ('docs', 'docs'), ('2026', 'docs/2026')]
+    crumbs, acc = [('Home', '')], []
+    for part in rel.parts:
+        acc.append(part)
+        crumbs.append((part, '/'.join(acc)))
+    return render_template('files.html', folders=folders, files=files,
+                           rel=str(rel) if rel.parts else '', crumbs=crumbs,
+                           quota_mb=_user_quota_bytes() // (1024 * 1024),
+                           used_mb=_tree_size(root) // (1024 * 1024))
 
 
 @app.route('/users')
@@ -415,9 +461,23 @@ def api_add_user():
     role = d.get('role') if d.get('role') in ROLES else 'viewer'
     if not username or len(password) < 8:
         return jsonify({'error': 'username required and password must be >= 8 chars'}), 400
+    # the username becomes an on-disk directory name — enforce path safety here
+    if not USERNAME_RE.fullmatch(username):
+        return jsonify({'error': 'username must start with a letter or digit and '
+                        'contain only letters, digits, dot, dash, underscore '
+                        '(max 32 chars)'}), 400
+    quota_mb = d.get('quota_mb')
+    if quota_mb is not None:
+        try:
+            quota_mb = int(quota_mb)
+            assert quota_mb >= 0
+        except (TypeError, ValueError, AssertionError):
+            return jsonify({'error': 'quota_mb must be a non-negative integer'}), 400
     try:
-        uid = db.execute('INSERT INTO users (username, password_hash, role, created_at) VALUES (?,?,?,?)',
-                         (username, generate_password_hash(password), role, int(time.time())))
+        uid = db.execute('INSERT INTO users (username, password_hash, role, quota_mb, created_at) '
+                         'VALUES (?,?,?,?,?)',
+                         (username, generate_password_hash(password), role, quota_mb,
+                          int(time.time())))
     except Exception:
         return jsonify({'error': 'username already exists'}), 400
     log_action('user.add', f'{username} ({role})')
@@ -431,68 +491,291 @@ def api_delete_user(uid):
         return jsonify({'error': 'cannot delete your own account'}), 400
     if db.query('SELECT COUNT(*) AS c FROM users')[0]['c'] <= 1:
         return jsonify({'error': 'cannot delete the last user'}), 400
+    row = db.query('SELECT username FROM users WHERE id=?', (uid,), one=True)
+    if not row:
+        return jsonify({'error': 'not found'}), 404
     db.execute('DELETE FROM users WHERE id=?', (uid,))
-    log_action('user.delete', str(uid))
+    # Park the file space out of the way instead of deleting it. Leading '_'
+    # can never collide with a real user root (USERNAME_RE requires a leading
+    # alphanumeric), and a recreated same-name account starts empty instead of
+    # inheriting the previous owner's files.
+    if USERNAME_RE.fullmatch(row['username']):
+        d = FILES_DIR / row['username']
+        if d.is_dir() and not d.is_symlink():
+            d.rename(FILES_DIR / f"_removed-{row['username']}-{int(time.time())}")
+    log_action('user.delete', f"{uid} ({row['username']})")
     return jsonify({'ok': True})
 
 
-# ── files API ───────────────────────────────────────────────────────────────
+# ── files API — per-user isolated storage ────────────────────────────────────
+# Layout: FILES_DIR/<username>/<subfolders...>/<file>
+#
+# Trust model / traversal defense (layered — each layer alone would suffice):
+#   1. The storage root is derived ONLY from session['username'] (set at login
+#      from the DB); no request data ever chooses whose space is touched.
+#   2. Usernames and every client-supplied path segment must match a strict
+#      allowlist regex — '.', '..', hidden names, separators, NUL bytes and
+#      non-ASCII are unrepresentable, so traversal can't even be expressed.
+#   3. After joining, the path is resolved (symlinks flattened) and must still
+#      be inside the resolved user root, else 403.
+#   4. Listings skip symlinks, so nothing outside the tree is ever revealed.
 
-def _list_files():
-    out = []
-    if FILES_DIR.exists():
-        for f in sorted(FILES_DIR.iterdir()):
-            if f.is_file() and not f.name.startswith('.'):
-                st = f.stat()
-                out.append({'name': f.name, 'size': st.st_size, 'mtime': int(st.st_mtime)})
-    return out
+def _user_root(username=None):
+    """This user's storage root, auto-created on first use.
+
+    `username` defaults to the server-side session value. It is validated
+    again here even though user creation already enforces USERNAME_RE, so a
+    legacy/hand-edited DB row can never yield an unsafe directory name."""
+    username = username if username is not None else (session.get('username') or '')
+    if not USERNAME_RE.fullmatch(username):
+        abort(403, description='account name is not valid for file storage')
+    root = FILES_DIR / username
+    root.mkdir(parents=True, exist_ok=True)
+    root = root.resolve()
+    base = FILES_DIR.resolve()
+    if root == base or not root.is_relative_to(base):
+        abort(403, description='storage root escapes the files directory')
+    return root
+
+
+def _safe_rel(raw):
+    """Parse a client-supplied path relative to the user root.
+
+    Returns PurePosixPath() for the root. Aborts 400 on anything that is not
+    a plain chain of allowlisted segments — so '.', '..', absolute paths,
+    backslashes, hidden names and over-deep trees never reach the fs layer."""
+    raw = (raw or '').strip()
+    if raw.startswith('/'):
+        abort(400, description='path must be relative to your file space')
+    raw = raw.rstrip('/')
+    if not raw:
+        return pathlib.PurePosixPath()
+    if len(raw) > MAX_RELPATH_LEN or '\\' in raw or '\x00' in raw:
+        abort(400, description='invalid path')
+    parts = raw.split('/')
+    if len(parts) > MAX_TREE_DEPTH:
+        abort(400, description=f'folders may nest at most {MAX_TREE_DEPTH} deep')
+    for seg in parts:
+        if not SEGMENT_RE.fullmatch(seg):
+            abort(400, description='path segments may contain only letters, '
+                  'digits, dot, dash, underscore and must not start with a dot')
+    return pathlib.PurePosixPath(*parts)
+
+
+def _inside(root, rel):
+    """Join a validated rel path onto the user root and re-verify containment
+    after resolving symlinks. Belt and braces on top of _safe_rel."""
+    p = (root / rel).resolve()
+    if not p.is_relative_to(root):
+        abort(403, description='path escapes your file space')
+    return p
+
+
+def _tree_size(root):
+    """Total bytes stored under a user root (symlinks never followed)."""
+    total = 0
+    for base, _dirs, names in os.walk(root):   # followlinks=False by default
+        for n in names:
+            try:
+                st = os.lstat(os.path.join(base, n))
+            except OSError:
+                continue
+            total += st.st_size
+    return total
+
+
+def _user_quota_bytes(uid=None):
+    """Effective quota in bytes for a user (0 = unlimited)."""
+    uid = uid if uid is not None else session.get('uid')
+    row = db.query('SELECT quota_mb FROM users WHERE id=?', (uid,), one=True)
+    mb = row['quota_mb'] if row and row['quota_mb'] is not None else USER_QUOTA_MB
+    return max(0, int(mb)) * 1024 * 1024
+
+
+def _reap_partials(root):
+    """Delete .part temp files older than a day (crashed/aborted uploads)."""
+    cutoff = time.time() - 86400
+    for base, _dirs, names in os.walk(root):
+        for n in names:
+            if n.startswith('.') and n.endswith('.part'):
+                fp = pathlib.Path(base) / n
+                try:
+                    if fp.lstat().st_mtime < cutoff:
+                        fp.unlink()
+                except OSError:
+                    pass
 
 
 @app.route('/api/files', methods=['POST'])
-@require('operator')
 def api_upload():
-    if 'file' not in request.files:
+    f = request.files.get('file')
+    if f is None or not f.filename:
         return jsonify({'error': 'no file part'}), 400
-    f = request.files['file']
-    filename = secure_filename(f.filename or '')
-    if not filename:
-        return jsonify({'error': 'invalid filename'}), 400
-    FILES_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = FILES_DIR / f'.{filename}.{secrets.token_hex(6)}.part'
+    filename = secure_filename(f.filename)
+    if not filename or not SEGMENT_RE.fullmatch(filename):
+        return jsonify({'error': 'invalid filename — use letters, digits, '
+                        'dot, dash, underscore (max 64 chars)'}), 400
+    rel = _safe_rel(request.form.get('folder'))
+    root = _user_root()
+    _reap_partials(root)
+    target_dir = _inside(root, rel)
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)   # auto-create subfolder
+    except (FileExistsError, NotADirectoryError):
+        return jsonify({'error': 'a file already exists where that folder '
+                        'should be'}), 409
+    target = target_dir / filename
+    if target.is_dir():
+        return jsonify({'error': 'a folder with that name already exists'}), 409
+
+    quota = _user_quota_bytes()
+    declared = request.content_length or 0
+    used = _tree_size(root)
+    replaced = target.stat().st_size if target.is_file() else 0
+    if quota and declared and used - replaced + declared > quota + 4096:
+        return jsonify({'error': 'upload would exceed your storage quota'}), 413
+
+    tmp = target_dir / f'.{filename}.{secrets.token_hex(6)}.part'
     try:
         f.save(str(tmp))
-        tmp.replace(FILES_DIR / filename)
+        size = tmp.stat().st_size
+        if quota and used + size - replaced > quota:
+            tmp.unlink(missing_ok=True)
+            return jsonify({'error': 'upload would exceed your storage quota'}), 413
+        tmp.replace(target)
     except Exception as exc:
         tmp.unlink(missing_ok=True)
         return jsonify({'error': f'upload failed: {exc}'}), 500
-    log_action('file.upload', filename)
-    return jsonify({'name': filename}), 201
+
+    relpath = str(rel / filename)
+    db.execute('INSERT INTO files (owner_id, relpath, size, uploaded_at) '
+               'VALUES (?,?,?,?) ON CONFLICT(owner_id, relpath) '
+               'DO UPDATE SET size=excluded.size, uploaded_at=excluded.uploaded_at',
+               (session['uid'], relpath, size, int(time.time())))
+    log_action('file.upload', relpath)
+    return jsonify({'name': filename, 'path': relpath, 'size': size}), 201
 
 
-@app.route('/files/download/<path:filename>')
-def download_file(filename):
-    safe = secure_filename(filename)
-    if not safe or not (FILES_DIR / safe).is_file():
+@app.route('/api/files/mkdir', methods=['POST'])
+def api_mkdir():
+    d = request.get_json(force=True) or {}
+    rel = _safe_rel(d.get('folder'))
+    name = (d.get('name') or '').strip()
+    if not SEGMENT_RE.fullmatch(name):
+        return jsonify({'error': 'folder name may contain only letters, digits, '
+                        'dot, dash, underscore and must not start with a dot'}), 400
+    if len(rel.parts) >= MAX_TREE_DEPTH:
+        return jsonify({'error': f'folders may nest at most {MAX_TREE_DEPTH} deep'}), 400
+    root = _user_root()
+    new = _inside(root, rel / name)
+    if new.is_file():
+        return jsonify({'error': 'a file with that name already exists'}), 409
+    try:
+        new.mkdir(parents=True, exist_ok=True)
+    except (FileExistsError, NotADirectoryError):
+        return jsonify({'error': 'cannot create folder there'}), 409
+    log_action('folder.create', str(rel / name))
+    return jsonify({'path': str(rel / name)}), 201
+
+
+@app.route('/api/files/move', methods=['POST'])
+def api_move():
+    """Move or rename a file or folder within the caller's own space.
+    Body: {src, dst}. Both are validated and containment-checked; the move can
+    never cross into another user's root because both resolve under _user_root()."""
+    d = request.get_json(force=True) or {}
+    src = _safe_rel(d.get('src'))
+    dst = _safe_rel(d.get('dst'))
+    if not src.parts:
+        return jsonify({'error': 'src is required'}), 400
+    if not dst.parts:
+        return jsonify({'error': 'dst is required'}), 400
+    if src == dst:
+        return jsonify({'error': 'src and dst are the same'}), 400
+    root = _user_root()
+    sp = _inside(root, src)
+    dp = _inside(root, dst)
+    if not sp.exists():
+        return jsonify({'error': 'not found'}), 404
+    was_file = sp.is_file()
+    if not was_file and (dst == src or str(dst).startswith(str(src) + '/')):
+        return jsonify({'error': 'cannot move a folder into itself'}), 400
+    if dp.exists():
+        return jsonify({'error': 'destination already exists'}), 409
+    dp.parent.mkdir(parents=True, exist_ok=True)
+    sp.rename(dp)
+    if was_file:
+        db.execute('UPDATE files SET relpath=? WHERE owner_id=? AND relpath=?',
+                   (str(dst), session['uid'], str(src)))
+    else:
+        rows = db.query('SELECT id, relpath FROM files WHERE owner_id=? '
+                        'AND (relpath=? OR relpath LIKE ?)',
+                        (session['uid'], str(src), str(src) + '/%'))
+        for r in rows:
+            newrel = str(dst) + r['relpath'][len(str(src)):]
+            db.execute('UPDATE files SET relpath=? WHERE id=?', (newrel, r['id']))
+    log_action('file.move', f'{src} -> {dst}')
+    return jsonify({'ok': True, 'from': str(src), 'to': str(dst)})
+
+
+@app.route('/files/download/<path:relpath>')
+def download_file(relpath):
+    rel = _safe_rel(relpath)
+    if not rel.parts:
         abort(404)
-    log_action('file.download', safe)
-    return send_from_directory(FILES_DIR, safe, as_attachment=True)
+    p = _inside(_user_root(), rel)
+    if not p.is_file():
+        abort(404)
+    log_action('file.download', str(rel))
+    # as_attachment + global nosniff header: uploads are never rendered inline,
+    # so an uploaded .html/.svg cannot execute in the panel's origin.
+    return send_file(p, as_attachment=True, download_name=p.name)
 
 
-@app.route('/api/files/<path:filename>', methods=['DELETE'])
-@require('operator')
-def api_delete_file(filename):
-    safe = secure_filename(filename)
-    p = FILES_DIR / safe
-    if safe and p.is_file():
-        p.unlink()
-        log_action('file.delete', safe)
-        return jsonify({'ok': True})
-    return jsonify({'error': 'not found'}), 404
+@app.route('/api/files/<path:relpath>', methods=['DELETE'])
+def api_delete_file(relpath):
+    rel = _safe_rel(relpath)
+    if not rel.parts:
+        return jsonify({'error': 'not found'}), 404
+    p = _inside(_user_root(), rel)
+    if not p.is_file():
+        return jsonify({'error': 'not found'}), 404
+    p.unlink()
+    db.execute('DELETE FROM files WHERE owner_id=? AND relpath=?',
+               (session['uid'], str(rel)))
+    log_action('file.delete', str(rel))
+    return jsonify({'ok': True})
+
+
+@app.route('/api/folders/<path:relpath>', methods=['DELETE'])
+def api_delete_folder(relpath):
+    rel = _safe_rel(relpath)
+    if not rel.parts:
+        return jsonify({'error': 'cannot delete your root folder'}), 400
+    p = _inside(_user_root(), rel)
+    if not p.is_dir():
+        return jsonify({'error': 'not found'}), 404
+    try:
+        p.rmdir()                      # only empty folders — no recursive rm
+    except OSError:
+        return jsonify({'error': 'folder is not empty'}), 409
+    log_action('folder.delete', str(rel))
+    return jsonify({'ok': True})
 
 
 @app.errorhandler(413)
 def _too_large(_e):
     return jsonify({'error': 'file exceeds the upload size limit'}), 413
+
+
+@app.errorhandler(400)
+@app.errorhandler(403)
+@app.errorhandler(404)
+def _err(e):
+    """abort(...) inside the path helpers should yield JSON on API routes."""
+    if request.path.startswith('/api/'):
+        return jsonify({'error': e.description or e.name}), e.code
+    return e
 
 
 if __name__ == '__main__':
