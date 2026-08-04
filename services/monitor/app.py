@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import secrets
@@ -358,15 +359,25 @@ def _mgr_error(exc):
     return msg
 
 
+_CTRL = re.compile(r'[\x00-\x1f\x7f]')
+
+
 def _safe_relpath(value):
-    """Mirror of the iPXE Manager's path sanitizer: every component goes
-    through secure_filename, so '..', absolute paths and hidden components
-    can never survive. Returns '' when nothing safe remains."""
-    parts = [p for p in str(value).replace('\\', '/').split('/') if p]
-    clean = [secure_filename(p) for p in parts]
-    if not clean or any(not c for c in clean):
-        return ''
-    return '/'.join(clean)
+    """Mirror of the iPXE Manager's path validator. PRESERVES every name
+    exactly (spaces, Unicode, case, dots kept verbatim); rejects only truly
+    unsafe paths by returning '': absolute paths, '.'/'..'/empty components,
+    NUL/control characters, or a component over 255 bytes. Splits on '/' only.
+    The manager validates again on its side."""
+    out = []
+    for p in str(value).split('/'):
+        if p == '':
+            continue
+        if p in ('.', '..') or _CTRL.search(p):
+            return ''
+        if len(p.encode('utf-8', 'surrogatepass')) > 255:
+            return ''
+        out.append(p)
+    return '/'.join(out)
 
 
 @app.route('/api/upload', methods=['POST'])
@@ -393,9 +404,13 @@ def api_upload():
         body = _KnownLengthStream(body, request.content_length)
     headers = {'Content-Type': request.content_type or 'application/octet-stream'}
     try:
-        # ?dir= puts dashboard uploads in the monitor's own space in the share
+        # ?dir= puts dashboard uploads in the monitor's own space in the share;
+        # general=1 tells the manager this is a general-purpose dashboard upload
+        # so the netboot boot-artifact whitelist does NOT apply here (the
+        # whitelist guards the iPXE boot area only). This is explicit and does
+        # not depend on MONITOR_UPLOAD_DIR matching the manager's exempt list.
         resp = _mgr_session().post(
-            f'{IPXE_MANAGER_URL}/api/files?dir={quote(target_dir)}',
+            f'{IPXE_MANAGER_URL}/api/files?dir={quote(target_dir)}&general=1',
             data=body, headers=headers, timeout=(10, 3600))
     except requests.RequestException as exc:
         return jsonify({'error': _mgr_error(exc)}), 502

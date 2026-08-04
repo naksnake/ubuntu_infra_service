@@ -40,8 +40,11 @@
   <h2>File Server <span class="count" id="fileCount">…</span></h2>
   <p style="color:var(--muted);font-size:11px;margin-bottom:10px">
     Everything in the <code>/files/</code> share. Files uploaded from this dashboard live in the
-    <code>{{ monitor_space }}/</code> space{% if cur_role == 'admin' %}; <strong>Remove</strong> deletes a file from
-    the file server (an ISO's extracted kernel/initrd folder goes with it){% endif %}.
+    <code>{{ monitor_space }}/</code> space{% if cur_role == 'admin' %}. Per file you can <strong>Download</strong>,
+    <strong>Rename</strong>, <strong>Move</strong> to another folder, or <strong>Remove</strong> (an ISO's extracted
+    kernel/initrd folder goes with it). <strong>Drag a file onto a folder to move it</strong>, or use Move… to type a
+    destination. Per folder you can <strong>Download .zip</strong> or <strong>Remove folder</strong>
+    (deletes everything inside){% endif %}.
   </p>
   <div class="search-wrap">
     <input id="fileSearch" class="search" type="search" placeholder="Filter files — name or folder…" autocomplete="off">
@@ -126,6 +129,7 @@
   let remaining = TOTAL;
   let uploading = false;    // pause the auto-refresh so it can't kill an upload
   let pickerOpen = false;   // …or reload behind the open file-picker dialog
+  let fileDragging = false; // …or re-render mid drag-and-drop move
   let typing = false;       // …or eat what's being typed into a search box
   document.querySelectorAll('input.search').forEach(el => {
     el.addEventListener('focus', () => { typing = true; });
@@ -133,7 +137,7 @@
   });
   barEl.style.width = '0%';
   setInterval(() => {
-    if (uploading || pickerOpen || typing) return;
+    if (uploading || pickerOpen || fileDragging || typing) return;
     remaining--;
     if (remaining <= 0) { location.reload(); return; }
     countEl.textContent = remaining;
@@ -445,24 +449,27 @@
       const open = q ? true : openGroups.has(g);   // the filter looks inside every folder
       const total = files.reduce((s, f) => s + f.size, 0);
       rows.push(`
-        <tr class="group-row${q ? ' static' : ''}"${q ? '' : ` onclick="toggleGroup('${escJs(g)}')"`}>
+        <tr class="group-row${q ? ' static' : ''}" data-group="${escHtml(g)}"${q ? '' : ` onclick="toggleGroup('${escJs(g)}')"`}>
           <td class="name"><span class="chev${open ? ' open' : ''}">&#9656;</span>${g ? hl(g, q) + '/' : '<span class="dim">share root</span>'}
             <span class="count">${files.length}</span>${g === MON_TOP ? ' <span class="badge space">monitor</span>' : ''}</td>
           <td class="size-col">${fmtSize(total)}</td>
           <td class="actions">${g ? `<a class="btn btn-ghost" href="/api/download/folder/${encPath(g)}"
-            onclick="event.stopPropagation()" title="Download the whole ${escHtml(g)}/ folder as a .zip">Download .zip</a>` : ''}</td>
+            onclick="event.stopPropagation()" title="Download the whole ${escHtml(g)}/ folder as a .zip">Download .zip</a>${IS_ADMIN ? `
+            <button class="btn btn-del" onclick="event.stopPropagation();removeFolder('${escJs(g)}')" title="Delete the entire ${escHtml(g)}/ folder and everything in it">Remove folder</button>` : ''}` : ''}</td>
         </tr>`);
       if (!open) continue;
       for (const f of files) {
         const rel = g ? f.name.slice(g.length + 1) : f.name;
         rows.push(`
-        <tr>
-          <td class="name in-group">${nameHtml(rel, q)}</td>
+        <tr${IS_ADMIN ? ` draggable="true" data-file="${escHtml(f.name)}"` : ''}>
+          <td class="name in-group">${IS_ADMIN ? '<span class="grip" title="Drag onto a folder to move">⠿</span> ' : ''}${nameHtml(rel, q)}</td>
           <td class="size-col">${fmtSize(f.size)}</td>
           <td class="actions">
             <a class="btn btn-ghost" href="/api/download/file/${encPath(f.name)}" title="Download ${escHtml(f.name)}">Download</a>
             <button class="btn btn-ghost" onclick="copyText(fileUrl('${escJs(f.name)}'), this)" title="${escHtml(fileUrl(f.name))}">Copy URL</button>
-            ${IS_ADMIN ? `<button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
+            ${IS_ADMIN ? `<button class="btn btn-ghost" onclick="renameFile('${escJs(f.name)}')" title="Rename this file in place">Rename</button>
+            <button class="btn btn-ghost" onclick="moveFile('${escJs(f.name)}')" title="Move to any folder (type a path). Or just drag the row onto a folder.">Move…</button>
+            <button class="btn btn-del" onclick="removeFile('${escJs(f.name)}')">Remove</button>` : ''}
           </td>
         </tr>`);
       }
@@ -495,6 +502,104 @@
     }
     loadShareFiles();
   }
+
+  // recursive delete of a whole top-level folder (admin only, gated again by
+  // the proxy). Everything inside goes — used for clearing out a whole space.
+  async function removeFolder(g) {
+    if (!g) return;
+    if (!confirm(`Remove the entire "${g}/" folder and everything inside it?\n\nThis cannot be undone.`)) return;
+    const r = await fetch('/api/folders/' + encPath(g) + '?recursive=1',
+                          { method: 'DELETE', headers: { 'X-CSRF-Token': CSRF } });
+    if (!r.ok) {
+      let j = {}; try { j = await r.json(); } catch {}
+      alert('Remove folder failed: ' + (j.error || 'HTTP ' + r.status));
+    }
+    loadShareFiles();
+  }
+
+  // rename = move within the same folder to a new leaf name
+  async function renameFile(name) {
+    const cut = name.lastIndexOf('/');
+    const dir = cut === -1 ? '' : name.slice(0, cut + 1);
+    const old = name.slice(cut + 1);
+    const input = prompt(`Rename "${old}" to:`, old);
+    if (input === null) return;
+    const leaf = input.trim();
+    if (!leaf || leaf === old) return;
+    if (leaf.includes('/')) { alert('A name can\u2019t contain "/". Use Move to change folders.'); return; }
+    await movePath(name, dir + leaf, 'Rename');
+  }
+
+  // move = relocate to any path in the share (folders are created as needed)
+  async function moveFile(name) {
+    const suggestion = name;   // pre-fill with the current path to edit
+    const input = prompt(
+      `Move "${name}" to (full path in the share, e.g. monitor/archive/${name.split('/').pop()}):`,
+      suggestion);
+    if (input === null) return;
+    const dst = input.trim().replace(/^\/+|\/+$/g, '');
+    if (!dst || dst === name) return;
+    await movePath(name, dst, 'Move');
+  }
+
+  async function movePath(src, dst, verb) {
+    const r = await fetch('/api/files/move', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': CSRF, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src, dst }),
+    });
+    if (!r.ok) {
+      let j = {}; try { j = await r.json(); } catch {}
+      alert(`${verb} failed: ` + (j.error || 'HTTP ' + r.status));
+    }
+    loadShareFiles();
+  }
+
+  // ── drag-and-drop move: grab a file row, drop it on a folder row ──
+  // Handlers are delegated on the tbody so they survive every re-render.
+  // Dropping on a folder moves the file into it (keeping its exact name);
+  // dropping on "share root" moves it to the top of the share.
+  const fb = document.getElementById('filesBody');
+  let dragSrc = null;
+  function clearDropHints() {
+    fb.querySelectorAll('.drop-target').forEach(el => el.classList.remove('drop-target'));
+  }
+  fb.addEventListener('dragstart', e => {
+    const tr = e.target.closest('tr[data-file]');
+    if (!tr) return;
+    dragSrc = tr.getAttribute('data-file');
+    fileDragging = true;                       // pause the auto-refresh
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', dragSrc); } catch {}
+    tr.classList.add('dragging');
+  });
+  fb.addEventListener('dragend', e => {
+    const tr = e.target.closest('tr[data-file]');
+    if (tr) tr.classList.remove('dragging');
+    clearDropHints();
+    dragSrc = null; fileDragging = false;
+  });
+  fb.addEventListener('dragover', e => {
+    if (dragSrc === null) return;
+    const tr = e.target.closest('tr[data-group]');
+    if (!tr) return;
+    e.preventDefault();                        // required to allow a drop
+    e.dataTransfer.dropEffect = 'move';
+    if (!tr.classList.contains('drop-target')) { clearDropHints(); tr.classList.add('drop-target'); }
+  });
+  fb.addEventListener('drop', e => {
+    if (dragSrc === null) return;
+    const tr = e.target.closest('tr[data-group]');
+    if (!tr) return;
+    e.preventDefault();
+    clearDropHints();
+    const dest = tr.getAttribute('data-group');         // '' = share root
+    const base = dragSrc.split('/').pop();
+    const srcDir = dragSrc.includes('/') ? dragSrc.slice(0, dragSrc.lastIndexOf('/')) : '';
+    const src = dragSrc; dragSrc = null; fileDragging = false;
+    if (srcDir === dest) return;                         // already there — no-op
+    movePath(src, dest ? dest + '/' + base : base, 'Move');
+  });
 
   loadShareFiles();
 </script>{% endblock %}

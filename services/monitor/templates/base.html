@@ -74,6 +74,14 @@
   .files-table .actions .btn{padding:3px 9px;font-size:11px;opacity:.65;transition:opacity .15s}
   .files-table .actions a.btn{display:inline-block}
   .files-table tr:hover .actions .btn{opacity:1}
+  /* drag-and-drop move: file rows are grabbable, folder rows light up as targets */
+  .files-table tr[data-file]{cursor:grab}
+  .files-table tr[data-file]:active{cursor:grabbing}
+  .files-table tr.dragging{opacity:.4}
+  .files-table .grip{color:var(--muted);cursor:grab;user-select:none;font-size:11px;opacity:0;transition:opacity .15s}
+  .files-table tr[data-file]:hover .grip{opacity:.7}
+  .files-table tr.drop-target > td{background:rgba(56,189,248,.14);box-shadow:inset 0 0 0 1px var(--accent)}
+  @media (prefers-reduced-motion: reduce){ .files-table .grip{transition:none} }
   .group-row td{background:rgba(255,255,255,.025);cursor:pointer;user-select:none}
   .group-row:hover td{background:rgba(56,189,248,.06)}
   .group-row.static td{cursor:default}

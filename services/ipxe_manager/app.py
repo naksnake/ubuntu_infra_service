@@ -66,19 +66,58 @@ ALLOWED_NAMES = tuple(t for t in _ALLOWED if t in _NAME_TOKENS)
 
 
 def upload_allowed(filename):
-    """True if `filename` (a sanitized basename) may enter the netboot share."""
+    """True if `filename` (a sanitized basename) may enter the netboot share.
+
+    Extension tokens (.iso/.gz/.cpio) match a trailing suffix. Name tokens
+    (vmlinuz/rootfs) match as a SUBSTRING anywhere in the name, so vendor- or
+    build-tagged artifacts like 'gb200_06v_vmlinuz', 'nvidia_vmlinuz_v2' or
+    'custom-rootfs.squashfs' are all accepted — the rule is simply "the name
+    contains vmlinuz / rootfs". Trade-off: this also admits e.g. 'vmlinuz.sh';
+    the whitelist is a boot-area content guardrail behind the manager
+    credential, not an auth boundary. Tighten via IPXE_ALLOWED_UPLOADS."""
     low = filename.lower()
     if any(low.endswith('.' + ext) for ext in ALLOWED_EXTS):
         return True
-    return any(low == nm or low.startswith(nm + '-') or low.startswith(nm + '.')
-               for nm in ALLOWED_NAMES)
+    return any(nm in low for nm in ALLOWED_NAMES)
 
 
 def _upload_reject_msg():
     exts = ' '.join('.' + e for e in ALLOWED_EXTS)
-    names = ' '.join(ALLOWED_NAMES)
-    return ('file type not allowed for the netboot share — permitted: '
-            f'{exts}{" " if exts and names else ""}{names}').strip()
+    names = ' or '.join(ALLOWED_NAMES)
+    parts = []
+    if exts:
+        parts.append(f'files ending in {exts}')
+    if names:
+        parts.append(f'names containing {names}')
+    return 'file type not allowed for the netboot share — permitted: ' + '; '.join(parts)
+
+
+# The whitelist guards the NETBOOT area only. The Lab Monitor uploads into its
+# own space inside the share (MONITOR_UPLOAD_DIR, default 'monitor/…') and is a
+# general-purpose file area — restricting it to boot artifacts would (wrongly)
+# reject ordinary dashboard uploads. Top-level folders listed here are exempt.
+# Set IPXE_WHITELIST_EXEMPT_DIRS='' to enforce the whitelist everywhere in the
+# share (boot-artifacts-only, no general uploads anywhere).
+WHITELIST_EXEMPT_DIRS = {d.strip().strip('/').split('/')[0].lower()
+                         for d in os.environ.get('IPXE_WHITELIST_EXEMPT_DIRS',
+                                                 'monitor').split(',')
+                         if d.strip()}
+
+
+def _whitelist_applies(sub, general=False):
+    """Whether the upload whitelist should gate an upload targeting share-
+    relative folder `sub` ('' = share root).
+
+    The whitelist guards the iPXE NETBOOT area only. An upload is exempt when
+    EITHER the caller explicitly marks it a general-purpose upload (the Lab
+    Monitor does this for every dashboard upload, so it never depends on folder
+    names matching), OR its top-level folder is a configured general area
+    (IPXE_WHITELIST_EXEMPT_DIRS). Both routes require the manager credential,
+    so this is a content guardrail for the boot area, not an auth boundary."""
+    if general:
+        return False
+    top = sub.split('/', 1)[0].lower() if sub else ''
+    return top not in WHITELIST_EXEMPT_DIRS
 
 # Autoinstall (cloud-init NoCloud) profiles: where they are stored and the base
 # URL PXE clients use to fetch the seed. MANAGER_BASE must point at THIS service
@@ -250,15 +289,36 @@ def _clean(value, maxlen=200):
     v = _IPXE_SEP.sub(' ', v)
     return v.strip()[:maxlen]
 
-def _safe_relpath(value):
-    """Sanitize a webfs-relative path like 'ubuntu-24.04/vmlinuz': every
-    component goes through secure_filename, so '..', absolute paths and
-    hidden files can never survive. Returns '' when nothing safe remains."""
-    parts = [p for p in str(value).replace('\\', '/').split('/') if p]
-    clean = [secure_filename(p) for p in parts]
-    if not clean or any(not c for c in clean):
+def _safe_component(name):
+    """Validate ONE path component (a file or folder name), PRESERVING it byte
+    for byte. Only the leaf is kept if a path slips in. Returns '' if unsafe."""
+    name = str(name).replace('\\', '/').rsplit('/', 1)[-1]
+    if name in ('', '.', '..') or _CTRL.search(name):
         return ''
-    return '/'.join(clean)
+    if len(name.encode('utf-8', 'surrogatepass')) > 255:   # ext4/xfs name limit
+        return ''
+    return name
+
+
+def _safe_relpath(value):
+    """Validate a webfs-relative path like 'Ubuntu 24.04/vmlinuz', PRESERVING
+    every name exactly — spaces, Unicode, mixed case, parentheses and interior
+    dots are all kept verbatim (uploads must land under their real names). Only
+    genuinely unsafe paths are rejected, by returning '': absolute paths,
+    '.'/'..'/empty components, embedded NUL/control characters, or a component
+    over 255 bytes. Splitting is on '/' only; a literal backslash is a valid
+    POSIX filename character and is preserved. Leading/trailing/duplicate
+    slashes collapse (this normalizes separators, it never renames a name)."""
+    out = []
+    for p in str(value).split('/'):
+        if p == '':
+            continue
+        if p in ('.', '..') or _CTRL.search(p):
+            return ''
+        if len(p.encode('utf-8', 'surrogatepass')) > 255:
+            return ''
+        out.append(p)
+    return '/'.join(out)
 
 def sanitize_fields(data):
     """Whitelist, clean and validate entry fields. Returns (fields, error)."""
@@ -283,6 +343,11 @@ def sanitize_fields(data):
             fn = _safe_relpath(data[k]) if data[k] else ''
             if data[k] and not fn:
                 return None, f'invalid {k} filename'
+            # names are now preserved verbatim, so a boot-entry path could carry
+            # iPXE command separators. file_url() percent-encodes them in the
+            # menu, but reject them here too — a real kernel/initrd never has one
+            if fn and _IPXE_SEP.search(fn):
+                return None, f'{k} filename may not contain | ; or &'
             out[k] = fn
     if 'cmdline' in data:
         out['cmdline'] = _clean(data['cmdline'], 500)
@@ -553,13 +618,9 @@ def api_upload():
             spool.unlink(missing_ok=True)
         return jsonify({'error': msg}), 400
 
-    filename = secure_filename(f.filename or '')
+    filename = _safe_component(f.filename or '')
     if not filename:
         return _discard_and_fail('Invalid filename')
-    # enforce the boot-artifact whitelist on the sanitized name, before any
-    # folder is created or the spool is renamed into place
-    if not upload_allowed(filename):
-        return _discard_and_fail(_upload_reject_msg())
     # optional target folder inside the share, possibly nested (?dir=monitor,
     # ?dir=monitor/netboot/efi — the Lab Monitor uploads into its own space
     # and recreates uploaded folder structures this way); every path component
@@ -568,6 +629,15 @@ def api_upload():
     sub = _safe_relpath(raw_dir) if raw_dir else ''
     if raw_dir and not sub:
         return _discard_and_fail('Invalid dir')
+    # enforce the boot-artifact whitelist on the sanitized name — but ONLY for
+    # the netboot area. General-purpose uploads (the Lab Monitor marks its own
+    # with ?general=1 / X-Upload-General, or anything under an exempt folder)
+    # accept any type. Checked before any folder is created or the spool is
+    # renamed into place.
+    general = (request.args.get('general', '') in ('1', 'true', 'yes')
+               or request.headers.get('X-Upload-General', '') in ('1', 'true', 'yes'))
+    if _whitelist_applies(sub, general) and not upload_allowed(filename):
+        return _discard_and_fail(_upload_reject_msg())
     base = UPLOAD_DIR / sub if sub else UPLOAD_DIR
     relbase = f'{sub}/' if sub else ''          # prefix for share-relative paths
     base.mkdir(parents=True, exist_ok=True)

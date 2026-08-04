@@ -29,17 +29,83 @@ def up(name, dir=None):
 print('== whitelist: allowed names ==')
 for n in ['ubuntu-24.04.iso', 'UBUNTU.ISO', 'initrd.gz', 'rootfs.cpio.gz',
           'rootfs.cpio', 'vmlinuz', 'vmlinuz-6.8.0-40-generic', 'vmlinuz.efi',
-          'rootfs', 'rootfs.squashfs']:
+          'rootfs', 'rootfs.squashfs',
+          # substring anywhere in the name: vendor / build-tagged artifacts
+          'gb200_06v_vmlinuz', 'nvidia_vmlinuz_v2', 'GB200_06V_VMLINUZ',
+          'custom-rootfs-image', 'node1.rootfs.img', 'a_vmlinuz_b']:
     r = up(n)
     check(f'accept {n!r:32}', r.status_code == 201, f'{r.status_code} {r.get_json()}')
 
 print('== whitelist: rejected names ==')
+# note: names CONTAINING vmlinuz/rootfs are intentionally allowed now, so a
+# rejection case must contain neither token and end in no allowed extension
 for n in ['evil.sh', 'notes.txt', 'payload.php', 'archive.zip', 'a.exe',
-          'config.yaml', 'image.qcow2', 'kernel.tar', 'x.gz.sh', 'vmlinuzz.sh']:
+          'config.yaml', 'image.qcow2', 'kernel.tar', 'x.gz.sh', 'initramfs.xz']:
     r = up(n)
     check(f'reject {n!r:32}', r.status_code == 400, f'{r.status_code}')
     check(f'  …{n!r:30} not written', not (UP / n).exists())
 check('no .spool-* temp files leaked', not list(UP.glob('.spool-*')))
+
+print('== names preserved EXACTLY (no secure_filename mangling) ==')
+# each of these would be renamed by secure_filename (spaces->_, unicode dropped,
+# leading dots stripped, case folded). They must land byte-for-byte, in the
+# folder they were uploaded to, under the Lab Monitor space (whitelist-exempt).
+exact = [
+    ('My Report (final).PDF', 'monitor'),
+    ('Résumé — 2026.txt',      'monitor/Curriculum Vitæ'),
+    ('DATA SET v1.2.csv',      'monitor/Q3 Reports'),
+    ('螺旋.iso',                'monitor'),
+    ('a & b, c.txt',           'monitor/odd names'),
+]
+for fname, d in exact:
+    r = up(fname, d)
+    landed = UP / d / fname
+    check(f'accept & keep exact name {fname!r}', r.status_code == 201, f'{r.status_code} {r.get_json()}')
+    check(f'  on disk verbatim under {d!r}', landed.is_file(),
+          f'expected {landed}')
+    # the API reports the exact relative name back
+    if r.status_code == 201:
+        check(f'  API returns exact name', r.get_json().get('name') == f'{d}/{fname}',
+              r.get_json().get('name'))
+# a preserved-name file is retrievable, movable and deletable by its exact path
+src = 'monitor/Q3 Reports/DATA SET v1.2.csv'
+from urllib.parse import quote as _q
+r = c.get('/api/files/download/' + '/'.join(_q(p) for p in src.split('/')))
+check('download by exact (encoded) path', r.status_code == 200, f'{r.status_code}')
+r = c.post('/api/files/move', json={'src': src, 'dst': 'monitor/Q3 Reports/DATA SET v1.3.csv'})
+check('rename preserves spaces & dots', r.status_code == 200
+      and (UP / 'monitor/Q3 Reports/DATA SET v1.3.csv').is_file()
+      and not (UP / 'monitor/Q3 Reports/DATA SET v1.2.csv').exists(), f'{r.status_code}')
+
+print('== traversal STILL blocked with the preserving validator ==')
+for fname, d in [('x.iso', '../escape'), ('x.iso', 'a/../../etc'),
+                 ('x.iso', '/etc'), ('x.iso', 'a/./b')]:
+    r = up(fname, d)
+    # '/etc' and 'a/./b' are contained/normalized (safe); '..' variants rejected
+    if '..' in d:
+        check(f'reject dir={d!r}', r.status_code == 400, f'{r.status_code}')
+check('nothing escaped the share', not (UP.parent / 'escape').exists()
+      and not pathlib.Path('/etc/x.iso').exists())
+# NUL and control chars in a name are rejected
+r = up('bad\x00name.iso', 'monitor')
+check('NUL in filename rejected', r.status_code == 400, f'{r.status_code}')
+
+print('== whitelist scoping: monitor space is exempt, netboot is not ==')
+# general (non-boot) files are REJECTED at the netboot root / arbitrary dirs …
+for d in [None, 'images', 'boot/x']:
+    r = up('notes.txt', d)
+    check(f'reject notes.txt in netboot dir={d!r}', r.status_code == 400,
+          f'{r.status_code}')
+# … but ACCEPTED inside the Lab Monitor's own space (default exempt 'monitor')
+for path, d in [('notes.txt', 'monitor'), ('report.pdf', 'monitor/docs'),
+                ('evil.sh', 'monitor'), ('data.csv', 'monitor/2026/q3')]:
+    r = up(path, d)
+    check(f'accept {path!r} in monitor dir={d!r}', r.status_code == 201,
+          f'{r.status_code} {r.get_json()}')
+    check(f'  …{path!r} written under monitor/', (UP / d / path).is_file())
+# boot artifacts are still fine everywhere, including the exempt space
+check('boot file still ok in monitor space',
+      up('vmlinuz', 'monitor').status_code == 201)
 
 print('== folders: mkdir / nested / duplicate ==')
 r = c.post('/api/folders', json={'name': 'images'})
