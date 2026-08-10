@@ -127,6 +127,14 @@ AUTOINSTALL_FILE = pathlib.Path(
 MANAGER_PORT = os.environ.get('MANAGER_PORT', '8091')
 MANAGER_BASE = os.environ.get('MANAGER_BASE', f'http://{SERVER_IP}:{MANAGER_PORT}').rstrip('/')
 
+# APT caching proxy (apt-cacher-ng). When set, the manager transparently injects
+# `autoinstall.apt.proxy` into every served seed that doesn't already specify
+# one, so unattended installs pull .deb packages through the on-LAN cache: the
+# first install fills it, later installs hit the cache instead of the internet —
+# cutting latency and saturating the local link instead of the WAN. A profile
+# can opt out by setting its own apt.proxy (use "" to force a direct connection).
+APT_PROXY = os.environ.get('IPXE_APT_PROXY', '').strip()
+
 
 class UploadsSpoolRequest(Request):
     """Spool multipart file parts straight into UPLOAD_DIR while they upload.
@@ -1016,12 +1024,62 @@ autoinstall:
   storage:
     layout:
       name: direct        # use the whole disk; wipes existing data
+  apt:
+    # Route .deb downloads through the apt-cacher-ng cache running in this lab
+    # stack. The first install populates the cache; every install after that
+    # pulls packages from the LAN instead of the internet — big drop in latency
+    # and the transfer runs at local-link speed. subiquity applies this proxy
+    # both to the installer AND to the installed system's /etc/apt.
+    #
+    # You can delete this whole 'proxy:' line: when it's absent the iPXE Manager
+    # injects IPXE_APT_PROXY automatically. Set proxy: "" to force a direct
+    # connection for this profile.
+    proxy: http://192.168.100.1:3142
+    # Optional: pin a nearby mirror so the rare cache MISS is also fast.
+    # primary:
+    #   - arches: [default]
+    #     uri: http://mirror.example.net/ubuntu
   packages:
     - openssh-server
   user-data:
     disable_root: true
   late-commands: []
 """
+
+
+def _inject_apt_proxy(user_data):
+    """If an APT proxy is configured and this seed has an autoinstall block that
+    doesn't already set apt.proxy, inject it so the install uses the cache.
+
+    Only the SERVED copy is transformed; the stored profile (and the editor)
+    keep the admin's exact text. Fail-safe: if PyYAML is unavailable, the text
+    doesn't parse, there's no autoinstall block, or a proxy is already set, the
+    seed is returned byte-for-byte unchanged (so we never mangle a valid seed)."""
+    if not APT_PROXY or yaml is None:
+        return user_data
+    header = ''
+    body = user_data
+    if body.lstrip().startswith('#cloud-config'):
+        # keep the leading #cloud-config line cloud-init requires
+        first, _, rest = body.partition('\n')
+        header, body = first + '\n', rest
+    try:
+        doc = yaml.safe_load(body) if body.strip() else None
+    except yaml.YAMLError:
+        return user_data
+    if not isinstance(doc, dict):
+        return user_data
+    ai = doc.get('autoinstall')
+    if not isinstance(ai, dict):
+        return user_data                      # not a subiquity seed — leave it
+    apt = ai.get('apt')
+    if not isinstance(apt, dict):
+        apt = {}
+    if 'proxy' in apt:                        # admin set it (even to "") — respect
+        return user_data
+    apt['proxy'] = APT_PROXY
+    ai['apt'] = apt
+    return header + yaml.safe_dump(doc, default_flow_style=False, sort_keys=False)
 
 
 def _validate_user_data(text):
@@ -1107,7 +1165,7 @@ def serve_user_data(pid):
     p = _profile_or_404(pid)
     if not p:
         return Response('# unknown autoinstall profile\n', 404, mimetype='text/plain')
-    return Response(p.get('user_data', ''), mimetype='text/plain')
+    return Response(_inject_apt_proxy(p.get('user_data', '')), mimetype='text/plain')
 
 
 @app.route('/autoinstall/<pid>/meta-data')

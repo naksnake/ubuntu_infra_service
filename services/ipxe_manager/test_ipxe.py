@@ -182,6 +182,51 @@ print('== ISO auto-extraction path still whitelisted-compatible ==')
 r = up('ubuntu-24.04.iso')       # accepted; extraction is a no-op w/o pycdlib
 check('ISO upload still accepted', r.status_code == 201)
 
+print('== autoinstall: apt-cacher-ng proxy injection ==')
+import importlib
+ipxe.APT_PROXY = 'http://192.168.100.1:3142'   # simulate IPXE_APT_PROXY set
+_yaml = ipxe.yaml
+# 1) a seed with no apt block gets the proxy injected under autoinstall.apt
+seed = '#cloud-config\nautoinstall:\n  version: 1\n  packages: [openssh-server]\n'
+out = ipxe._inject_apt_proxy(seed)
+doc = _yaml.safe_load(out.split('\n', 1)[1])
+check('proxy injected when absent',
+      doc['autoinstall']['apt']['proxy'] == 'http://192.168.100.1:3142', out)
+check('#cloud-config header preserved', out.lstrip().startswith('#cloud-config'))
+check('injected seed is valid YAML and keeps version',
+      doc['autoinstall']['version'] == 1)
+# 2) an admin-set proxy is respected (not overwritten)
+seed2 = '#cloud-config\nautoinstall:\n  apt:\n    proxy: http://other:8000\n'
+out2 = ipxe._inject_apt_proxy(seed2)
+check('existing proxy respected',
+      _yaml.safe_load(out2.split('\n',1)[1])['autoinstall']['apt']['proxy'] == 'http://other:8000')
+# 3) explicit empty proxy (opt-out) is respected — no injection
+seed3 = '#cloud-config\nautoinstall:\n  apt:\n    proxy: ""\n'
+out3 = ipxe._inject_apt_proxy(seed3)
+check('empty proxy opt-out respected',
+      _yaml.safe_load(out3.split('\n',1)[1])['autoinstall']['apt']['proxy'] == '')
+# 4) a non-subiquity seed (no autoinstall block) is left byte-for-byte
+seed4 = '#cloud-config\npackages: [curl]\n'
+check('non-autoinstall seed untouched', ipxe._inject_apt_proxy(seed4) == seed4)
+# 5) with no proxy configured, nothing changes
+ipxe.APT_PROXY = ''
+check('no-op when APT_PROXY unset', ipxe._inject_apt_proxy(seed) == seed)
+# 6) end-to-end: served seed carries the injected proxy
+ipxe.APT_PROXY = 'http://10.0.0.5:3142'
+ipxe.save_profiles([{'id': 'p1', 'name': 'lab', 'hostname': 'h',
+                     'user_data': seed}])
+r = c.get('/autoinstall/p1/user-data')
+check('served user-data injects proxy', r.status_code == 200
+      and b'http://10.0.0.5:3142' in r.data, r.data[:200])
+check('served seed parses as YAML',
+      _yaml.safe_load(r.get_data(as_text=True).split('\n',1)[1])['autoinstall']['apt']['proxy']
+      == 'http://10.0.0.5:3142')
+# 7) the shipped default template is valid and shows the proxy sample
+tmpl = ipxe.DEFAULT_AUTOINSTALL
+check('default template mentions apt proxy / 3142', ':3142' in tmpl and 'proxy:' in tmpl)
+check('default template body is valid YAML',
+      isinstance(_yaml.safe_load(tmpl.split('\n',1)[1]), dict))
+
 print(f'\n{ok} passed, {fail} failed')
 shutil.rmtree(TMP, ignore_errors=True)
 sys.exit(1 if fail else 0)
