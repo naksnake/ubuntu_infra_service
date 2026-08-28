@@ -435,7 +435,7 @@ fetch_ipxe_binaries() {
   #   ipxe-arm64.efi   ARM64 UEFI (Pi 4/5 net-boot firmware, ARM servers)
   local binaries=(
     "undionly.kpxe|https://boot.ipxe.org/undionly.kpxe"
-    "ipxe.efi|https://boot.ipxe.org/ipxe.efi"
+    "ipxe.efi|https://boot.ipxe.org/x86_64-efi/ipxe.efi"
     "ipxe-arm64.efi|https://boot.ipxe.org/arm64-efi/ipxe.efi"
   )
 
