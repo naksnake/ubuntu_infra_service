@@ -25,6 +25,7 @@ import threading
 import subprocess
 
 import db
+import topology
 
 JOBS_DIR = os.environ.get('CCP_JOBS_DIR', '/data/ccp/jobs')
 SSH_KEY = os.environ.get('CCP_SSH_KEY', '/data/ccp/ssh/id_ccp')
@@ -125,6 +126,8 @@ def _run(job_id, kind, spec):
             rc = _run_onboard(job_id, spec, secret, log)
         elif kind == 'hwscan':
             rc = _run_hwscan(job_id, spec, log)
+        elif kind == 'hostname':
+            rc = _run_hostname(job_id, spec, log)
         else:
             log.write(f'unknown job kind: {kind}\n')
             rc = 2
@@ -340,6 +343,7 @@ def _run_onboard(job_id, spec, secret, log):
                           f'called {remote_name})\n')
             else:
                 db.execute('UPDATE nodes SET name=? WHERE id=?', (remote_name, node_id))
+                topology.apply(node_id, remote_name)
                 log.write(f'      node renamed to {remote_name}\n')
 
         db.execute("UPDATE nodes SET state='managed', state_detail='', "
@@ -358,6 +362,72 @@ def _run_onboard(job_id, spec, secret, log):
     except Exception as exc:
         # never leave the row stuck in 'onboarding'
         return fail(f'onboarding crashed: {exc}')
+
+
+# ── hostname management ──────────────────────────────────────────────────────
+
+def _hostname_script(new_name):
+    """Remote script: set the hostname via hostnamectl (fallback to
+    /etc/hostname + hostname) and keep /etc/hosts consistent, using sudo -n
+    when the SSH user is not root. new_name is validated by the API and
+    quoted here."""
+    q = shlex.quote(new_name)
+    return f'''
+new={q}
+old="$(hostname)"
+if [ "$(id -u)" != 0 ]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SUDO="sudo -n";
+  else echo "CCP_ERR: not root and passwordless sudo unavailable"; exit 40; fi
+else SUDO=""; fi
+if command -v hostnamectl >/dev/null 2>&1; then
+  $SUDO hostnamectl set-hostname "$new" || exit 41
+else
+  printf '%s\\n' "$new" | $SUDO tee /etc/hostname >/dev/null || exit 41
+  $SUDO hostname "$new" || exit 41
+fi
+esc=$(printf '%s' "$old" | sed 's/[].[^$*\\/]/\\\\&/g')
+if [ -n "$old" ] && grep -qw "$old" /etc/hosts 2>/dev/null; then
+  $SUDO sed -i "s/\\b$esc\\b/$new/g" /etc/hosts || exit 42
+else
+  printf '127.0.1.1\\t%s\\n' "$new" | $SUDO tee -a /etc/hosts >/dev/null || exit 42
+fi
+echo "CCP_HOSTNAME_OK $(hostname)"
+'''
+
+
+def _run_hostname(job_id, spec, log):
+    """One-click hostname change: apply on the node, verify, then refresh the
+    inventory (name + derived rack/sled/role) immediately."""
+    node = db.query('SELECT * FROM nodes WHERE id=?', (spec.get('node_id'),), one=True)
+    new_name = spec.get('new_name') or ''
+    if not node:
+        log.write('[ccp] node no longer exists\n')
+        return 2
+    if not _SAFE_NAME.fullmatch(new_name):
+        log.write(f'[ccp] invalid hostname {new_name!r}\n')
+        return 2
+    log.write(f'[ccp] renaming {node["name"]} → {new_name} on {node["address"]} …\n')
+    if node['conn'] == 'local':
+        log.write('[ccp] refusing to rename the CCP host itself from the panel\n')
+        return 2
+    rc, out = _key_ssh(node['address'], node['ssh_user'], node['ssh_port'],
+                       _hostname_script(new_name))
+    log.write(out + '\n')
+    if rc != 0 or 'CCP_HOSTNAME_OK' not in out:
+        hints = {40: 'the SSH user needs root or passwordless sudo',
+                 41: 'setting the hostname failed',
+                 42: 'updating /etc/hosts failed'}
+        log.write(f'[ccp] hostname change failed (exit {rc})'
+                  f'{": " + hints[rc] if rc in hints else ""}\n')
+        return 1
+    db.execute('UPDATE nodes SET name=? WHERE id=?', (new_name, node['id']))
+    t = topology.apply(node['id'], new_name)
+    if t['rack'] is not None:
+        placed = f"rack={t['rack']} sled={t['sled']} role={t['role'] or '-'}"
+    else:
+        placed = 'no rack topology in name'
+    log.write(f'[ccp] inventory updated: name={new_name} ({placed})\n')
+    return 0
 
 
 # ── hardware discovery ───────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ from werkzeug.utils import secure_filename
 import db
 import discovery
 import executor
+import topology
 
 app = Flask(__name__)
 app.config.update(
@@ -231,6 +232,25 @@ def nodes_page():
     return render_template('nodes.html', nodes=nodes)
 
 
+@app.route('/rack')
+def rack_page():
+    """Rack view generated purely from hostname topology — nothing is drawn
+    or configured by hand."""
+    nodes = db.query(
+        'SELECT n.*, h.gpu_count, h.gpu_model, h.cpu_cores, h.mem_mb '
+        'FROM nodes n LEFT JOIN hardware h ON h.node_id = n.id ORDER BY n.name')
+    racks = {}
+    unracked = []
+    for n in nodes:
+        if n['rack'] is None:
+            unracked.append(n)
+        else:
+            racks.setdefault(n['rack'], []).append(n)
+    racks = {r: sorted(v, key=lambda n: (n['sled'] or 0))
+             for r, v in sorted(racks.items())}
+    return render_template('rack.html', racks=racks, unracked=unracked)
+
+
 @app.route('/discovery')
 def discovery_page():
     leases, err = discovery.parse_leases()
@@ -412,6 +432,7 @@ def api_add_node():
              fields['groups'], fields['mac'], state, int(time.time())))
     except Exception as exc:
         return jsonify({'error': f'could not add node: {exc}'}), 400
+    topology.apply(node_id, name)
     log_action('node.add', f'{name} ({fields["address"]}, {conn})')
     if conn == 'local':
         return jsonify({'id': node_id}), 201
@@ -471,6 +492,37 @@ def api_verify_node(node_id):
                                 {'node_id': node_id, 'mode': 'verify'},
                                 session['username'])
     log_action('node.verify', f'{node["name"]} job {job_id}')
+    return jsonify({'job_id': job_id}), 202
+
+
+@app.route('/api/nodes/<int:node_id>/hostname', methods=['POST'])
+@require('operator')
+def api_set_hostname(node_id):
+    """One-click hostname change: hostnamectl set-hostname (+ /etc/hostname +
+    /etc/hosts) on the node, then the inventory name and derived rack/sled/role
+    refresh immediately when the job confirms."""
+    node = db.query('SELECT * FROM nodes WHERE id=?', (node_id,), one=True)
+    if not node:
+        return jsonify({'error': 'not found'}), 404
+    if node['conn'] == 'local':
+        return jsonify({'error': 'rename the CCP host from its own shell, '
+                        'not the panel'}), 400
+    if not executor.node_eligible(node):
+        return jsonify({'error': 'only managed nodes can be renamed — '
+                        'onboard the node first'}), 400
+    d = request.get_json(force=True) or {}
+    new_name = (d.get('hostname') or '').strip()
+    if not NODE_NAME_RE.fullmatch(new_name):
+        return jsonify({'error': 'hostname may contain only letters, digits, '
+                        'dot, dash, underscore (max 63 chars)'}), 400
+    if new_name == node['name']:
+        return jsonify({'error': 'that is already the node\'s name'}), 400
+    if db.query('SELECT 1 FROM nodes WHERE name=?', (new_name,), one=True):
+        return jsonify({'error': 'another node already uses that name'}), 409
+    job_id = executor.start_job('hostname', node['name'],
+                                {'node_id': node_id, 'new_name': new_name},
+                                session['username'])
+    log_action('node.hostname', f'{node["name"]} → {new_name} (job {job_id})')
     return jsonify({'job_id': job_id}), 202
 
 
@@ -582,6 +634,7 @@ def api_discovery_import():
             'mac, state, created_at) VALUES (?,?,?,?,?,?,?,?,?)',
             (name, ip, 'ssh', username or 'root', 22, '', mac, state,
              int(time.time())))
+        topology.apply(node_id, name)
         log_action('node.import', f'{name} ({ip}, {mac or "no mac"})')
         job_id = None
         if username:

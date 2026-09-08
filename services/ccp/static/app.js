@@ -68,6 +68,37 @@ function pollJob(jobId, el, statusEl, onDone) {
   return () => { stop = true; };
 }
 
+// Node detail dialog (markup lives in base.html so every page can open it)
+async function showDetail(id) {
+  const dlg = document.getElementById('detail-dlg'), body = document.getElementById('dt-body');
+  if (!dlg) return;
+  body.textContent = 'Loading…'; dlg.showModal();
+  try {
+    const d = await api('GET', '/api/nodes/' + id);
+    document.getElementById('dt-name').textContent = d.node.name;
+    const rows = [['State', d.node.state + (d.node.state_detail ? ' — ' + d.node.state_detail : '')],
+      ['Address', d.node.address], ['MAC', d.node.mac || '—'],
+      ['SSH', d.node.conn === 'ssh' ? d.node.ssh_user + '@:' + d.node.ssh_port : 'local'],
+      ['Topology', d.node.rack != null ? 'rack ' + d.node.rack + ' · sled ' + d.node.sled +
+        (d.node.role ? ' · ' + d.node.role : '') : '—'],
+      ['Onboarded', fmtTime(d.node.onboarded_at)]];
+    const h = d.hardware;
+    if (h) {
+      rows.push(['OS', h.os_name || '—'], ['Kernel', h.kernel || '—'],
+        ['CPU', (h.cpu_model || '—') + (h.cpu_cores ? ' — ' + h.cpu_cores + ' CPUs' : '') +
+          (h.cpu_sockets ? ', ' + h.cpu_sockets + ' socket(s)' : '') +
+          (h.threads_per_core ? ', ' + h.threads_per_core + ' thread(s)/core' : '')],
+        ['Memory', h.mem_mb ? Math.round(h.mem_mb / 1024) + ' GB' : '—'],
+        ['Disks', h.disks || '—'], ['Network', h.nics || '—'],
+        ['GPU', h.gpu_count ? h.gpu_count + '× ' + (h.gpu_model || 'GPU') : 'none detected'],
+        ['InfiniBand', h.infiniband || '—'],
+        ['Facts updated', fmtTime(h.updated_at)]);
+    } else rows.push(['Hardware', 'not scanned yet']);
+    body.innerHTML = '<table>' + rows.map(r => '<tr><th style="width:130px;text-align:left">' +
+      esc(r[0]) + '</th><td>' + esc(r[1]) + '</td></tr>').join('') + '</table>';
+  } catch (e) { body.textContent = e.message; }
+}
+
 async function del(url, msg, cb) {
   if (!confirm(msg || 'Delete this item?')) return;
   try { await api('DELETE', url); toast('Deleted'); cb ? cb() : location.reload(); }

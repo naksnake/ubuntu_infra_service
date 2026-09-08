@@ -42,7 +42,12 @@ CREATE TABLE IF NOT EXISTS nodes (
     state        TEXT NOT NULL DEFAULT 'unverified',
     state_detail TEXT NOT NULL DEFAULT '',
     mac          TEXT NOT NULL DEFAULT '',      -- from DHCP discovery, if known
-    onboarded_at INTEGER                        -- when the node became managed
+    onboarded_at INTEGER,                       -- when the node became managed
+    -- topology derived from the hostname (rack0_sled1_gpu); NULL/'' when the
+    -- name doesn't follow the scheme. Never entered manually.
+    rack         INTEGER,
+    sled         INTEGER,
+    role         TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS scripts (
@@ -178,6 +183,17 @@ def init_db():
         conn.execute('ALTER TABLE nodes ADD COLUMN onboarded_at INTEGER')
         conn.execute("UPDATE nodes SET state='managed' WHERE conn='local'")
         conn.commit()
+
+    # M3 — hostname-driven topology: parse rack/sled/role out of every
+    # existing node name once; thereafter they are recomputed on rename.
+    ncols = [r['name'] for r in conn.execute('PRAGMA table_info(nodes)')]
+    if 'rack' not in ncols:
+        conn.execute('ALTER TABLE nodes ADD COLUMN rack INTEGER')
+        conn.execute('ALTER TABLE nodes ADD COLUMN sled INTEGER')
+        conn.execute("ALTER TABLE nodes ADD COLUMN role TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+        import topology                # local import: topology imports db
+        topology.backfill(conn)
 
     # A worker restart aborts any in-flight onboarding thread; reset those
     # rows to a retryable state (mirrors the running-jobs reaper below).

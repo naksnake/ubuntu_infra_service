@@ -36,6 +36,7 @@
             {% if n.state in ('failed','unverified') and n.state_detail %}<div class="statehint">{{ n.state_detail }}</div>{% endif %}</td>
         <td><a href="#" onclick="showDetail({{ n.id }});return false"><b>{{ n.name }}</b></a>
             {% if n.conn=='local' %} <span class="pill">local</span>{% endif %}
+            {% if n.rack is not none %}<div class="statehint">rack {{ n.rack }} · sled {{ n.sled }}{% if n.role %} · {{ n.role }}{% endif %}</div>{% endif %}
             {% if n.mac %}<div class="statehint mono">{{ n.mac }}</div>{% endif %}</td>
         <td class="mono">{{ n.address }}</td>
         <td>{% if n.cpu_cores %}<span class="mono">{{ n.cpu_cores }}c · {{ ((n.mem_mb or 0)/1024)|round(0)|int }}G{% if n.gpu_count %} · {{ n.gpu_count }}× GPU{% endif %}</span>
@@ -54,6 +55,7 @@
             {% elif n.state == 'onboarding' %}
               <span class="muted">working…</span>
             {% elif n.state == 'managed' %}
+              <button class="btn btn-sm" onclick="openRename({{ n.id }},'{{ n.name }}')" title="Change the node's hostname (hostnamectl + /etc/hostname + /etc/hosts)">Rename</button>
               <button class="btn btn-sm btn-ghost" onclick="rescan({{ n.id }},'{{ n.name }}')" title="Refresh hardware facts">Rescan HW</button>
               <button class="btn btn-sm btn-ghost" onclick="openOnboard({{ n.id }},'{{ n.name }}','{{ n.ssh_user }}')" title="Re-run onboarding, e.g. to change the SSH user">Re-onboard</button>
             {% endif %}
@@ -69,10 +71,17 @@
   </table>
 </div>
 
-<dialog id="detail-dlg" class="dlg dlg-wide">
-  <h2 id="dt-name"></h2>
-  <div id="dt-body" class="muted">Loading…</div>
-  <div style="margin-top:14px"><button class="btn btn-ghost" onclick="document.getElementById('detail-dlg').close()">Close</button></div>
+<dialog id="rename-dlg" class="dlg">
+  <h2>Rename <span id="rn-old"></span></h2>
+  <p class="muted">Runs <span class="mono">hostnamectl set-hostname</span> on the node,
+  updates <span class="mono">/etc/hostname</span> and <span class="mono">/etc/hosts</span>,
+  then refreshes the inventory. Use <span class="mono">rack&lt;N&gt;_sled&lt;M&gt;_&lt;role&gt;</span>
+  to place the node in the rack view.</p>
+  <label>New hostname</label><input id="rn-new" placeholder="rack0_sled1_gpu">
+  <div style="margin-top:14px">
+    <button class="btn" onclick="submitRename()">Rename</button>
+    <button class="btn btn-ghost" onclick="document.getElementById('rename-dlg').close()">Cancel</button>
+  </div>
 </dialog>
 
 <dialog id="onboard-dlg" class="dlg">
@@ -133,30 +142,22 @@ async function rescan(id,name){
   catch(e){toast(e.message,true);}
 }
 
-async function showDetail(id){
-  const dlg=document.getElementById('detail-dlg'),body=document.getElementById('dt-body');
-  body.textContent='Loading…';dlg.showModal();
+let renameId=null;
+function openRename(id,name){
+  renameId=id;
+  document.getElementById('rn-old').textContent=name;
+  document.getElementById('rn-new').value='';
+  document.getElementById('rename-dlg').showModal();
+}
+async function submitRename(){
+  const h=v('rn-new').trim();
+  if(!h){toast('Enter the new hostname',true);return;}
   try{
-    const d=await api('GET','/api/nodes/'+id);
-    document.getElementById('dt-name').textContent=d.node.name;
-    const rows=[['State',d.node.state+(d.node.state_detail?' — '+d.node.state_detail:'')],
-      ['Address',d.node.address],['MAC',d.node.mac||'—'],
-      ['SSH',d.node.conn==='ssh'?d.node.ssh_user+'@:'+d.node.ssh_port:'local'],
-      ['Onboarded',fmtTime(d.node.onboarded_at)]];
-    const h=d.hardware;
-    if(h){rows.push(['OS',h.os_name||'—'],['Kernel',h.kernel||'—'],
-      ['CPU',(h.cpu_model||'—')+(h.cpu_cores?' — '+h.cpu_cores+' CPUs':'')+
-        (h.cpu_sockets?', '+h.cpu_sockets+' socket(s)':'')+
-        (h.threads_per_core?', '+h.threads_per_core+' thread(s)/core':'')],
-      ['Memory',h.mem_mb?Math.round(h.mem_mb/1024)+' GB':'—'],
-      ['Disks',h.disks||'—'],['Network',h.nics||'—'],
-      ['GPU',h.gpu_count?h.gpu_count+'× '+(h.gpu_model||'GPU'):'none detected'],
-      ['InfiniBand',h.infiniband||'—'],
-      ['Facts updated',fmtTime(h.updated_at)]);}
-    else rows.push(['Hardware','not scanned yet']);
-    body.innerHTML='<table>'+rows.map(r=>'<tr><th style="width:130px;text-align:left">'+
-      esc(r[0])+'</th><td>'+esc(r[1])+'</td></tr>').join('')+'</table>';
-  }catch(e){body.textContent=e.message;}
+    const d=await api('POST','/api/nodes/'+renameId+'/hostname',{hostname:h});
+    document.getElementById('rename-dlg').close();
+    toast('Renaming… (job '+d.job_id+')');
+    setTimeout(()=>location.reload(),2500);
+  }catch(e){toast(e.message,true);}
 }
 
 // While any node is onboarding, poll and reload when its state settles.
