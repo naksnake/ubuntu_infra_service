@@ -266,6 +266,34 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
       register: slurm_ver
       changed_when: false
 
+    # Which versions each node could install. Without this the operator has to
+    # guess what to type into "Pin version" — and a pin that is missing on one
+    # node just fails the apt task with no hint of what would have worked.
+    - name: List the Slurm versions this node's apt sources offer
+      ansible.builtin.shell: |
+        set -o pipefail
+        apt-cache madison slurm-wlm 2>/dev/null \
+          | awk -F'|' '{{gsub(/ /, "", $2); print $2}}' | sort -Vu
+      args:
+        executable: /bin/bash
+      register: slurm_avail
+      changed_when: false
+      failed_when: false
+
+    - name: Seed the cluster-wide version candidate list
+      run_once: true
+      ansible.builtin.set_fact:
+        slurm_common: "{{{{ hostvars[ansible_play_hosts[0]]['slurm_avail']['stdout_lines']
+                        | default([]) }}}}"
+
+    - name: Reduce it to versions available on every node
+      run_once: true
+      ansible.builtin.set_fact:
+        slurm_common: "{{{{ slurm_common
+                        | intersect(hostvars[item]['slurm_avail']['stdout_lines']
+                        | default([])) }}}}"
+      loop: "{{{{ ansible_play_hosts[1:] }}}}"
+
     - name: Fail fast when Slurm versions differ across the cluster
       run_once: true
       ansible.builtin.assert:
@@ -275,17 +303,26 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
         success_msg: "every node runs {{{{ slurm_ver.stdout | trim }}}}"
         fail_msg: |
           Slurm versions differ across this cluster, so the nodes will never
-          register with the controller. Options, best first:
-            1. Reinstall the nodes to one Ubuntu release (this is a PXE
-               provisioning platform — that is the durable fix), then Deploy.
-            2. Deploy with "Pin version" set to a version present in every
-               node's apt sources, plus "Clean reinstall" to replace what is
-               installed now.
-          Distro packages cannot converge on their own: each Ubuntu release
-          ships its own Slurm, so nodes on different releases always differ.
-          {{{{ ansible_play_hosts | zip(ansible_play_hosts
-              | map('extract', hostvars, ['slurm_ver', 'stdout'])
-              | map('trim')) | list }}}}
+          register with the controller.
+
+          Installed now:
+          {{% for h in ansible_play_hosts %}}  {{{{ h }}}}: {{{{ hostvars[h]['slurm_ver']['stdout'] | trim }}}}
+          {{% endfor %}}
+          Offered by each node's apt sources:
+          {{% for h in ansible_play_hosts %}}  {{{{ h }}}}: {{{{ hostvars[h]['slurm_avail']['stdout_lines'] | default([]) | join(', ') | default('(none)', true) }}}}
+          {{% endfor %}}
+          {{% if slurm_common | default([]) | length > 0 %}}
+          WHAT TO DO: these versions exist on EVERY node — put one in
+          "Pin version" (newest first) and tick "Clean reinstall", then Deploy:
+            {{{{ slurm_common | reverse | list | join('  ') }}}}
+          {{% else %}}
+          WHAT TO DO: there is NO version available on every node, so pinning
+          cannot work here — each Ubuntu release ships only its own Slurm.
+          Reinstall the odd node(s) so every node runs the same Ubuntu release
+          (that is what this PXE platform is for), re-onboard from Discovery,
+          then Deploy. Alternatively serve one common Slurm build from your own
+          apt repo / .deb on every node.
+          {{% endif %}}
 
     - name: Generate the munge key on the controller
       ansible.builtin.command:

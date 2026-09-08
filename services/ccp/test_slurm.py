@@ -184,7 +184,30 @@ check('version gate still runs after a pinned install',
       gate_i > inst_i, (gate_i, inst_i))
 check('gate message points at reinstall/pin and the PXE fix',
       'Pin version' in pb_re and 'Clean reinstall' in pb_re
-      and 'one Ubuntu release' in pb_re)
+      and 'same Ubuntu release' in pb_re)
+
+print('== the gate tells the operator which version to pin ==')
+avail_i = next((i for i, n in enumerate(names_re)
+                if n.startswith("List the Slurm versions")), -1)
+seed_i = names_re.index('Seed the cluster-wide version candidate list')
+red_i = names_re.index('Reduce it to versions available on every node')
+check('candidate versions collected per node with a version sort',
+      avail_i > -1 and 'apt-cache madison slurm-wlm'
+      in str(tasks_re[avail_i]) and 'sort -Vu' in str(tasks_re[avail_i]))
+check('collection and intersection run before the gate',
+      avail_i < seed_i < red_i < gate_i, (avail_i, seed_i, red_i, gate_i))
+check('intersection uses the intersect filter across the other hosts',
+      'intersect' in str(tasks_re[red_i])
+      and 'ansible_play_hosts[1:]' in str(tasks_re[red_i]))
+gate_msg = tasks_re[gate_i]['ansible.builtin.assert']['fail_msg']
+check('failure lists installed AND offered versions per node',
+      'Installed now' in gate_msg and "apt sources" in gate_msg
+      and 'slurm_avail' in gate_msg, gate_msg)
+check('failure branches on whether a common version exists',
+      'slurm_common' in gate_msg and 'NO version available on every node' in gate_msg
+      and 'exist on EVERY node' in gate_msg)
+check('availability probe never fails the play',
+      tasks_re[avail_i].get('failed_when') is False)
 cleanup = slurm.cleanup_playbook()
 check('cleanup stops services and removes configs',
       'slurmd' in cleanup and '/etc/slurm/slurm.conf' in cleanup)
