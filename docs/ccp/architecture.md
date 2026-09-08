@@ -124,10 +124,19 @@ A Slurm-kind cluster carries: controller node id, generated `slurm.conf` /
 where each stage maps to jobs on the existing engine:
 
 - DISCOVER = hwscan across members; DEPLOY = built-in Ansible playbook
-  (munge key distribution, slurm-wlm install, config push, service start);
-  VALIDATE = `sinfo` + `srun hostname` on the controller; BENCHMARK =
-  node-to-node checks run *through Slurm* (`srun`), not loopback; REPORT =
-  aggregation of the stored job outputs; CLEANUP = teardown playbook.
+  (read-only version preflight and gates first, then munge key distribution,
+  Slurm install, config push, service start). Slurm comes either from the
+  distro `slurm-wlm` package (optionally pinned to a version every node's apt
+  sources offer) or, for a fleet whose nodes run different Ubuntu releases and
+  therefore can never share a package version, from a **source build** of one
+  SchedMD release on every node (default 25.11.8; tarball URL overridable for
+  a local mirror). VALIDATE = `sinfo` + `srun hostname` on the controller,
+  plus an **sbatch test**: a batch job shaped like an AI training run (one
+  task per node, GPU inventory, timed numpy/torch step) submitted with
+  `sbatch --wait`, checked with `scontrol`, output pulled from the batch host;
+  BENCHMARK = node-to-node checks run *through Slurm* (`srun`), not loopback;
+  REPORT = aggregation of the stored job outputs; CLEANUP = teardown playbook
+  (always allowed — it is the recovery path for a configless slurmd).
 
 Config generation is pure-python from `hardware` rows (`slurm.py`) so it is
 unit-testable without any node.

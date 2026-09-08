@@ -1,6 +1,7 @@
-"""Slurm lifecycle tests: stage guards, discover fan-out, validate/benchmark/
-monitor over stubbed SSH (asserting node-to-node — never loopback — testing),
-report aggregation, cleanup, and state advancement.
+"""Slurm lifecycle tests: stage guards, discover fan-out, validate/sbatch/
+benchmark/monitor over stubbed SSH (asserting node-to-node — never loopback —
+testing, and a real sbatch → scontrol → output round trip), report
+aggregation, cleanup, and state advancement.
 """
 import os, sys, time, tempfile, pathlib
 
@@ -48,15 +49,37 @@ def cluster_state(cid):
 
 admin, ah = client_for('admin', 'adminpass123')
 
-# SSH stub that records every (address, command) pair
+# SSH stub that records every (address, command) pair (and the per-call
+# timeout, which the batch test must raise above the onboarding default)
 CALLS = []
+TIMEOUTS = []
 FACTS = ('CCP_FACTS_BEGIN\nos_name=Ubuntu 24.04\ncpu_model=EPYC\ncpu_cores=64\n'
          'mem_kb=131072000\ngpu=NVIDIA H100\nCCP_FACTS_END\n')
+# what the stubbed scheduler reports for the batch job
+SB = {'jid': '4242', 'state': 'COMPLETED', 'batch_host': 'rack0_sled2_gpu',
+      'submit_rc': 0, 'submit_out': None}
+SB_OUT = ('== CCP AI-training smoke test: job 4242 on 2 node(s): rack0_sled[1-2]_gpu ==\n'
+          '[rack0_sled1_gpu] cpus=64\n[rack0_sled1_gpu] GPU 0: NVIDIA H100 (UUID: GPU-1)\n'
+          '[rack0_sled2_gpu] cpus=64\n[rack0_sled2_gpu] GPU 0: NVIDIA H100 (UUID: GPU-2)\n'
+          '[rack0_sled1_gpu] training step (numpy matmul 2048x2048): 0.412s\n'
+          '[rack0_sled2_gpu] training step (numpy matmul 2048x2048): 0.398s\n'
+          '== CCP AI-training smoke test finished ==\n')
 
-def stub_key_ssh(address, user, port, command):
+def stub_key_ssh(address, user, port, command, timeout=None):
     CALLS.append((address, command))
+    TIMEOUTS.append((command, timeout))
     if 'CCP_FACTS_BEGIN' in command:
         return (0, FACTS)
+    if 'CCPEOF' in command:                       # staging the batch script
+        return (0, 'batch script staged\n')
+    if 'sbatch --wait --parsable' in command:
+        out = SB['submit_out'] if SB['submit_out'] is not None else SB['jid'] + '\n'
+        return (SB['submit_rc'], out)
+    if 'scontrol show job' in command:
+        return (0, f"JobId={SB['jid']} JobName=ccp-ai-smoke\n   JobState={SB['state']} "
+                   f"Reason=None ExitCode=0:0\n   BatchHost={SB['batch_host']}\n")
+    if f"cat /tmp/ccp-ai-smoke-{SB['jid']}.out" in command:
+        return (0, SB_OUT)
     if 'iperf3 -s' in command or 'command -v iperf3' in command:
         return (0, 'IPERF_SERVER_READY\n')
     if 'iperf3 -c' in command:
@@ -82,6 +105,8 @@ r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': '
 check('unknown stage → 400', r.status_code == 400)
 r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'validate'})
 check('validate before deploy → 400', r.status_code == 400, r.get_json())
+r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'sbatch'})
+check('sbatch test before deploy → 400', r.status_code == 400, r.get_json())
 r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'cleanup'})
 check('cleanup is always allowed — it is the recovery path for a node left '
       'with slurmd enabled but no config', r.status_code == 202, r.get_json())
@@ -111,6 +136,67 @@ check('validate runs sinfo + srun across all nodes on the controller',
       and all(a == '10.0.2.1' for a, _ in CALLS), CALLS)
 check('state → VALIDATE', cluster_state(cid) == 'VALIDATE')
 check('job succeeded with PASSED marker', 'VALIDATE PASSED' in log)
+
+print('== sbatch: an AI-training-shaped batch job through the real scheduler ==')
+CALLS.clear(); TIMEOUTS.clear()
+db.execute("UPDATE clusters SET slurm_state='DEPLOY' WHERE id=?", (cid,))
+r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'sbatch'})
+check('sbatch test accepted once deployed', r.status_code == 202, r.get_json())
+jid = r.get_json()['job_id']
+log = executor.job_log(jid)
+stage_cmd = next((c for a, c in CALLS if 'CCPEOF' in c and a == '10.0.2.1'), '')
+check('batch script staged on the controller via a quoted heredoc',
+      stage_cmd.startswith("cat > /tmp/ccp-ai-smoke.sh <<'CCPEOF'"), stage_cmd[:80])
+check('script asks for one task on every member node',
+      '#SBATCH --nodes=2' in stage_cmd and '#SBATCH --ntasks-per-node=1' in stage_cmd
+      and '#SBATCH --job-name=ccp-ai-smoke' in stage_cmd, stage_cmd)
+check('script inventories GPUs and times a training step on every node',
+      'nvidia-smi -L' in stage_cmd and 'srun python3' in stage_cmd
+      and 'training step' in stage_cmd and 'import torch' in stage_cmd, stage_cmd)
+gres_conf = db.query('SELECT gres_conf FROM clusters WHERE id=?', (cid,), one=True)['gres_conf'] or ''
+expect_gres = all(f'NodeName={n}' in gres_conf for n in ('rack0_sled1_gpu', 'rack0_sled2_gpu'))
+check('GPU reservation follows gres.conf (only when every member declares one)',
+      ('#SBATCH --gres=gpu:1' in stage_cmd) == expect_gres, (expect_gres, gres_conf))
+check('submitted with sbatch --wait --parsable on the controller',
+      any(a == '10.0.2.1' and c == 'sbatch --wait --parsable /tmp/ccp-ai-smoke.sh'
+          for a, c in CALLS), CALLS)
+check('the wait uses the batch budget, not the 60 s onboarding step timeout',
+      any('sbatch --wait' in c and t == executor.SBATCH_WAIT_SECONDS for c, t in TIMEOUTS)
+      and executor.SBATCH_WAIT_SECONDS > executor.ONBOARD_STEP_TIMEOUT, TIMEOUTS)
+check('job state read back with scontrol',
+      any('scontrol show job 4242' in c for _, c in CALLS))
+check('output fetched from the batch host (sled2), not blindly from the controller',
+      any(a == '10.0.2.2' and c == 'cat /tmp/ccp-ai-smoke-4242.out' for a, c in CALLS), CALLS)
+check('per-host framing so the console groups it by node',
+      '===== rack0_sled1_gpu (10.0.2.1) : sbatch --wait' in log
+      and '===== rack0_sled2_gpu (10.0.2.2) : job 4242 output (batch host) =====' in log
+      and '[rack0_sled2_gpu exit 0]' in log, log)
+check('job output (GPU list + training step timings) lands in the log',
+      'NVIDIA H100 (UUID: GPU-2)' in log and 'training step (numpy matmul' in log, log)
+check('PASSED marker', 'SBATCH PASSED' in log, log)
+check('a passing batch job is the functional validation → state VALIDATE',
+      cluster_state(cid) == 'VALIDATE')
+
+# scheduler ran it but the job failed (e.g. a node killed the step)
+db.execute("UPDATE clusters SET slurm_state='DEPLOY' WHERE id=?", (cid,))
+SB['state'] = 'FAILED'
+r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'sbatch'})
+log = executor.job_log(r.get_json()['job_id'])
+check('JobState other than COMPLETED fails the stage',
+      'SBATCH FAILED (JobState=FAILED' in log, log)
+check('failed batch job does not advance', cluster_state(cid) == 'DEPLOY')
+# controller unreachable / partition down: sbatch returns no id
+SB['state'] = 'COMPLETED'
+SB['submit_rc'], SB['submit_out'] = 1, 'sbatch: error: Batch job submission failed: Required node not available (down, drained or reserved)\n'
+r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'sbatch'})
+log = executor.job_log(r.get_json()['job_id'])
+check('submission failure is reported with a hint, no scontrol/cat attempted',
+      'SBATCH FAILED: sbatch returned no job id' in log and 'run Validate' in log
+      and 'Required node not available' in log
+      and not any('scontrol show job' in c for _, c in CALLS[-3:]), log)
+check('state unchanged after a failed submission', cluster_state(cid) == 'DEPLOY')
+SB['submit_rc'], SB['submit_out'] = 0, None
+db.execute("UPDATE clusters SET slurm_state='VALIDATE' WHERE id=?", (cid,))
 
 print('== benchmark is node-to-node, never loopback ==')
 CALLS.clear()
@@ -158,7 +244,7 @@ check('failed cleanup does not advance', cluster_state(cid) == 'MONITOR')
 
 print('== failing stage does not advance ==')
 db.execute("UPDATE clusters SET slurm_state='DEPLOY' WHERE id=?", (cid,))
-executor._key_ssh = lambda a, u, p, cmd: (1, 'slurm_load_partitions: unable to contact controller\n')
+executor._key_ssh = lambda a, u, p, cmd, **kw: (1, 'slurm_load_partitions: unable to contact controller\n')
 r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'validate'})
 jid = r.get_json()['job_id']
 check('failed validate keeps state', cluster_state(cid) == 'DEPLOY')

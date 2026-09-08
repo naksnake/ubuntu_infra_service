@@ -773,20 +773,33 @@ def api_slurm_deploy(cluster_id):
     d = request.get_json(silent=True) or {}
     reinstall = bool(d.get('reinstall'))
     version = (d.get('version') or '').strip()
-    if version and not re.fullmatch(r'[A-Za-z0-9.+:~_-]{1,64}', version):
+    install_from = 'source' if d.get('install_from') == 'source' else 'apt'
+    tarball_url = (d.get('tarball_url') or '').strip()
+    if install_from == 'source':
+        if version and not re.fullmatch(r'\d+\.\d+\.\d+', version):
+            return jsonify({'error': 'for a source build give the upstream '
+                            'release, e.g. 25.11.8'}), 400
+        if tarball_url and not re.fullmatch(
+                r'https?://[A-Za-z0-9._~:/?#\[\]@!$&\'()*+,;=%-]{1,500}', tarball_url):
+            return jsonify({'error': 'tarball URL must be an http(s) URL'}), 400
+    elif version and not re.fullmatch(r'[A-Za-z0-9.+:~_-]{1,64}', version):
         return jsonify({'error': 'version must be an apt version string, e.g. '
                         '23.11.4-1.2ubuntu5'}), 400
     playbook = slurm.deploy_playbook(c['slurm_conf'], c['gres_conf'],
                                      controller['name'],
-                                     reinstall=reinstall, version=version or None)
-    job_id = executor.start_job(
-        'slurm_deploy', c['name'],
-        {'node_ids': [m['id'] for m in members], 'playbook': playbook,
-         'extra_vars': '', 'cluster_id': cluster_id, 'advance_to': 'DEPLOY'},
-        session['username'])
+                                     reinstall=reinstall, version=version or None,
+                                     install_from=install_from,
+                                     tarball_url=tarball_url or None)
+    spec = {'node_ids': [m['id'] for m in members], 'playbook': playbook,
+            'extra_vars': '', 'cluster_id': cluster_id, 'advance_to': 'DEPLOY'}
+    if install_from == 'source':
+        spec['timeout'] = 3600      # compiling on every node takes minutes
+    job_id = executor.start_job('slurm_deploy', c['name'], spec, session['username'])
     log_action('slurm.deploy', f'{c["name"]} job {job_id}'
                + (' (clean reinstall)' if reinstall else '')
-               + (f' pinned {version}' if version else ''))
+               + (f' from source {version or slurm.SOURCE_DEFAULT_VERSION}'
+                  if install_from == 'source' else '')
+               + (f' pinned {version}' if version and install_from == 'apt' else ''))
     return jsonify({'job_id': job_id}), 202
 
 
@@ -817,7 +830,7 @@ def api_slurm_action(cluster_id):
         log_action('slurm.discover', f'{c["name"]} jobs {job_ids}')
         return jsonify({'job_ids': job_ids}), 202
 
-    if stage in ('validate', 'benchmark', 'monitor'):
+    if stage in ('validate', 'benchmark', 'monitor', 'sbatch'):
         if c['slurm_state'] not in SLURM_DEPLOYED_STATES:
             return jsonify({'error': f'{stage} needs a deployed cluster — run '
                             'Deploy first'}), 400
@@ -829,7 +842,9 @@ def api_slurm_action(cluster_id):
         job_id = executor.start_job(
             'slurm_action', c['name'],
             {'stage': stage, 'cluster_id': cluster_id, 'node_ids': ids,
-             'controller_id': controller['id'], 'advance_to': stage.upper()},
+             'controller_id': controller['id'],
+             # the batch test is the functional validation of the scheduler
+             'advance_to': 'VALIDATE' if stage == 'sbatch' else stage.upper()},
             who)
         log_action(f'slurm.{stage}', f'{c["name"]} job {job_id}')
         return jsonify({'job_id': job_id}), 202
@@ -857,7 +872,7 @@ def api_slurm_action(cluster_id):
         log_action('slurm.cleanup', f'{c["name"]} job {job_id}')
         return jsonify({'job_id': job_id}), 202
 
-    return jsonify({'error': 'stage must be one of: discover, validate, '
+    return jsonify({'error': 'stage must be one of: discover, validate, sbatch, '
                     'benchmark, report, monitor, cleanup'}), 400
 
 

@@ -44,12 +44,20 @@
     <button class="btn btn-sm btn-ok" onclick="slurmDeploy({{ c.id }},'{{ c.name }}')"
       {{ 'disabled' if not c.slurm_conf }}
       title="Install munge + slurm-wlm, distribute the munge key, push the generated configs and start services (built-in playbook, Ubuntu/Debian)">Deploy</button>
+    <select id="inst-{{ c.id }}" class="verpin" title="Where Slurm comes from. Distro packages differ per Ubuntu release; a source build installs the identical upstream release on every node regardless of OS release.">
+      <option value="apt">install: distro packages</option>
+      <option value="source">install: build from source (same version everywhere)</option>
+    </select>
     <label class="inlinechk" title="Purge the installed Slurm/munge packages, config and state on every node before installing again — use this to escape a fleet stuck on mismatched versions">
       <input type="checkbox" id="reinst-{{ c.id }}"> clean reinstall</label>
-    <input id="ver-{{ c.id }}" class="verpin" placeholder="pin version (optional)"
-      title="Exact apt version to install on every node, e.g. 23.11.4-1.2ubuntu5 — it must exist in every node's apt sources">
+    <input id="ver-{{ c.id }}" class="verpin" placeholder="version (optional)"
+      title="Distro packages: exact apt version present in every node's sources, e.g. 23.11.4-1.2ubuntu5. Source build: upstream release, default 25.11.8.">
+    <input id="tar-{{ c.id }}" class="verpin" placeholder="tarball URL (optional)"
+      title="Serve the slurm-<version>.tar.bz2 from a local mirror (e.g. the webfs share) when nodes have no internet; default downloads from download.schedmd.com">
     <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'validate')"
       title="sinfo + srun across every node on the controller">Validate</button>
+    <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'sbatch')"
+      title="Submit a batch job shaped like an AI training run (one task per node, GPU inventory, timed training step), wait for it, and show its output">sbatch test</button>
     <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'benchmark')"
       title="Timed srun dispatch, node-to-node ping, node-to-node iperf3 bandwidth (never loopback)">Benchmark</button>
     <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'report')"
@@ -137,8 +145,16 @@ async function slurmGenerate(cid){
 async function slurmDeploy(cid,name){
   const reinstall=document.getElementById('reinst-'+cid)?.checked||false;
   const version=(document.getElementById('ver-'+cid)?.value||'').trim();
+  const install_from=document.getElementById('inst-'+cid)?.value||'apt';
+  const tarball_url=(document.getElementById('tar-'+cid)?.value||'').trim();
   let msg='Deploy Slurm to all managed members of '+name+'? This installs '+
     'munge + slurm-wlm and (re)starts slurmctld/slurmd.';
+  if(install_from==='source')msg='Deploy Slurm to all managed members of '+name+
+    ' by BUILDING slurm '+(version||'25.11.8')+' from source on every node.\n\n'+
+    'Distro Slurm packages are removed first; the build takes several minutes '+
+    'per node (they run in parallel). Every node ends up on the identical '+
+    'version regardless of its Ubuntu release.'+
+    (reinstall?'\n\nClean reinstall is ticked: existing config and state are PURGED too.':'');
   if(reinstall)msg='CLEAN REINSTALL on all managed members of '+name+
     ':\n\nthe installed Slurm/munge packages, their config and their state '+
     '(/etc/slurm, /etc/munge, spool and log dirs) are PURGED, then '+
@@ -147,7 +163,8 @@ async function slurmDeploy(cid,name){
   else if(version)msg+='\n\nPinning to version '+version+'.';
   if(!confirm(msg))return;
   try{
-    const d=await api('POST','/api/clusters/'+cid+'/slurm/deploy',{reinstall,version});
+    const d=await api('POST','/api/clusters/'+cid+'/slurm/deploy',
+      {reinstall,version,install_from,tarball_url});
     toast('Deployment started (job '+d.job_id+')');
     location.href='/jobs/'+d.job_id;
   }catch(e){toast(e.message,true);}

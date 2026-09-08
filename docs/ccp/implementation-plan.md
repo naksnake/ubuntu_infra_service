@@ -28,5 +28,5 @@ is fine at lab scale).
 | sshpass/ssh edge cases (host key churn after reinstall) | `StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null` already the project stance for a PXE lab |
 | password leakage | secrets never enter `jobs.spec`/logs; passed via env (`SSHPASS`), deleted from memory at thread start; code-reviewed test asserts DB/log cleanliness |
 | legacy nodes breaking | they keep existing; only *execution eligibility* is gated, with one-click Verify to restore it |
-| Slurm deploy variance across distros | scope to Ubuntu/Debian `slurm-wlm` packages, documented; playbook is visible/auditable in the job log |
+| Slurm deploy variance across distros | default to Ubuntu/Debian `slurm-wlm` packages with a version gate (versions listed per node, pin what every node offers); when members run different Ubuntu releases no common package exists, so the deploy offers **build from source** — the same SchedMD release (default 25.11.8, optional local-mirror tarball URL) compiled on every node; playbook is visible/auditable in the job log |
 | single-worker job loss on restart | existing orphan reaper marks running jobs failed; onboarding is retryable |

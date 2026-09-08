@@ -222,6 +222,104 @@ for label, kw in (('plain', {}), ('reinstall', {'reinstall': True}),
     check(f'{label}: slurmd only started after slurm.conf exists',
           write < _first(names, 'Start slurmd on every node'))
 
+print('== source build: the identical upstream release on every node ==')
+# Distro packages can never converge nodes on different Ubuntu releases (each
+# ships only its own Slurm); building the same tarball everywhere can.
+pb_src = slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu', install_from='source')
+tasks_src = _yaml.safe_load(pb_src)[0]['tasks']
+names_src = [t['name'] for t in tasks_src]
+check('source playbook is valid YAML', isinstance(tasks_src, list))
+V = slurm.SOURCE_DEFAULT_VERSION
+check('default upstream release is 25.11.8', V == '25.11.8')
+check('toolchain and munge installed from the distro',
+      'Install munge and the Slurm build toolchain' in names_src, names_src)
+tool = tasks_src[names_src.index('Install munge and the Slurm build toolchain')]
+check('build deps cover compiler, munge headers, hwloc and pam',
+      all(p in tool['ansible.builtin.apt']['name'] for p in
+          ('munge', 'build-essential', 'libmunge-dev', 'libhwloc-dev', 'libpam0g-dev')),
+      tool)
+rm_i = names_src.index('Remove distro Slurm packages so they cannot shadow the source build')
+rm = tasks_src[rm_i]['ansible.builtin.apt']
+check('distro slurm-wlm purged before the build so /usr/sbin/slurmd is ours',
+      rm['state'] == 'absent' and rm['purge'] is True and 'slurm-wlm' in rm['name'], rm)
+check('munge is NOT purged in source mode (it stays a distro package)',
+      'munge' not in rm['name'], rm)
+dl_i = names_src.index(f'Download the slurm-{V} source tarball')
+dl = tasks_src[dl_i]['ansible.builtin.get_url']
+check('tarball comes from SchedMD by default',
+      dl['url'] == f'https://download.schedmd.com/slurm/slurm-{V}.tar.bz2', dl)
+build_i = _first(names_src, f'Build and install slurm-{V} from source')
+build = tasks_src[build_i]['ansible.builtin.shell']
+check('build task present after the download', build_i > dl_i, (dl_i, build_i))
+check('configure flags match the paths CCP writes (validated on Ubuntu 24.04)',
+      '--prefix=/usr' in build and '--sysconfdir=/etc/slurm' in build
+      and '--localstatedir=/var' in build and '--with-munge' in build, build)
+check('build is parallel, installs the systemd units and refreshes ld cache',
+      'make -j"$(nproc)"' in build and 'make install' in build
+      and 'etc/slurmd.service etc/slurmctld.service /etc/systemd/system/' in build
+      and 'ldconfig' in build, build)
+check('build script aborts on the first failing step', 'set -euo pipefail' in build)
+for i in (dl_i, build_i):
+    check(f'{names_src[i][:30]}… skipped when this release is already installed',
+          tasks_src[i].get('when') == f"'slurm {V}' not in slurm_have.stdout",
+          tasks_src[i].get('when'))
+have_i = names_src.index('Check which Slurm is installed now')
+check('installed-release probe runs after the purge, before the download, and tolerates absence',
+      rm_i < have_i < dl_i and tasks_src[have_i].get('failed_when') is False)
+check('slurm user created (packages used to do that)',
+      'Ensure the slurm system user exists' in names_src
+      and names_src.index('Ensure the slurm system user exists') > build_i)
+check('systemd reloaded so the source-built units are known before they are used',
+      'Reload systemd so the source-built units are known' in names_src
+      and names_src.index('Reload systemd so the source-built units are known')
+          < _first(names_src, 'Hold Slurm daemons down'))
+check('apt differ-gate is skipped (the build converges everyone)',
+      any(t.get('when') is False for t in tasks_src
+          if t['name'].startswith('Fail fast when Slurm versions differ')))
+check('no pin gate in source mode',
+      not any(n.startswith('Fail when the pinned version') for n in names_src))
+check('post-build confirmation still proves convergence',
+      names_src.index('Confirm every node ended up on the same Slurm version') > build_i)
+check('no distro slurm-wlm install task in source mode',
+      not any(n.startswith('Install munge and slurm-wlm') for n in names_src))
+# ordering invariants, same as the apt modes
+SRC_DESTRUCTIVE = ('Stop Slurm and munge before the clean reinstall',
+                   'Purge the installed Slurm and munge packages',
+                   'Remove leftover Slurm and munge config and state',
+                   'Install munge and the Slurm build toolchain',
+                   'Remove distro Slurm packages')
+for label, kw in (('source', {}), ('source+reinstall', {'reinstall': True})):
+    kw = dict(kw, install_from='source')
+    names = [t['name'] for t in
+             _yaml.safe_load(slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu', **kw))[0]['tasks']]
+    probes = [i for i, n in enumerate(names) if n.startswith('Record the installed Slurm version')
+              or n.startswith('List the Slurm versions')]
+    firsts = [i for i in (_first(names, d) for d in SRC_DESTRUCTIVE) if i > -1]
+    check(f'{label}: read-only preflight precedes every destructive task',
+          probes and firsts and max(probes) < min(firsts), (probes, firsts))
+    tool_i = _first(names, 'Install munge and the Slurm build toolchain')
+    hold = _first(names, 'Hold Slurm daemons down')
+    write = _first(names, 'Write slurm.conf')
+    check(f'{label}: daemons held down between build and config',
+          tool_i < _first(names, 'Build and install') < hold < write,
+          (tool_i, hold, write))
+    check(f'{label}: slurmd only started after slurm.conf exists',
+          write < _first(names, 'Start slurmd on every node'))
+    if kw.get('reinstall'):
+        check('reinstall purge runs before the toolchain install',
+              _first(names, 'Remove leftover Slurm and munge config and state') < tool_i)
+pb_mirror = slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu', install_from='source',
+                                  version='25.05.3',
+                                  tarball_url='http://10.10.90.1:8080/slurm-25.05.3.tar.bz2')
+tm = _yaml.safe_load(pb_mirror)[0]['tasks']
+dlm = next(t for t in tm if t['name'].startswith('Download the slurm-25.05.3'))
+check('custom release + local mirror URL honoured (air-gapped labs)',
+      dlm['ansible.builtin.get_url']['url'] == 'http://10.10.90.1:8080/slurm-25.05.3.tar.bz2'
+      and dlm['ansible.builtin.get_url']['dest'] == '/usr/local/src/slurm-25.05.3.tar.bz2'
+      and any(t['name'].startswith('Build and install slurm-25.05.3') for t in tm), dlm)
+check('idempotency guard follows the custom release',
+      dlm.get('when') == "'slurm 25.05.3' not in slurm_have.stdout", dlm.get('when'))
+
 print('== version probing must not fail on a node without slurm installed ==')
 names_t = _yaml.safe_load(slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu'))[0]['tasks']
 probe = next(t for t in names_t if t['name'] == 'Record the installed Slurm version')
@@ -335,6 +433,54 @@ check('playbook embedded in spec carries the generated conf',
 c = db.query('SELECT * FROM clusters WHERE id=?', (cid,), one=True)
 check('failed deploy does not advance lifecycle', c['slurm_state'] == 'INIT',
       c['slurm_state'])
+check('apt deploy uses the default job budget', 'timeout' not in spec)
+r = admin.post(f'/api/clusters/{cid}/slurm/deploy', headers=ah,
+               json={'version': 'not a version!'})
+check('malformed apt version refused', r.status_code == 400, r.get_json())
+
+print('== deploy from source ==')
+r = admin.post(f'/api/clusters/{cid}/slurm/deploy', headers=ah,
+               json={'install_from': 'source'})
+check('source deploy accepted', r.status_code == 202, r.get_json())
+spec_s = json.loads(db.query('SELECT spec FROM jobs WHERE id=?',
+                             (r.get_json()['job_id'],), one=True)['spec'])
+check('source deploy gets an hour-long budget (compiling on every node)',
+      spec_s.get('timeout') == 3600, spec_s.get('timeout'))
+check('playbook builds the default release',
+      f'Build and install slurm-{slurm.SOURCE_DEFAULT_VERSION} from source' in spec_s['playbook']
+      and 'download.schedmd.com' in spec_s['playbook'])
+r = admin.post(f'/api/clusters/{cid}/slurm/deploy', headers=ah,
+               json={'install_from': 'source', 'version': '25.05.3',
+                     'tarball_url': 'http://10.10.90.1:8080/slurm-25.05.3.tar.bz2',
+                     'reinstall': True})
+check('source deploy with release + mirror accepted', r.status_code == 202, r.get_json())
+spec_m = json.loads(db.query('SELECT spec FROM jobs WHERE id=?',
+                             (r.get_json()['job_id'],), one=True)['spec'])
+check('release and mirror reach the playbook, purge included',
+      'http://10.10.90.1:8080/slurm-25.05.3.tar.bz2' in spec_m['playbook']
+      and 'Build and install slurm-25.05.3' in spec_m['playbook']
+      and 'Purge the installed Slurm and munge packages' in spec_m['playbook'])
+r = admin.post(f'/api/clusters/{cid}/slurm/deploy', headers=ah,
+               json={'install_from': 'source', 'version': '23.11.4-1.2ubuntu5'})
+check('apt-style version refused for a source build', r.status_code == 400, r.get_json())
+r = admin.post(f'/api/clusters/{cid}/slurm/deploy', headers=ah,
+               json={'install_from': 'source', 'tarball_url': 'ftp://mirror/slurm.tar.bz2'})
+check('non-http tarball URL refused', r.status_code == 400, r.get_json())
+r = admin.post(f'/api/clusters/{cid}/slurm/deploy', headers=ah,
+               json={'install_from': 'source', 'tarball_url': 'http://x/a b"; rm -rf /'})
+check('tarball URL with shell metacharacters refused', r.status_code == 400, r.get_json())
+r = admin.post(f'/api/clusters/{cid}/slurm/deploy', headers=ah,
+               json={'install_from': 'rpm'})
+spec_x = json.loads(db.query('SELECT spec FROM jobs WHERE id=?',
+                             (r.get_json()['job_id'],), one=True)['spec'])
+check('unknown install_from falls back to distro packages',
+      r.status_code == 202 and 'Install munge and slurm-wlm' in spec_x['playbook']
+      and 'timeout' not in spec_x)
+audit = db.query("SELECT detail FROM audit WHERE action='slurm.deploy' ORDER BY id DESC LIMIT 4")
+check('audit trail records the source build and release',
+      any('from source 25.05.3' in a['detail'] for a in audit)
+      and any(f'from source {slurm.SOURCE_DEFAULT_VERSION}' in a['detail'] for a in audit),
+      [a['detail'] for a in audit])
 
 print('== lifecycle advance on success ==')
 jid2 = executor.start_job('shell', 'x', {'node_ids': [], 'command': 'true',

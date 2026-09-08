@@ -273,16 +273,18 @@ def _password_ssh(address, user, port, command, password):
         return -1, f'sshpass/ssh not installed in the CCP container: {exc}'
 
 
-def _key_ssh(address, user, port, command):
-    """One command over SSH with the CCP key (BatchMode). Returns (rc, output)."""
+def _key_ssh(address, user, port, command, timeout=None):
+    """One command over SSH with the CCP key (BatchMode). Returns (rc, output).
+    `timeout` overrides the per-step default for long-running remote work
+    (e.g. waiting on a batch job)."""
     cmd = (['ssh'] + list(SSH_COMMON) + ['-i', SSH_KEY, '-p', str(port),
            f'{user}@{address}', command])
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=ONBOARD_STEP_TIMEOUT)
+                           timeout=timeout or ONBOARD_STEP_TIMEOUT)
         return p.returncode, (p.stdout or '') + (p.stderr or '')
     except subprocess.TimeoutExpired:
-        return -1, f'timed out after {ONBOARD_STEP_TIMEOUT}s'
+        return -1, f'timed out after {timeout or ONBOARD_STEP_TIMEOUT}s'
     except FileNotFoundError as exc:
         return -1, f'ssh not installed in the CCP container: {exc}'
 
@@ -954,6 +956,9 @@ def _run_slurm_action(job_id, spec, log):
     log.write(f'[ccp] stage {stage} — controller {controller["name"]} '
               f'({controller["address"]}), {n} member(s)\n\n')
 
+    if stage == 'sbatch':
+        return _slurm_sbatch_test(spec, controller, members, n, log)
+
     if stage == 'validate':
         worst = 0
         worst = max(worst, _slurm_ssh(controller, 'sinfo', log,
@@ -1015,6 +1020,106 @@ def _run_slurm_action(job_id, spec, log):
 
     log.write(f'[ccp] unknown slurm stage: {stage}\n')
     return 2
+
+
+SBATCH_WAIT_SECONDS = int(os.environ.get('CCP_SBATCH_WAIT', '660'))
+
+
+def _sbatch_script(n, gpu_all):
+    """A batch job shaped like an AI training run: one task per node, GPU
+    inventory where present, and a timed 'training step' per node (numpy or
+    torch when installed, a pure-python loop otherwise), so the same test is
+    meaningful on a bare image and on a real GPU node."""
+    gres = ('#SBATCH --gres=gpu:1' if gpu_all
+            else '# no --gres: not every member declares a GPU')
+    return f'''#!/bin/bash
+#SBATCH --job-name=ccp-ai-smoke
+#SBATCH --nodes={n}
+#SBATCH --ntasks-per-node=1
+#SBATCH --time=00:10:00
+#SBATCH --output=/tmp/ccp-ai-smoke-%j.out
+{gres}
+echo "== CCP AI-training smoke test: job $SLURM_JOB_ID on $SLURM_JOB_NUM_NODES node(s): $SLURM_JOB_NODELIST =="
+srun bash -c 'echo "[$(hostname)] cpus=$(nproc)"; if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi -L | sed "s/^/[$(hostname)] /"; else echo "[$(hostname)] no NVIDIA GPU visible"; fi'
+srun python3 - <<'PY'
+import time, socket
+h = socket.gethostname()
+try:
+    import numpy as np
+    a = np.random.rand(2048, 2048); t = time.time(); (a @ a).sum(); dt = time.time() - t
+    print(f"[{{h}}] training step (numpy matmul 2048x2048): {{dt:.3f}}s")
+except ImportError:
+    t = time.time(); s = sum(i * i for i in range(3_000_000)); dt = time.time() - t
+    print(f"[{{h}}] training step (pure python loop): {{dt:.3f}}s")
+try:
+    import torch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    x = torch.randn(1024, 1024, device=dev); t = time.time(); (x @ x).sum().item(); dt = time.time() - t
+    print(f"[{{h}}] torch matmul on {{dev}}: {{dt:.3f}}s")
+except ImportError:
+    print(f"[{{h}}] torch not installed (optional)")
+PY
+echo "== CCP AI-training smoke test finished =="
+'''
+
+
+def _slurm_sbatch_test(spec, controller, members, n, log):
+    """Submit the AI-training-shaped batch job through the real scheduler,
+    wait for it, and pull its output back from whichever node ran the batch
+    step. Passes only when Slurm reports the job COMPLETED."""
+    cluster = db.query('SELECT gres_conf FROM clusters WHERE id=?',
+                       (spec.get('cluster_id'),), one=True)
+    gres_nodes = set(re.findall(r'NodeName=(\S+)',
+                                (cluster['gres_conf'] if cluster else '') or ''))
+    gpu_all = bool(members) and all(m['name'] in gres_nodes for m in members)
+    script = _sbatch_script(n, gpu_all)
+    caddr, cuser, cport = controller['address'], controller['ssh_user'], controller['ssh_port']
+
+    def frame(node, label, rc, out):
+        log.write(f'===== {node["name"]} ({node["address"]}) : {label} =====\n'
+                  f'{out.rstrip()}\n[{node["name"]} exit {rc}]\n\n')
+
+    log.write(f'[ccp] batch job: {n} node(s), one task each'
+              f'{", --gres=gpu:1 on every node" if gpu_all else ", no GPU reservation"}\n\n')
+    rc, out = _key_ssh(caddr, cuser, cport,
+                       f"cat > /tmp/ccp-ai-smoke.sh <<'CCPEOF'\n{script}CCPEOF\n"
+                       'chmod +x /tmp/ccp-ai-smoke.sh && echo "batch script staged"')
+    frame(controller, 'stage the batch script', rc, out)
+    if rc != 0:
+        log.write('SBATCH FAILED: could not stage the script on the controller\n')
+        return 1
+
+    rc, out = _key_ssh(caddr, cuser, cport,
+                       'sbatch --wait --parsable /tmp/ccp-ai-smoke.sh',
+                       timeout=SBATCH_WAIT_SECONDS)
+    frame(controller, f'sbatch --wait (up to {SBATCH_WAIT_SECONDS // 60} min)', rc, out)
+    jid = ''
+    for line in out.splitlines():
+        m = re.match(r'^(\d+)', line.strip())
+        if m:
+            jid = m.group(1)
+    if not jid:
+        log.write('SBATCH FAILED: sbatch returned no job id — is slurmctld up '
+                  'and the partition UP? (run Validate)\n')
+        return 1
+
+    rc2, info = _key_ssh(caddr, cuser, cport, f'scontrol show job {jid}')
+    frame(controller, f'scontrol show job {jid}', rc2, info)
+    m = re.search(r'JobState=(\S+)', info)
+    state = m.group(1) if m else 'UNKNOWN'
+    m = re.search(r'BatchHost=(\S+)', info)
+    batch_host = m.group(1) if m else controller['name']
+    target = next((x for x in members if x['name'] == batch_host), controller)
+
+    rc3, out3 = _key_ssh(target['address'], target['ssh_user'], target['ssh_port'],
+                         f'cat /tmp/ccp-ai-smoke-{jid}.out')
+    frame(target, f'job {jid} output (batch host)', rc3, out3)
+
+    passed = state == 'COMPLETED' and rc == 0
+    log.write('SBATCH ' + ('PASSED — the scheduler ran a multi-node batch job '
+                           'end to end' if passed
+                           else f'FAILED (JobState={state}, sbatch exit {rc})') + '\n')
+    return 0 if passed else 1
 
 
 def _slurm_report(spec, members, log):
@@ -1109,13 +1214,15 @@ def _run_ansible(job_id, spec, log):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, cwd=workdir,
                                 stderr=subprocess.STDOUT, text=True, env=env)
         # watchdog: streaming line-by-line blocks until EOF, so a hung playbook
-        # is killed out-of-band after JOB_TIMEOUT
+        # is killed out-of-band. Long playbooks (a Slurm source build across
+        # the fleet) pass their own budget in spec['timeout'].
+        job_timeout = int(spec.get('timeout') or JOB_TIMEOUT)
         timed_out = {'v': False}
         def _kill():
             if proc.poll() is None:
                 timed_out['v'] = True
                 proc.kill()
-        wd = threading.Timer(JOB_TIMEOUT, _kill)
+        wd = threading.Timer(job_timeout, _kill)
         wd.start()
         try:
             for line in proc.stdout:
@@ -1124,7 +1231,7 @@ def _run_ansible(job_id, spec, log):
         finally:
             wd.cancel()
         if timed_out['v']:
-            log.write(f'\n[ccp] playbook timed out after {JOB_TIMEOUT}s\n')
+            log.write(f'\n[ccp] playbook timed out after {job_timeout}s\n')
             return 124
         return proc.returncode
 

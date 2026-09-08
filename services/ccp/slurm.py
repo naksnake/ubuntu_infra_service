@@ -172,22 +172,44 @@ def _resolve_slurmctld_host(slurm_conf):
     return '\n'.join(out) + '\n'
 
 
-def deploy_playbook(slurm_conf, gres_conf, controller_name,
-                    reinstall=False, version=None):
-    """The built-in deployment playbook (Ubuntu/Debian slurm-wlm): munge key
-    generated on the controller and distributed to every node, configs pushed,
-    spool dirs created, slurmctld on the controller and slurmd everywhere.
-    The generated configs are inlined so the playbook in the job log is the
-    complete, auditable record of what was deployed. The SlurmctldHost name is
-    resolved to the controller's real hostname at deploy time (see
-    _resolve_slurmctld_host); slurmd identity is pinned with -N.
+SOURCE_DEFAULT_VERSION = '25.11.8'
+SOURCE_URL_TEMPLATE = 'https://download.schedmd.com/slurm/slurm-{version}.tar.bz2'
+# validated on Ubuntu 24.04: everything ./configure needs for a munge-enabled
+# build with the default plugin set (no slurmdbd/MySQL, no REST daemon)
+SOURCE_BUILD_DEPS = ['munge', 'build-essential', 'pkg-config', 'libmunge-dev',
+                     'libpam0g-dev', 'libssl-dev', 'libhwloc-dev', 'libjson-c-dev',
+                     'libyaml-dev', 'libhttp-parser-dev', 'libdbus-1-dev',
+                     'libreadline-dev', 'libncurses-dev', 'libnuma-dev', 'python3',
+                     'bzip2', 'curl']
 
-    reinstall=True purges the installed Slurm/munge packages and all of their
-    config and state first, then installs again — the way out of a fleet that
-    drifted onto incompatible versions or a half-configured install.
-    version pins the apt version (e.g. '23.11.4-1.2ubuntu5'), which is what
-    actually converges a mixed fleet; it must exist in every node's sources."""
+
+def deploy_playbook(slurm_conf, gres_conf, controller_name,
+                    reinstall=False, version=None, install_from='apt',
+                    tarball_url=None):
+    """The built-in deployment playbook: munge key generated on the controller
+    and distributed to every node, configs pushed, spool dirs created,
+    slurmctld on the controller and slurmd everywhere. The generated configs
+    are inlined so the playbook in the job log is the complete, auditable
+    record of what was deployed. The SlurmctldHost name is resolved to the
+    controller's real hostname at deploy time (see _resolve_slurmctld_host);
+    slurmd identity is pinned with -N.
+
+    install_from='apt' (default) uses the distro slurm-wlm; `version` may pin
+    an apt version, which must exist in every node's sources.
+    install_from='source' builds the SAME upstream release on every node from
+    the SchedMD tarball (`version`, default SOURCE_DEFAULT_VERSION; optional
+    `tarball_url` to serve it from a local mirror such as the webfs share).
+    This is the path that converges a fleet whose nodes run different Ubuntu
+    releases — distro packages never can, since each release ships its own
+    Slurm. Distro Slurm packages are removed first so they cannot shadow the
+    build; munge stays a distro package (its protocol is stable).
+    reinstall=True additionally purges every scrap of Slurm/munge config and
+    state before installing."""
     slurm_conf = _resolve_slurmctld_host(slurm_conf)
+    source_mode = install_from == 'source'
+    if source_mode:
+        version = version or SOURCE_DEFAULT_VERSION
+        tarball_url = tarball_url or SOURCE_URL_TEMPLATE.format(version=version)
     gres_task = ''
     if gres_conf:
         gres_task = f'''
@@ -278,6 +300,78 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
           Nothing was changed on any node.
 '''
 
+    if source_mode:
+        # Every node builds the identical upstream release, so the apt gates
+        # have nothing to decide; convergence is still confirmed afterwards.
+        gate_when = 'false'
+        pin_gate = ''
+        deps = ', '.join(SOURCE_BUILD_DEPS)
+        install_tasks = f'''
+    - name: Install munge and the Slurm build toolchain
+      ansible.builtin.apt:
+        name: [{deps}]
+        state: present
+
+    - name: Remove distro Slurm packages so they cannot shadow the source build
+      ansible.builtin.apt:
+        name: [slurm-wlm, slurm-wlm-basic-plugins, slurm-client, slurmd, slurmctld]
+        state: absent
+        purge: true
+
+    - name: Check which Slurm is installed now
+      ansible.builtin.command: slurmd -V
+      register: slurm_have
+      changed_when: false
+      failed_when: false
+
+    - name: Download the slurm-{version} source tarball
+      ansible.builtin.get_url:
+        url: {tarball_url}
+        dest: /usr/local/src/slurm-{version}.tar.bz2
+        mode: "0644"
+        timeout: 180
+      when: "'slurm {version}' not in slurm_have.stdout"
+
+    # ./configure flags validated on Ubuntu 24.04. prefix=/usr puts sbatch,
+    # srun, slurmd… on the normal PATH; sysconfdir matches every path CCP
+    # writes; the tarball's own systemd units are installed alongside.
+    - name: Build and install slurm-{version} from source (several minutes per node)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cd /usr/local/src
+        rm -rf slurm-{version}
+        tar xjf slurm-{version}.tar.bz2
+        cd slurm-{version}
+        ./configure --prefix=/usr --sysconfdir=/etc/slurm --localstatedir=/var \\
+                    --with-munge > configure.log 2>&1
+        make -j"$(nproc)" > make.log 2>&1
+        make install > install.log 2>&1
+        install -m 0644 etc/slurmd.service etc/slurmctld.service /etc/systemd/system/
+        ldconfig
+        slurmd -V
+      args:
+        executable: /bin/bash
+      when: "'slurm {version}' not in slurm_have.stdout"
+
+    - name: Ensure the slurm system user exists
+      ansible.builtin.user:
+        name: slurm
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+
+    - name: Reload systemd so the source-built units are known
+      ansible.builtin.systemd:
+        daemon_reload: true
+'''
+    else:
+        install_tasks = f'''
+    - name: {install_name}
+      ansible.builtin.apt:
+        name: [munge, {pkg}]
+        state: present
+{pin_opts}'''
+
     return f'''---
 - name: Deploy Slurm (CCP built-in, Ubuntu/Debian slurm-wlm)
   hosts: all
@@ -363,12 +457,7 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
           {{% endif %}}
 
     # ── from here on the node is modified ─────────────────────────────────
-{purge_tasks}
-    - name: {install_name}
-      ansible.builtin.apt:
-        name: [munge, {pkg}]
-        state: present
-{pin_opts}
+{purge_tasks}{install_tasks}
     # The package enables (and on a real host starts) slurmd immediately. Hold
     # both daemons down until their config exists, so slurmd can never run
     # configless and spam DNS SRV lookups; they are enabled again at the end.

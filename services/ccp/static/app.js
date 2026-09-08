@@ -172,9 +172,9 @@ function renderConsole(el, text) {
 function _colorLines(lines) {
   return lines.map(line => {
     if (/^=====.*=====\s*$/.test(line)) return '<span class="c-host">' + esc(line) + '</span>';
-    if (/^\[.*\bexit\s+0\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK) PASSED\b/.test(line) || /^MANAGED\b/.test(line))
+    if (/^\[.*\bexit\s+0\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK|SBATCH) PASSED\b/.test(line) || /^MANAGED\b/.test(line))
       return '<span class="c-ok">' + esc(line) + '</span>';
-    if (/^\[.*\bexit\s+([1-9]\d*)\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK) FAILED\b/.test(line) || /^FAILED[:\s]/.test(line) || /\b(fatal|error):/i.test(line) || /not a valid controller|Unable to (contact|determine)/i.test(line))
+    if (/^\[.*\bexit\s+([1-9]\d*)\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK|SBATCH) FAILED\b/.test(line) || /^FAILED[:\s]/.test(line) || /\b(fatal|error):/i.test(line) || /not a valid controller|Unable to (contact|determine)/i.test(line))
       return '<span class="c-err">' + esc(line) + '</span>';
     if (/^\[ccp\]/.test(line) || /^\[\d+\/\d+\]/.test(line) || /^\[verify\]/.test(line) || /^\s+(credentials OK|key installed|command execution OK|node renamed)/.test(line))
       return '<span class="c-info">' + esc(line) + '</span>';
