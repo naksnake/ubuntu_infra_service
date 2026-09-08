@@ -1,4 +1,5 @@
-"""Job execution: parallel shell over ClusterShell and Ansible playbooks.
+"""Job execution: parallel shell over ClusterShell, Ansible playbooks, and the
+node-lifecycle jobs (onboarding / verification).
 
 Jobs run in a background daemon thread and stream their output to a per-job log
 file under JOBS_DIR; the jobs table (status/exit_code) is the source of truth so
@@ -6,9 +7,16 @@ the UI can poll regardless of which worker/thread produced the job. Nodes marked
 conn='local' run directly via subprocess so the panel is demoable without any
 reachable SSH hosts; conn='ssh' nodes are executed in parallel through
 ClusterShell (shell jobs) or ansible-playbook (playbook jobs).
+
+Lifecycle: an ssh node is only ever set to state='managed' by the onboard/verify
+job in this module, after (1) password auth succeeds, (2) the CCP public key is
+installed, (3) a command runs over key auth. Passwords are handed to start_job
+via the `secret` argument, kept in a process-local dict, and consumed by the job
+thread — they are never written to jobs.spec, the database, or job logs.
 """
 import os
 import re
+import sys
 import json
 import time
 import shlex
@@ -27,6 +35,34 @@ SSH_COMMON = ['-o', 'StrictHostKeyChecking=no',
               '-o', 'UserKnownHostsFile=/dev/null',
               '-o', 'ConnectTimeout=10',
               '-o', 'BatchMode=yes']
+# per-step wall clock for onboarding ssh commands (connect timeout is separate)
+ONBOARD_STEP_TIMEOUT = int(os.environ.get('CCP_ONBOARD_STEP_TIMEOUT', '60'))
+
+
+def ensure_ssh_key():
+    """Generate the CCP ed25519 keypair on first start. The onboarding job
+    installs the public half into each node's authorized_keys; all regular
+    execution then runs over key auth."""
+    if os.path.exists(SSH_KEY):
+        return
+    try:
+        os.makedirs(os.path.dirname(SSH_KEY), exist_ok=True)
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '',
+                        '-C', 'ccp-control-panel', '-f', SSH_KEY],
+                       check=True, capture_output=True)
+        os.chmod(SSH_KEY, 0o600)
+    except Exception as exc:
+        # Not fatal at import time: onboarding will fail loudly with a clear
+        # message; shell/ansible against already-keyed nodes still work.
+        sys.stderr.write(f'[ccp] WARNING: could not generate SSH key {SSH_KEY}: {exc}\n')
+
+
+def public_key():
+    try:
+        with open(SSH_KEY + '.pub') as fh:
+            return fh.read().strip()
+    except OSError:
+        return ''
 
 
 def _log_path(job_id):
@@ -47,25 +83,46 @@ def _finish(job_id, status, exit_code):
                (status, exit_code, int(time.time()), job_id))
 
 
-def start_job(kind, target, spec, created_by):
-    """Insert a job row and kick off its background thread. Returns the job id."""
+# Secrets (onboarding passwords) ride alongside a job in process memory only —
+# spec is persisted to the jobs table, secrets never are. The job thread pops
+# its secret on start; anything left over (thread never started) is dropped
+# when the process exits.
+_secrets = {}
+_secrets_lock = threading.Lock()
+
+
+def start_job(kind, target, spec, created_by, secret=None):
+    """Insert a job row and kick off its background thread. Returns the job id.
+
+    `secret` (e.g. an onboarding password) is kept in memory for the job
+    thread and is never serialized into the persisted spec."""
     job_id = db.execute(
         'INSERT INTO jobs (kind, target, spec, status, created_by, created_at) '
         'VALUES (?,?,?,?,?,?)',
         (kind, target, json.dumps(spec), 'running', created_by, int(time.time())))
     open(_log_path(job_id), 'w').close()
+    if secret is not None:
+        with _secrets_lock:
+            _secrets[job_id] = secret
+    if os.environ.get('CCP_TEST_SYNC_JOBS') == '1':
+        _run(job_id, kind, spec)        # tests: run inline, deterministic
+        return job_id
     t = threading.Thread(target=_run, args=(job_id, kind, spec), daemon=True)
     t.start()
     return job_id
 
 
 def _run(job_id, kind, spec):
+    with _secrets_lock:
+        secret = _secrets.pop(job_id, None)
     log = open(_log_path(job_id), 'a', buffering=1)
     try:
         if kind == 'shell':
             rc = _run_shell(job_id, spec, log)
         elif kind == 'ansible':
             rc = _run_ansible(job_id, spec, log)
+        elif kind in ('onboard', 'verify'):
+            rc = _run_onboard(job_id, spec, secret, log)
         else:
             log.write(f'unknown job kind: {kind}\n')
             rc = 2
@@ -74,6 +131,7 @@ def _run(job_id, kind, spec):
         log.write(f'\n[ccp] job crashed: {exc}\n')
         _finish(job_id, 'failed', 1)
     finally:
+        del secret
         log.close()
 
 
@@ -154,6 +212,144 @@ def _run_shell_clustershell(remote, command, log):
     return worst
 
 
+# ── node onboarding / verification ───────────────────────────────────────────
+
+def _password_ssh(address, user, port, command, password):
+    """One command over SSH with password auth (sshpass). Returns (rc, output).
+    rc -1 = timeout / local failure; rc 5 = sshpass 'wrong password'."""
+    cmd = ['sshpass', '-e', 'ssh',
+           '-o', 'StrictHostKeyChecking=no',
+           '-o', 'UserKnownHostsFile=/dev/null',
+           '-o', 'ConnectTimeout=10',
+           '-o', 'PreferredAuthentications=password,keyboard-interactive',
+           '-o', 'PubkeyAuthentication=no',
+           '-o', 'NumberOfPasswordPrompts=1',
+           '-p', str(port), f'{user}@{address}', command]
+    env = dict(os.environ, SSHPASS=password)   # env, not argv: /proc-safe
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=ONBOARD_STEP_TIMEOUT, env=env)
+        return p.returncode, (p.stdout or '') + (p.stderr or '')
+    except subprocess.TimeoutExpired:
+        return -1, f'timed out after {ONBOARD_STEP_TIMEOUT}s'
+    except FileNotFoundError as exc:
+        return -1, f'sshpass/ssh not installed in the CCP container: {exc}'
+
+
+def _key_ssh(address, user, port, command):
+    """One command over SSH with the CCP key (BatchMode). Returns (rc, output)."""
+    cmd = (['ssh'] + list(SSH_COMMON) + ['-i', SSH_KEY, '-p', str(port),
+           f'{user}@{address}', command])
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=ONBOARD_STEP_TIMEOUT)
+        return p.returncode, (p.stdout or '') + (p.stderr or '')
+    except subprocess.TimeoutExpired:
+        return -1, f'timed out after {ONBOARD_STEP_TIMEOUT}s'
+    except FileNotFoundError as exc:
+        return -1, f'ssh not installed in the CCP container: {exc}'
+
+
+def _set_node_state(node_id, state, detail=''):
+    db.execute('UPDATE nodes SET state=?, state_detail=? WHERE id=?',
+               (state, detail[:500], node_id))
+
+
+def _auth_failure_reason(rc, out):
+    """Map a failed password-ssh attempt to an operator-readable reason."""
+    if rc == 5 or 'Permission denied' in out:
+        return 'auth failed: wrong username or password'
+    if rc == -1 or 'timed out' in out or 'Connection timed out' in out:
+        return 'unreachable: connection timed out'
+    if 'Connection refused' in out:
+        return 'unreachable: connection refused (is sshd running?)'
+    if 'Could not resolve' in out or 'Name or service not known' in out:
+        return 'unreachable: hostname does not resolve'
+    return f'ssh failed (exit {rc}): {out.strip().splitlines()[-1][:200] if out.strip() else "no output"}'
+
+
+def _run_onboard(job_id, spec, secret, log):
+    """Lifecycle job for one ssh node.
+
+    mode 'onboard' (kind onboard, secret = password):
+      [1/3] password auth works  [2/3] install CCP key  [3/3] command over key
+    mode 'verify' (kind verify, no secret): step 3 only — for legacy rows that
+    already carry a working key.
+
+    Success ⇒ node state 'managed'; any failure ⇒ 'failed' + reason. This is
+    the only code path that may set an ssh node to 'managed'."""
+    node_id = spec.get('node_id')
+    node = db.query('SELECT * FROM nodes WHERE id=?', (node_id,), one=True)
+    if not node:
+        log.write(f'[ccp] node id={node_id} no longer exists\n')
+        return 2
+    addr, user, port = node['address'], node['ssh_user'], node['ssh_port']
+    mode = spec.get('mode', 'onboard')
+
+    def fail(reason):
+        log.write(f'FAILED: {reason}\n')
+        _set_node_state(node_id, 'failed', reason)
+        return 1
+
+    try:
+        if mode == 'onboard':
+            if not secret:
+                return fail('no password supplied to the onboarding job')
+
+            log.write(f'[1/3] validating credentials for {user}@{addr}:{port} …\n')
+            rc, out = _password_ssh(addr, user, port, 'true', secret)
+            if rc != 0:
+                return fail(_auth_failure_reason(rc, out))
+            log.write('      credentials OK\n')
+
+            pub = public_key()
+            if not pub:
+                return fail(f'CCP has no SSH public key at {SSH_KEY}.pub '
+                            '(key generation failed at startup?)')
+            log.write('[2/3] installing the CCP public key …\n')
+            qpub = shlex.quote(pub)
+            install = ('mkdir -p ~/.ssh && chmod 700 ~/.ssh && '
+                       'touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && '
+                       f'(grep -qxF {qpub} ~/.ssh/authorized_keys || '
+                       f'printf %s\\\\n {qpub} >> ~/.ssh/authorized_keys)')
+            rc, out = _password_ssh(addr, user, port, install, secret)
+            if rc != 0:
+                return fail(f'key bootstrap failed (exit {rc}): {out.strip()[:200]}')
+            log.write('      key installed (idempotent)\n')
+        else:
+            log.write(f'[verify] checking key access for {user}@{addr}:{port} …\n')
+
+        step = '[3/3]' if mode == 'onboard' else '[verify]'
+        log.write(f'{step} confirming command execution over key auth …\n')
+        rc, out = _key_ssh(addr, user, port, 'echo CCP_OK && hostname')
+        lines = [l.strip() for l in out.splitlines() if l.strip()]
+        if rc != 0 or 'CCP_OK' not in lines:
+            return fail(f'key-auth execution check failed (exit {rc}): '
+                        f'{(lines[-1] if lines else "no output")[:200]}')
+        remote_name = lines[-1] if lines[-1] != 'CCP_OK' else ''
+        log.write(f'      command execution OK (remote hostname: {remote_name or "?"})\n')
+
+        # adopt the node's real hostname when the row was created nameless
+        if spec.get('auto_name') and remote_name and _SAFE_NAME.fullmatch(remote_name):
+            clash = db.query('SELECT id FROM nodes WHERE name=? AND id<>?',
+                             (remote_name, node_id), one=True)
+            if clash:
+                log.write(f'      keeping placeholder name (another node is already '
+                          f'called {remote_name})\n')
+            else:
+                db.execute('UPDATE nodes SET name=? WHERE id=?', (remote_name, node_id))
+                log.write(f'      node renamed to {remote_name}\n')
+
+        db.execute("UPDATE nodes SET state='managed', state_detail='', "
+                   'onboarded_at=? WHERE id=?', (int(time.time()), node_id))
+        log.write('MANAGED: node passed credential validation, key bootstrap '
+                  'and execution check\n')
+        return 0
+    except Exception as exc:
+        # never leave the row stuck in 'onboarding'
+        return fail(f'onboarding crashed: {exc}')
+
+
 # ── ansible ──────────────────────────────────────────────────────────────────
 
 def _run_ansible(job_id, spec, log):
@@ -228,6 +424,11 @@ _SAFE_ADDR = re.compile(r'[A-Za-z0-9._:-]{1,255}\Z')
 _SAFE_USER = re.compile(r'[A-Za-z0-9._-]{1,32}\Z')
 
 
+def node_eligible(n):
+    """Lifecycle gate: only managed ssh nodes (or local nodes) may run jobs."""
+    return n['conn'] == 'local' or (n['state'] or '') == 'managed'
+
+
 def _resolve_nodes(node_ids, log=None):
     if not node_ids:
         return []
@@ -240,7 +441,13 @@ def _resolve_nodes(node_ids, log=None):
             port_ok = 1 <= int(n.get('ssh_port') or 0) <= 65535
         except (TypeError, ValueError):
             port_ok = False
-        if (_SAFE_NAME.fullmatch(str(n.get('name') or ''))
+        if not node_eligible(n):
+            # the API filters too; re-check here because rows can change (or be
+            # written outside the API) between selection and execution
+            if log:
+                log.write(f'[ccp] skipping node {n.get("name")}: state is '
+                          f'{n.get("state")!r} — only managed nodes run jobs\n')
+        elif (_SAFE_NAME.fullmatch(str(n.get('name') or ''))
                 and _SAFE_ADDR.fullmatch(str(n.get('address') or ''))
                 and _SAFE_USER.fullmatch(str(n.get('ssh_user') or ''))
                 and port_ok):

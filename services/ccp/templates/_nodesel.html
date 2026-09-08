@@ -1,11 +1,18 @@
 <label>Target nodes</label>
 <div class="nodesel">
   {% for n in nodes %}
+  {% if n.conn == 'local' or n.state == 'managed' %}
   <label><input type="checkbox" class="node-cb" value="{{ n.id }}"> {{ n.name }}
     <small class="mono">({{ n.address }}{% if n.conn=='local' %}, local{% endif %})</small></label>
   {% else %}
-  <div class="empty">No nodes — add some on the Nodes page.</div>
+  <label class="ineligible" title="Only managed nodes can run jobs — onboard or verify it on the Nodes page">
+    <input type="checkbox" disabled> {{ n.name }}
+    <small class="mono">({{ n.address }})</small>
+    <span class="badge ns-{{ n.state }}">{{ n.state }}</span></label>
+  {% endif %}
+  {% else %}
+  <div class="empty">No nodes — onboard some on the Nodes page.</div>
   {% endfor %}
 </div>
 <label>…or target a group</label>
-<input class="group-input" placeholder="e.g. web (leave blank to use the checkboxes above)">
+<input class="group-input" placeholder="e.g. gpu (leave blank to use the checkboxes above)">

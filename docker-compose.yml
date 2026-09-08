@@ -231,7 +231,8 @@ services:
       # pin a worker thread forever
       - CCP_JOB_TIMEOUT=${CCP_JOB_TIMEOUT:-900}
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/')\""]
+      # in-container port is fixed at 8060; /healthz needs no login
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/healthz')\""]
       interval: 30s
       timeout: 5s
       retries: 3

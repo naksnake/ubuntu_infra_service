@@ -3,50 +3,127 @@
 {% block body %}
 {% if role_ok('operator') %}
 <div class="card">
-  <h2>Add node</h2>
+  <h2>Onboard node</h2>
+  <p class="muted">CCP validates the credentials, installs its SSH key and confirms
+  command execution — only then does the node become <b>managed</b>. The password is
+  used once and never stored.</p>
   <div class="row">
-    <div><label>Name</label><input id="n-name" placeholder="web-01"></div>
-    <div><label>Address / host</label><input id="n-addr" placeholder="192.168.100.20"></div>
-    <div><label>Connection</label>
-      <select id="n-conn"><option value="ssh">SSH</option><option value="local">Local (this host)</option></select></div>
+    <div><label>Address / host</label><input id="n-addr" placeholder="192.168.100.21"></div>
+    <div><label>Username</label><input id="n-user" value="root" autocomplete="off"></div>
+    <div><label>Password</label><input id="n-pass" type="password" autocomplete="new-password"></div>
   </div>
   <div class="row">
-    <div><label>SSH user</label><input id="n-user" value="root"></div>
+    <div><label>Name (optional — taken from the node's hostname)</label><input id="n-name" placeholder="rack0_sled1_gpu"></div>
     <div><label>SSH port</label><input id="n-port" type="number" value="22"></div>
-    <div><label>Groups (comma-separated)</label><input id="n-groups" placeholder="web,prod"></div>
+    <div><label>Groups (comma-separated)</label><input id="n-groups" placeholder="gpu,lab"></div>
   </div>
-  <div style="margin-top:14px"><button class="btn" onclick="addNode()">Add node</button></div>
+  <div style="margin-top:14px">
+    <button class="btn" onclick="onboardNew()">Validate &amp; onboard</button>
+    <button class="btn btn-ghost" onclick="addLocal()" title="Register this host itself (runs via subprocess, no SSH)">Add this host (local)</button>
+  </div>
 </div>
 {% endif %}
 
 <div class="card">
   <h2>Inventory ({{ nodes|length }})</h2>
   <table>
-    <thead><tr><th>Name</th><th>Address</th><th>Conn</th><th>SSH</th><th>Groups</th>{% if role_ok('operator') %}<th></th>{% endif %}</tr></thead>
-    <tbody>
+    <thead><tr><th>State</th><th>Name</th><th>Address</th><th>MAC</th><th>SSH</th><th>Groups</th>{% if role_ok('operator') %}<th></th>{% endif %}</tr></thead>
+    <tbody id="node-rows">
       {% for n in nodes %}
-      <tr>
-        <td><b>{{ n.name }}</b></td>
+      <tr data-state="{{ n.state }}">
+        <td><span class="badge ns-{{ n.state }}" {% if n.state_detail %}title="{{ n.state_detail }}"{% endif %}>{{ n.state }}</span>
+            {% if n.state in ('failed','unverified') and n.state_detail %}<div class="statehint">{{ n.state_detail }}</div>{% endif %}</td>
+        <td><b>{{ n.name }}</b>{% if n.conn=='local' %} <span class="pill">local</span>{% endif %}</td>
         <td class="mono">{{ n.address }}</td>
-        <td>{{ n.conn }}</td>
+        <td class="mono">{{ n.mac or '—' }}</td>
         <td class="mono">{% if n.conn=='ssh' %}{{ n.ssh_user }}@:{{ n.ssh_port }}{% else %}—{% endif %}</td>
         <td>{% for g in n.groups.split(',') if g.strip() %}<span class="pill">{{ g.strip() }}</span>{% endfor %}</td>
-        {% if role_ok('operator') %}<td><button class="btn btn-danger btn-sm" onclick="del('/api/nodes/{{ n.id }}','Delete node {{ n.name }}?')">Delete</button></td>{% endif %}
+        {% if role_ok('operator') %}
+        <td class="nowrap">
+          {% if n.conn=='ssh' %}
+            {% if n.state in ('discovered','failed') %}
+              <button class="btn btn-sm" onclick="openOnboard({{ n.id }},'{{ n.name }}','{{ n.ssh_user }}')">Onboard</button>
+            {% elif n.state == 'unverified' %}
+              <button class="btn btn-sm btn-ok" onclick="verifyNode({{ n.id }},'{{ n.name }}')">Verify</button>
+              <button class="btn btn-sm" onclick="openOnboard({{ n.id }},'{{ n.name }}','{{ n.ssh_user }}')">Onboard</button>
+            {% elif n.state == 'onboarding' %}
+              <span class="muted">working…</span>
+            {% elif n.state == 'managed' %}
+              <button class="btn btn-sm btn-ghost" onclick="openOnboard({{ n.id }},'{{ n.name }}','{{ n.ssh_user }}')" title="Re-run onboarding, e.g. to change the SSH user">Re-onboard</button>
+            {% endif %}
+          {% endif %}
+          <button class="btn btn-danger btn-sm" onclick="del('/api/nodes/{{ n.id }}','Delete node {{ n.name }}?')">Delete</button>
+        </td>
+        {% endif %}
       </tr>
       {% else %}
-      <tr><td colspan="6" class="empty">No nodes yet.</td></tr>
+      <tr><td colspan="7" class="empty">No nodes yet — onboard one above.</td></tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
+
+<dialog id="onboard-dlg" class="dlg">
+  <h2>Onboard <span id="od-name"></span></h2>
+  <p class="muted">CCP will validate these credentials, install its SSH key and
+  confirm command execution before marking the node managed.</p>
+  <label>Username</label><input id="od-user" autocomplete="off">
+  <label>Password</label><input id="od-pass" type="password" autocomplete="new-password">
+  <div style="margin-top:14px">
+    <button class="btn" onclick="submitOnboard()">Onboard</button>
+    <button class="btn btn-ghost" onclick="document.getElementById('onboard-dlg').close()">Cancel</button>
+  </div>
+</dialog>
 {% endblock %}
+
 {% block scripts %}<script>
-async function addNode(){
-  const p={name:v('n-name'),address:v('n-addr'),conn:v('n-conn'),
-    ssh_user:v('n-user'),ssh_port:v('n-port'),groups:v('n-groups')};
-  if(!p.name||!p.address){toast('Name and address required',true);return;}
-  try{await api('POST','/api/nodes',p);toast('Node added');location.reload();}
+function v(id){return document.getElementById(id).value;}
+
+async function onboardNew(){
+  const p={address:v('n-addr'),username:v('n-user'),password:v('n-pass'),
+    name:v('n-name'),ssh_port:v('n-port'),groups:v('n-groups')};
+  if(!p.address||!p.username||!p.password){toast('Address, username and password are required',true);return;}
+  try{await api('POST','/api/nodes',p);toast('Onboarding started — validating credentials…');location.reload();}
   catch(e){toast(e.message,true);}
 }
-function v(id){return document.getElementById(id).value;}
+
+async function addLocal(){
+  const name=v('n-name')||'control-plane';
+  try{await api('POST','/api/nodes',{conn:'local',name,address:'localhost'});
+    toast('Local node added');location.reload();}
+  catch(e){toast(e.message,true);}
+}
+
+let onboardId=null;
+function openOnboard(id,name,user){
+  onboardId=id;
+  document.getElementById('od-name').textContent=name;
+  document.getElementById('od-user').value=user||'root';
+  document.getElementById('od-pass').value='';
+  document.getElementById('onboard-dlg').showModal();
+}
+async function submitOnboard(){
+  const u=v('od-user'),p=v('od-pass');
+  if(!u||!p){toast('Username and password are required',true);return;}
+  try{await api('POST','/api/nodes/'+onboardId+'/onboard',{username:u,password:p});
+    document.getElementById('onboard-dlg').close();
+    toast('Onboarding started');location.reload();}
+  catch(e){toast(e.message,true);}
+}
+async function verifyNode(id,name){
+  try{await api('POST','/api/nodes/'+id+'/verify');
+    toast('Verifying key access for '+name+'…');location.reload();}
+  catch(e){toast(e.message,true);}
+}
+
+// While any node is onboarding, poll and reload when its state settles.
+(function watchOnboarding(){
+  if(!document.querySelector('tr[data-state="onboarding"]'))return;
+  const t=setInterval(async()=>{
+    try{
+      const d=await api('GET','/api/nodes');
+      if(!d.nodes.some(n=>n.state==='onboarding')){clearInterval(t);location.reload();}
+    }catch(e){/* keep polling */}
+  },3000);
+})();
 </script>{% endblock %}

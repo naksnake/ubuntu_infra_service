@@ -64,6 +64,10 @@ ROLES = ('viewer', 'operator', 'admin')
 _RANK = {r: i for i, r in enumerate(ROLES)}
 
 db.init_db()
+executor.ensure_ssh_key()   # CCP's ed25519 identity, installed by onboarding
+
+# node lifecycle states (see docs/ccp/RFC-0001-lifecycle-platform.md §4)
+NODE_STATES = ('discovered', 'onboarding', 'managed', 'failed', 'unverified')
 
 
 @app.template_filter('tstime')
@@ -303,41 +307,163 @@ def audit_page():
 
 # ── nodes API ───────────────────────────────────────────────────────────────
 
-@app.route('/api/nodes', methods=['POST'])
-@require('operator')
-def api_add_node():
-    d = request.get_json(force=True) or {}
+NODE_NAME_RE = re.compile(r'[A-Za-z0-9._-]{1,63}')
+NODE_ADDR_RE = re.compile(r'[A-Za-z0-9._:-]{1,255}')
+NODE_USER_RE = re.compile(r'[A-Za-z0-9._-]{1,32}')
+
+
+def _validate_node_fields(d, name_required):
+    """Shared validation for node create/onboard. Returns (fields, error).
+
+    names/addresses/users flow into a ClusterShell NodeSet and an Ansible
+    inventory file, so restrict them to safe characters (no whitespace,
+    newlines, '=', or NodeSet range brackets that would corrupt either)."""
     name = (d.get('name') or '').strip()
     address = (d.get('address') or '').strip()
-    ssh_user = (d.get('ssh_user') or 'root').strip()
-    if not name or not address:
-        return jsonify({'error': 'name and address are required'}), 400
-    # names/addresses/users flow into a ClusterShell NodeSet and an Ansible
-    # inventory file, so restrict them to safe characters (no whitespace,
-    # newlines, '=', or NodeSet range brackets that would corrupt either)
-    if not re.fullmatch(r'[A-Za-z0-9._-]{1,63}', name):
-        return jsonify({'error': 'name may contain only letters, digits, dot, dash, underscore'}), 400
-    if not re.fullmatch(r'[A-Za-z0-9._:-]{1,255}', address):
-        return jsonify({'error': 'address may contain only letters, digits, dot, colon, dash'}), 400
-    if not re.fullmatch(r'[A-Za-z0-9._-]{1,32}', ssh_user):
-        return jsonify({'error': 'ssh user may contain only letters, digits, dot, dash, underscore'}), 400
+    ssh_user = (d.get('username') or d.get('ssh_user') or 'root').strip()
+    if not address:
+        return None, 'address is required'
+    if name_required and not name:
+        return None, 'name is required'
+    if name and not NODE_NAME_RE.fullmatch(name):
+        return None, 'name may contain only letters, digits, dot, dash, underscore'
+    if not NODE_ADDR_RE.fullmatch(address):
+        return None, 'address may contain only letters, digits, dot, colon, dash'
+    if not NODE_USER_RE.fullmatch(ssh_user):
+        return None, 'ssh user may contain only letters, digits, dot, dash, underscore'
     try:
         port = int(d.get('ssh_port') or 22)
     except (TypeError, ValueError):
-        return jsonify({'error': 'ssh port must be a number'}), 400
+        return None, 'ssh port must be a number'
     if not (1 <= port <= 65535):
-        return jsonify({'error': 'ssh port must be 1-65535'}), 400
+        return None, 'ssh port must be 1-65535'
+    mac = (d.get('mac') or '').strip().upper()
+    if mac and not re.fullmatch(r'[0-9A-F:.-]{1,23}', mac):
+        return None, 'mac address contains invalid characters'
+    return {'name': name, 'address': address, 'ssh_user': ssh_user,
+            'ssh_port': port, 'mac': mac,
+            'groups': (d.get('groups') or '').strip()}, None
+
+
+def _placeholder_name(address):
+    """Unique placeholder for a node imported without a name; the onboarding
+    job replaces it with the real remote hostname."""
+    base = 'node-' + re.sub(r'[^A-Za-z0-9]+', '-', address).strip('-')[:50]
+    name, i = base, 1
+    while db.query('SELECT 1 FROM nodes WHERE name=?', (name,), one=True):
+        i += 1
+        name = f'{base}-{i}'
+    return name
+
+
+def _start_onboarding(node, password):
+    """Queue the onboarding job for an ssh node and mark it in progress."""
+    db.execute("UPDATE nodes SET state='onboarding', state_detail='' WHERE id=?",
+               (node['id'],))
+    return executor.start_job(
+        'onboard', node['name'],
+        {'node_id': node['id'], 'mode': 'onboard',
+         'auto_name': bool(node.get('auto_name'))},
+        session['username'], secret=password)
+
+
+@app.route('/api/nodes', methods=['POST'])
+@require('operator')
+def api_add_node():
+    """Onboard a node. For conn='ssh' this creates the row in state
+    'onboarding' and queues the lifecycle job (credential validation → key
+    bootstrap → execution check); the node becomes 'managed' only if all three
+    pass. conn='local' (this host) needs no credentials and is managed
+    immediately. The password lives in memory for the job only."""
+    d = request.get_json(force=True) or {}
     conn = 'local' if d.get('conn') == 'local' else 'ssh'
+    fields, err = _validate_node_fields(d, name_required=(conn == 'local'))
+    if err:
+        return jsonify({'error': err}), 400
+    password = d.get('password') or ''
+    if conn == 'ssh':
+        if not (d.get('username') or '').strip() or not password:
+            return jsonify({'error': 'username and password are required to '
+                            'onboard an SSH node'}), 400
+        if len(password) > 256:
+            return jsonify({'error': 'password too long'}), 400
+    auto_name = not fields['name']
+    name = fields['name'] or _placeholder_name(fields['address'])
+    state = 'managed' if conn == 'local' else 'onboarding'
     try:
         node_id = db.execute(
-            'INSERT INTO nodes (name, address, conn, ssh_user, ssh_port, groups, created_at) '
-            'VALUES (?,?,?,?,?,?,?)',
-            (name, address, conn, ssh_user, port,
-             (d.get('groups') or '').strip(), int(time.time())))
+            'INSERT INTO nodes (name, address, conn, ssh_user, ssh_port, groups, '
+            'mac, state, created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+            (name, fields['address'], conn, fields['ssh_user'], fields['ssh_port'],
+             fields['groups'], fields['mac'], state, int(time.time())))
     except Exception as exc:
         return jsonify({'error': f'could not add node: {exc}'}), 400
-    log_action('node.add', name)
-    return jsonify({'id': node_id}), 201
+    log_action('node.add', f'{name} ({fields["address"]}, {conn})')
+    if conn == 'local':
+        return jsonify({'id': node_id}), 201
+    job_id = executor.start_job(
+        'onboard', name,
+        {'node_id': node_id, 'mode': 'onboard', 'auto_name': auto_name},
+        session['username'], secret=password)
+    log_action('node.onboard', f'{name} job {job_id}')
+    return jsonify({'id': node_id, 'job_id': job_id}), 201
+
+
+@app.route('/api/nodes/<int:node_id>/onboard', methods=['POST'])
+@require('operator')
+def api_onboard_node(node_id):
+    """(Re)run onboarding for an existing ssh node (discovered / failed /
+    unverified — or managed, e.g. to rotate the SSH user)."""
+    node = db.query('SELECT * FROM nodes WHERE id=?', (node_id,), one=True)
+    if not node:
+        return jsonify({'error': 'not found'}), 404
+    if node['conn'] == 'local':
+        return jsonify({'error': 'local nodes do not need onboarding'}), 400
+    if node['state'] == 'onboarding':
+        return jsonify({'error': 'onboarding is already in progress'}), 409
+    d = request.get_json(force=True) or {}
+    username = (d.get('username') or '').strip()
+    password = d.get('password') or ''
+    if not username or not password:
+        return jsonify({'error': 'username and password are required'}), 400
+    if len(password) > 256:
+        return jsonify({'error': 'password too long'}), 400
+    if not NODE_USER_RE.fullmatch(username):
+        return jsonify({'error': 'ssh user may contain only letters, digits, '
+                        'dot, dash, underscore'}), 400
+    db.execute('UPDATE nodes SET ssh_user=? WHERE id=?', (username, node_id))
+    node = dict(node)
+    node['auto_name'] = node['name'].startswith('node-')
+    job_id = _start_onboarding(node, password)
+    log_action('node.onboard', f'{node["name"]} job {job_id}')
+    return jsonify({'job_id': job_id}), 202
+
+
+@app.route('/api/nodes/<int:node_id>/verify', methods=['POST'])
+@require('operator')
+def api_verify_node(node_id):
+    """Key-only execution check: promotes a legacy 'unverified' node (whose
+    key access already works) to 'managed' without needing a password."""
+    node = db.query('SELECT * FROM nodes WHERE id=?', (node_id,), one=True)
+    if not node:
+        return jsonify({'error': 'not found'}), 404
+    if node['conn'] == 'local':
+        return jsonify({'error': 'local nodes do not need verification'}), 400
+    if node['state'] == 'onboarding':
+        return jsonify({'error': 'onboarding is already in progress'}), 409
+    db.execute("UPDATE nodes SET state='onboarding', "
+               "state_detail='verifying key access' WHERE id=?", (node_id,))
+    job_id = executor.start_job('verify', node['name'],
+                                {'node_id': node_id, 'mode': 'verify'},
+                                session['username'])
+    log_action('node.verify', f'{node["name"]} job {job_id}')
+    return jsonify({'job_id': job_id}), 202
+
+
+@app.route('/api/nodes')
+def api_list_nodes():
+    rows = db.query('SELECT * FROM nodes ORDER BY name')
+    return jsonify({'nodes': [dict(r) for r in rows]})
 
 
 @app.route('/api/nodes/<int:node_id>', methods=['DELETE'])
@@ -351,6 +477,10 @@ def api_delete_node(node_id):
 # ── job launch API ────────────────────────────────────────────────────────────
 
 def _selected_nodes(d):
+    """Expand node_ids + group into eligible targets, enforcing the lifecycle
+    gate: only managed ssh nodes (or local nodes) run jobs. Returns
+    (ids, names, excluded) where excluded lists 'name (state)' strings for
+    selected-but-ineligible nodes so the error can name them."""
     ids = [int(x) for x in d.get('node_ids', []) if str(x).isdigit()]
     group = (d.get('group') or '').strip()
     if group:
@@ -358,9 +488,21 @@ def _selected_nodes(d):
             if group in [g.strip() for g in (r['groups'] or '').split(',') if g.strip()]:
                 ids.append(r['id'])
     ids = sorted(set(ids))
-    names = [r['name'] for r in db.query('SELECT name FROM nodes WHERE id IN (%s)'
-             % ','.join('?' for _ in ids), tuple(ids))] if ids else []
-    return ids, names
+    if not ids:
+        return [], [], []
+    rows = db.query('SELECT * FROM nodes WHERE id IN (%s)'
+                    % ','.join('?' for _ in ids), tuple(ids))
+    eligible = [r for r in rows if executor.node_eligible(r)]
+    excluded = [f"{r['name']} ({r['state']})" for r in rows
+                if not executor.node_eligible(r)]
+    return ([r['id'] for r in eligible], [r['name'] for r in eligible], excluded)
+
+
+def _target_error(excluded):
+    if excluded:
+        return ('these nodes are not managed yet and cannot run jobs: '
+                + ', '.join(excluded) + ' — onboard or verify them first')
+    return 'select at least one node or a group'
 
 
 @app.route('/api/run/shell', methods=['POST'])
@@ -370,9 +512,9 @@ def api_run_shell():
     command = (d.get('command') or '').strip()
     if not command:
         return jsonify({'error': 'command is required'}), 400
-    ids, names = _selected_nodes(d)
+    ids, names, excluded = _selected_nodes(d)
     if not ids:
-        return jsonify({'error': 'select at least one node or a group'}), 400
+        return jsonify({'error': _target_error(excluded)}), 400
     job_id = executor.start_job('shell', ','.join(names),
                                 {'node_ids': ids, 'command': command},
                                 session['username'])
@@ -387,9 +529,9 @@ def api_run_ansible():
     playbook = d.get('playbook') or ''
     if not playbook.strip():
         return jsonify({'error': 'playbook content is required'}), 400
-    ids, names = _selected_nodes(d)
+    ids, names, excluded = _selected_nodes(d)
     if not ids:
-        return jsonify({'error': 'select at least one node or a group'}), 400
+        return jsonify({'error': _target_error(excluded)}), 400
     job_id = executor.start_job('ansible', ','.join(names),
                                 {'node_ids': ids, 'playbook': playbook,
                                  'extra_vars': (d.get('extra_vars') or '').strip()},

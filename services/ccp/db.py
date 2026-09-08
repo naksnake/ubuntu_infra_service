@@ -35,7 +35,14 @@ CREATE TABLE IF NOT EXISTS nodes (
     ssh_user   TEXT NOT NULL DEFAULT 'root',
     ssh_port   INTEGER NOT NULL DEFAULT 22,
     groups     TEXT NOT NULL DEFAULT '',        -- comma-separated
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    -- lifecycle: discovered | onboarding | managed | failed | unverified.
+    -- Only the onboarding/verify job may set 'managed' on an ssh node — and
+    -- only after password auth, key install and key-auth execution all pass.
+    state        TEXT NOT NULL DEFAULT 'unverified',
+    state_detail TEXT NOT NULL DEFAULT '',
+    mac          TEXT NOT NULL DEFAULT '',      -- from DHCP discovery, if known
+    onboarded_at INTEGER                        -- when the node became managed
 );
 
 CREATE TABLE IF NOT EXISTS scripts (
@@ -138,6 +145,26 @@ def init_db():
         conn.execute('ALTER TABLE users ADD COLUMN quota_mb INTEGER')
         conn.commit()
 
+    # M1 — node lifecycle (see docs/ccp/db-migration-plan.md). Legacy ssh rows
+    # become 'unverified' (CCP cannot know their credentials work; Verify or
+    # re-onboarding promotes them); local rows run via subprocess and need no
+    # credentials, so they are managed by definition.
+    ncols = [r['name'] for r in conn.execute('PRAGMA table_info(nodes)')]
+    if 'state' not in ncols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN state TEXT NOT NULL DEFAULT 'unverified'")
+        conn.execute("ALTER TABLE nodes ADD COLUMN state_detail TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE nodes ADD COLUMN mac TEXT NOT NULL DEFAULT ''")
+        conn.execute('ALTER TABLE nodes ADD COLUMN onboarded_at INTEGER')
+        conn.execute("UPDATE nodes SET state='managed' WHERE conn='local'")
+        conn.commit()
+
+    # A worker restart aborts any in-flight onboarding thread; reset those
+    # rows to a retryable state (mirrors the running-jobs reaper below).
+    conn.execute("UPDATE nodes SET state='failed', "
+                 "state_detail='onboarding interrupted by restart — retry' "
+                 "WHERE state='onboarding'")
+    conn.commit()
+
     # The single worker runs jobs in in-process threads; if it restarts, those
     # threads are gone, so any job still marked 'running' is orphaned. Reap them
     # so they don't linger forever.
@@ -175,9 +202,9 @@ def _seed_demo(conn):
     now = int(time.time())
     if conn.execute('SELECT COUNT(*) AS c FROM nodes').fetchone()['c'] == 0:
         conn.execute(
-            'INSERT INTO nodes (name, address, conn, ssh_user, ssh_port, groups, created_at) '
-            'VALUES (?,?,?,?,?,?,?)',
-            ('control-plane', 'localhost', 'local', 'root', 22, 'demo,control', now))
+            'INSERT INTO nodes (name, address, conn, ssh_user, ssh_port, groups, created_at, state) '
+            'VALUES (?,?,?,?,?,?,?,?)',
+            ('control-plane', 'localhost', 'local', 'root', 22, 'demo,control', now, 'managed'))
     if conn.execute('SELECT COUNT(*) AS c FROM scripts').fetchone()['c'] == 0:
         conn.execute(
             'INSERT INTO scripts (name, kind, description, content, updated_at, updated_by) '
