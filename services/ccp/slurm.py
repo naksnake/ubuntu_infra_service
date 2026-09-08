@@ -370,6 +370,19 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
         mode: "0755"
       when: inventory_hostname == slurm_controller
 
+    # Every node resolving every other node by name is what MPI, srun and
+    # most HPC tooling expect (slurm.conf itself uses NodeAddr, so this is not
+    # what makes Slurm work — it is what makes jobs on it work). Kept inside
+    # CCP markers so membership changes rewrite the block instead of appending.
+    - name: Maintain the CCP-managed cluster peer entries in /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {{mark}} CCP CLUSTER HOSTS"
+        block: |
+          {{% for h in ansible_play_hosts %}}
+          {{{{ hostvars[h].ansible_host | default(h, true) }}}} {{{{ h }}}}
+          {{% endfor %}}
+
     - name: Write slurm.conf
       ansible.builtin.copy:
         dest: /etc/slurm/slurm.conf

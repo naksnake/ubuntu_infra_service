@@ -82,9 +82,18 @@ function _parseHostHeader(inner) {
   return { host: m[1], addr, label: (m[3] || '').trim() };
 }
 
+// SSH connection chatter that is never useful output. Suppressed at the
+// source with -o LogLevel=ERROR; stripped here too so logs captured before
+// that (or by tools we don't control) read cleanly.
+const SSH_NOISE = [
+  /^Warning: Permanently added .* to the list of known hosts\.?\s*$/,
+  /^Warning: the \S+ host key for .* differs from the key for the IP address/,
+  /^Warning: Permanently added the \S+ host key for IP address/,
+];
+
 function renderConsole(el, text) {
   const raw = String(text == null ? '' : text);
-  const lines = raw.split('\n');
+  const lines = raw.split('\n').filter(l => !SSH_NOISE.some(re => re.test(l)));
   const hasHosts = lines.some(l => /^=====.*=====\s*$/.test(l));
   if (!hasHosts) { el.innerHTML = _colorLines(lines); return; }
 

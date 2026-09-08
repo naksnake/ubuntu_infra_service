@@ -35,7 +35,10 @@ JOB_TIMEOUT = int(os.environ.get('CCP_JOB_TIMEOUT', '900'))
 SSH_COMMON = ['-o', 'StrictHostKeyChecking=no',
               '-o', 'UserKnownHostsFile=/dev/null',
               '-o', 'ConnectTimeout=10',
-              '-o', 'BatchMode=yes']
+              '-o', 'BatchMode=yes',
+              # keep "Warning: Permanently added … to the list of known hosts"
+              # out of every job log — it is noise, not output
+              '-o', 'LogLevel=ERROR']
 # per-step wall clock for onboarding ssh commands (connect timeout is separate)
 ONBOARD_STEP_TIMEOUT = int(os.environ.get('CCP_ONBOARD_STEP_TIMEOUT', '60'))
 
@@ -257,6 +260,7 @@ def _password_ssh(address, user, port, command, password):
            '-o', 'PreferredAuthentications=password,keyboard-interactive',
            '-o', 'PubkeyAuthentication=no',
            '-o', 'NumberOfPasswordPrompts=1',
+           '-o', 'LogLevel=ERROR',
            '-p', str(port), f'{user}@{address}', command]
     env = dict(os.environ, SSHPASS=password)   # env, not argv: /proc-safe
     try:
@@ -460,12 +464,19 @@ if [ "$set_ok" != 1 ]; then
   printf '%s\\n' "$new" | $SUDO tee /etc/hostname >/dev/null || exit 41
   $SUDO hostname "$new" 2>&1 || exit 41
 fi
-esc=$(printf '%s' "$old" | sed 's/[].[^$*\\/]/\\\\&/g')
-if [ -n "$old" ] && grep -qw "$old" /etc/hosts 2>/dev/null; then
-  $SUDO sed -i "s/\\b$esc\\b/$new/g" /etc/hosts || exit 42
-else
-  printf '127.0.1.1\\t%s\\n' "$new" | $SUDO tee -a /etc/hosts >/dev/null || exit 42
-fi
+# Rewrite the canonical 127.0.1.1 entry in place and collapse any duplicates
+# (an earlier CCP version appended a new line per rename, leaving the old name
+# and several 127.0.1.1 rows behind — this cleans that up). Everything else in
+# the file, including peer and IPv6 entries, is preserved byte for byte.
+tmp_hosts=$(mktemp) || exit 42
+awk -v new="$new" '
+  $1 == "127.0.1.1" {{ if (!done) {{ print "127.0.1.1\\t" new; done = 1 }} next }}
+  {{ print }}
+  END {{ if (!done) print "127.0.1.1\\t" new }}
+' /etc/hosts > "$tmp_hosts" || {{ rm -f "$tmp_hosts"; exit 42; }}
+if ! grep -q "[[:space:]]$new\\$" "$tmp_hosts"; then rm -f "$tmp_hosts"; exit 42; fi
+$SUDO cp "$tmp_hosts" /etc/hosts || {{ rm -f "$tmp_hosts"; exit 42; }}
+rm -f "$tmp_hosts"
 # cloud images rewrite the hostname on every boot unless told not to
 if [ -f /etc/cloud/cloud.cfg ]; then
   if grep -q '^preserve_hostname:' /etc/cloud/cloud.cfg 2>/dev/null; then

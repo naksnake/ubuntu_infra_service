@@ -187,5 +187,52 @@ check('backfill parsed rack names',
 check('backfill left plain names unracked', rows['plain-node']['rack'] is None)
 conn.close()
 
+
+print('== /etc/hosts is rewritten in place, never appended ==')
+import subprocess, tempfile as _tf
+script = executor._hostname_script('rack0-sled2-gpu')
+stage = ('new=rack0-sled2-gpu\nSUDO=\n# Rewrite the canonical'
+         + script.split('# Rewrite the canonical')[1].split('# cloud images')[0])
+BROKEN = """127.0.0.1 localhost
+127.0.1.1 gpu-node
+
+10.10.90.74   rack0-sled2-gpu
+10.10.90.104  rack0-sled1-cpu
+
+# The following lines are desirable for IPv6 capable hosts
+::1     ip6-localhost ip6-loopback
+ff02::2 ip6-allrouters
+127.0.1.1\track0_sled2_gpu
+127.0.1.1\track0-sled2-gpu
+"""
+d = _tf.mkdtemp()
+hosts = pathlib.Path(d) / 'hosts'
+hosts.write_text(BROKEN)
+sh = pathlib.Path(d) / 's.sh'
+sh.write_text(stage.replace('/etc/hosts', str(hosts)))
+rc = subprocess.run(['sh', str(sh)], capture_output=True, text=True).returncode
+out = hosts.read_text()
+check('hosts stage succeeds', rc == 0)
+check('exactly one 127.0.1.1 entry remains',
+      len([l for l in out.splitlines() if l.startswith('127.0.1.1')]) == 1, out)
+check('the 127.0.1.1 entry carries the new hostname',
+      any(l.startswith('127.0.1.1') and l.endswith('rack0-sled2-gpu')
+          for l in out.splitlines()), out)
+check('the stale hostname is gone', 'gpu-node' not in out, out)
+check('duplicate appended underscore entry cleaned up',
+      'rack0_sled2_gpu' not in out, out)
+check('peer entries preserved',
+      '10.10.90.74   rack0-sled2-gpu' in out and '10.10.90.104  rack0-sled1-cpu' in out, out)
+check('ipv6 block preserved', 'ip6-allrouters' in out and 'ip6-localhost' in out)
+check('localhost line preserved', out.splitlines()[0] == '127.0.0.1 localhost')
+
+# idempotent: running it again changes nothing
+before = out
+subprocess.run(['sh', str(sh)], capture_output=True, text=True)
+check('re-running the rename is idempotent', hosts.read_text() == before)
+
+print('== ssh noise suppressed at the source ==')
+check('key ssh passes LogLevel=ERROR', 'LogLevel=ERROR' in ' '.join(executor.SSH_COMMON))
+
 print(f'\n{ok} passed, {fail} failed')
 sys.exit(1 if fail else 0)
