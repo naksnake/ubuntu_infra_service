@@ -19,12 +19,40 @@ matching its CCP inventory name (they differ until the one-click rename):
   communication.
 """
 
+import json
+
 MEM_RESERVE_MB = 512      # keep a slice for the OS so slurmd doesn't overcommit
 
 
-def _node_line(node, hw):
+def _gpu_declarable(hw):
+    """True when a node's GPUs were seen *through the driver* (nvidia-smi), so
+    the /dev/nvidia* device files exist and a File= gres entry is safe.
+
+    Hardware discovery also counts GPUs from lspci when nvidia-smi is missing —
+    i.e. the card is present but the driver is not loaded. Declaring those to
+    Slurm is actively harmful: slurmd blocks with "Waiting for gres.conf file
+    /dev/nvidia0" and the node never registers. (A file-less Count= entry is
+    not an alternative — Slurm drops it: "Ignoring file-less GPU".)"""
+    if not hw:
+        return False
+    raw = hw.get('raw_json')
+    if raw is None:          # summary-only dict (no facts payload) — trust the count
+        return True
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return True
+    if 'gpu' in data:        # nvidia-smi answered → driver loaded → devices exist
+        return True
+    if 'pci_gpu' in data:    # only the PCI bus saw them → no driver
+        return False
+    return True
+
+
+def _node_line(node, hw, gpus=None):
     """One NodeName= line. Falls back to CPUs=1 RealMemory=256 when hardware
-    was never scanned (the operator sees the warning from generate())."""
+    was never scanned (the operator sees the warning from generate()).
+    `gpus` is the effective, declarable GPU count decided by generate()."""
     parts = [f'NodeName={node["name"]}', f'NodeAddr={node["address"]}']
     cores = (hw or {}).get('cpu_cores') or 0
     if cores:
@@ -40,7 +68,8 @@ def _node_line(node, hw):
         parts.append('CPUs=1')
     mem = (hw or {}).get('mem_mb') or 0
     parts.append(f'RealMemory={max(mem - MEM_RESERVE_MB, 256)}')
-    gpus = (hw or {}).get('gpu_count') or 0
+    if gpus is None:
+        gpus = (hw or {}).get('gpu_count') or 0
     if gpus:
         parts.append(f'Gres=gpu:{gpus}')
     parts.append('State=UNKNOWN')
@@ -61,8 +90,16 @@ def generate(cluster_name, members, controller, hardware_by_node):
         if not hw or not hw.get('cpu_cores'):
             warnings.append(f'{n["name"]}: no hardware facts — using minimal '
                             'defaults (run a hardware scan and regenerate)')
-        node_lines.append(_node_line(n, hw))
         gpus = (hw or {}).get('gpu_count') or 0
+        if gpus and not _gpu_declarable(hw):
+            warnings.append(
+                f'{n["name"]}: {gpus} GPU(s) seen on the PCI bus but the NVIDIA '
+                'driver is not loaded, so /dev/nvidia* does not exist. Not '
+                'declaring them to Slurm — slurmd would hang waiting for the '
+                'device files and the node would never come up. Install the '
+                'driver, rescan the hardware, then regenerate.')
+            gpus = 0
+        node_lines.append(_node_line(n, hw, gpus))
         if gpus:
             any_gpu = True
             dev = ('/dev/nvidia0' if gpus == 1

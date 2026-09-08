@@ -77,6 +77,33 @@ check('gres multi-gpu range + single-gpu file',
       and 'NodeName=rack0_sled2_gpu Name=gpu File=/dev/nvidia0' in gres, gres)
 check('cpu-only node absent from gres', 'sled3' not in gres)
 
+print('== GPU declaration depends on the driver being loaded ==')
+# verified against real slurm 23.11.4: declaring a GPU whose /dev/nvidia*
+# does not exist makes slurmd hang on "Waiting for gres.conf file /dev/nvidia0"
+gpu_pci = [{'id': 9, 'name': 'gpu-nodrv', 'address': '10.0.0.9'}]
+hw_pci = {9: {'cpu_cores': 8, 'mem_mb': 16000, 'gpu_count': 2,
+              'raw_json': json.dumps({'pci_gpu': ['03:00.0 VGA: NVIDIA H100']})}}
+c_pci, g_pci, w_pci = slurm.generate('x', gpu_pci, gpu_pci[0], hw_pci)
+check('driverless GPU (lspci only) is NOT declared',
+      'Gres=gpu' not in c_pci and 'GresTypes' not in c_pci and g_pci == '',
+      (c_pci, g_pci))
+check('driverless GPU warns with the reason and the remedy',
+      w_pci and 'driver is not loaded' in w_pci[0] and 'rescan' in w_pci[0], w_pci)
+
+hw_nvml = {9: {'cpu_cores': 8, 'mem_mb': 16000, 'gpu_count': 2,
+               'raw_json': json.dumps({'gpu': ['NVIDIA H100', 'NVIDIA H100']})}}
+c_nv, g_nv, w_nv = slurm.generate('x', gpu_pci, gpu_pci[0], hw_nvml)
+check('driver-detected GPU IS declared with device files',
+      'Gres=gpu:2' in c_nv and 'GresTypes=gpu' in c_nv
+      and 'File=/dev/nvidia[0-1]' in g_nv, (c_nv, g_nv))
+check('driver-detected GPU raises no driver warning',
+      not any('driver is not loaded' in w for w in w_nv), w_nv)
+
+hw_bare = {9: {'cpu_cores': 8, 'mem_mb': 16000, 'gpu_count': 2}}  # no raw_json
+c_b, g_b, _ = slurm.generate('x', gpu_pci, gpu_pci[0], hw_bare)
+check('summary-only hardware still declares GPUs (back-compat)',
+      'Gres=gpu:2' in c_b and 'File=/dev/nvidia[0-1]' in g_b)
+
 conf2, gres2, warn2 = slurm.generate('cpu-only', [members[2]], members[2],
                                      {3: hw[3]})
 check('no-GPU cluster: empty gres, no GresTypes',
