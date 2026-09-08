@@ -135,6 +135,10 @@ check('slurmctld disabled on non-controllers (no failed-everywhere noise)',
       and 'inventory_hostname != slurm_controller' in pb, pb)
 check('facts gathered for the SlurmctldHost resolution',
       'gather_facts: true' in pb)
+check('version-skew gate present and runs before any deployment work',
+      'Fail fast when Slurm versions differ' in pb
+      and pb.index('Fail fast when Slurm versions differ')
+          < pb.index('Generate the munge key'), 'gate must precede munge/config')
 check('slurmd NodeName pinned via -N (independent of OS hostname)',
       'SLURMD_OPTIONS=-N {{ inventory_hostname }}' in pb
       and 'slurmd.service.d' in pb, pb)

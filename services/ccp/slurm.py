@@ -206,6 +206,31 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name):
         state: present
         update_cache: true
 
+    # A slurmd cannot talk to a slurmctld more than ~2 releases apart, and
+    # `apt install slurm-wlm` installs whatever each Ubuntu release pins — so a
+    # mixed-release fleet yields nodes that never register, with no obvious
+    # cause. Fail the deploy here with the actual versions instead.
+    - name: Record the installed Slurm version
+      ansible.builtin.command: slurmd -V
+      register: slurm_ver
+      changed_when: false
+
+    - name: Fail fast when Slurm versions differ across the cluster
+      run_once: true
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts | map('extract', hostvars, ['slurm_ver', 'stdout'])
+            | map('trim') | unique | list | length == 1
+        success_msg: "every node runs {{{{ slurm_ver.stdout | trim }}}}"
+        fail_msg: |
+          Slurm versions differ across this cluster, so the nodes will never
+          register with the controller. Install the same Slurm version
+          everywhere (in practice: the same Ubuntu release on every node, or
+          pin the package), then deploy again.
+          {{{{ ansible_play_hosts | zip(ansible_play_hosts
+              | map('extract', hostvars, ['slurm_ver', 'stdout'])
+              | map('trim')) | list }}}}
+
     - name: Generate the munge key on the controller
       ansible.builtin.command:
         cmd: /usr/sbin/mungekey --create --force
