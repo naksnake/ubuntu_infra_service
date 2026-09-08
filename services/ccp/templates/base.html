@@ -13,6 +13,7 @@
     <div class="brand"><span class="logo">◈</span><div><b>Cluster Control</b><small>Panel</small></div></div>
     <nav>
       <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.path=='/' }}">▚ Dashboard</a>
+      <a href="{{ url_for('discovery_page') }}" class="{{ 'active' if request.path=='/discovery' }}">◉ Discovery</a>
       <a href="{{ url_for('nodes_page') }}" class="{{ 'active' if request.path=='/nodes' }}">▤ Nodes</a>
       <a href="{{ url_for('shell_page') }}" class="{{ 'active' if request.path=='/shell' }}">❯_ ClusterShell</a>
       <a href="{{ url_for('ansible_page') }}" class="{{ 'active' if request.path=='/ansible' }}">▶ Ansible</a>

@@ -6,7 +6,8 @@
   <h2>Onboard node</h2>
   <p class="muted">CCP validates the credentials, installs its SSH key and confirms
   command execution — only then does the node become <b>managed</b>. The password is
-  used once and never stored.</p>
+  used once and never stored. Prefer <a href="{{ url_for('discovery_page') }}">Discovery</a>
+  to import machines straight from DHCP leases.</p>
   <div class="row">
     <div><label>Address / host</label><input id="n-addr" placeholder="192.168.100.21"></div>
     <div><label>Username</label><input id="n-user" value="root" autocomplete="off"></div>

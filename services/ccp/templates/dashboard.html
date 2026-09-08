@@ -1,9 +1,24 @@
 {% extends "base.html" %}
 {% block heading %}Dashboard{% endblock %}
 {% block body %}
+{% if new_systems %}
+<div class="warnbox">◉ {{ new_systems }} system{{ 's' if new_systems != 1 }} on the
+lab network {{ 'are' if new_systems != 1 else 'is' }} not in the inventory yet —
+<a href="{{ url_for('discovery_page') }}">import from Discovery</a>.</div>
+{% endif %}
+
 <div class="grid cols-4">
-  <div class="stat"><div class="n">{{ stats.nodes }}</div><div class="l">Nodes</div></div>
-  <div class="stat"><div class="n">{{ stats.scripts }}</div><div class="l">Scripts</div></div>
+  <a class="stat" href="{{ url_for('nodes_page') }}">
+    <div class="n" style="color:#63d67f">{{ lifecycle.managed }}</div><div class="l">Managed</div></a>
+  <a class="stat" href="{{ url_for('nodes_page') }}">
+    <div class="n" style="color:#8fb7ff">{{ lifecycle.onboarding }}</div><div class="l">Onboarding</div></a>
+  <a class="stat" href="{{ url_for('nodes_page') }}">
+    <div class="n" style="color:#e5c15a">{{ lifecycle.discovered + lifecycle.unverified }}</div><div class="l">Awaiting onboard</div></a>
+  <a class="stat" href="{{ url_for('nodes_page') }}">
+    <div class="n" style="color:#ff9a92">{{ lifecycle.failed }}</div><div class="l">Failed</div></a>
+</div>
+
+<div class="grid cols-4">
   <div class="stat"><div class="n">{{ stats.jobs }}</div><div class="l">Total jobs</div></div>
   <div class="stat"><div class="n">{{ stats.running }}</div><div class="l">Running now</div></div>
 </div>

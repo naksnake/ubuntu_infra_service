@@ -36,7 +36,11 @@ small{color:var(--muted)}
 .grid.cols-4{grid-template-columns:repeat(4,1fr)}
 .grid.cols-2{grid-template-columns:1fr 1fr}
 @media(max-width:900px){.grid.cols-4{grid-template-columns:1fr 1fr}.grid.cols-2{grid-template-columns:1fr}}
-.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+.stat{display:block;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+a.stat{color:var(--ink)}
+a.stat:hover{border-color:var(--accent)}
+.grid{margin-bottom:16px}
+tr.lease-expired{opacity:.5}
 .stat .n{font-size:30px;font-weight:700}
 .stat .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
 

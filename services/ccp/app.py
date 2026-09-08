@@ -30,6 +30,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 import db
+import discovery
 import executor
 
 app = Flask(__name__)
@@ -209,19 +210,29 @@ def logout():
 
 @app.route('/')
 def dashboard():
-    nodes = db.query('SELECT COUNT(*) AS c FROM nodes')[0]['c']
-    scripts = db.query('SELECT COUNT(*) AS c FROM scripts')[0]['c']
+    lifecycle = {s: 0 for s in NODE_STATES}
+    for r in db.query('SELECT state, COUNT(*) AS c FROM nodes GROUP BY state'):
+        if r['state'] in lifecycle:
+            lifecycle[r['state']] = r['c']
     jobs = db.query('SELECT COUNT(*) AS c FROM jobs')[0]['c']
     running = db.query("SELECT COUNT(*) AS c FROM jobs WHERE status='running'")[0]['c']
     recent = db.query('SELECT * FROM jobs ORDER BY id DESC LIMIT 8')
-    return render_template('dashboard.html', stats={
-        'nodes': nodes, 'scripts': scripts, 'jobs': jobs, 'running': running},
-        recent=recent)
+    return render_template('dashboard.html', lifecycle=lifecycle,
+                           new_systems=discovery.new_system_count(),
+                           stats={'jobs': jobs, 'running': running},
+                           recent=recent)
 
 
 @app.route('/nodes')
 def nodes_page():
     return render_template('nodes.html', nodes=db.query('SELECT * FROM nodes ORDER BY name'))
+
+
+@app.route('/discovery')
+def discovery_page():
+    leases, err = discovery.parse_leases()
+    return render_template('discovery.html',
+                           leases=discovery.annotate(leases), error=err)
 
 
 @app.route('/shell')
@@ -472,6 +483,90 @@ def api_delete_node(node_id):
     db.execute('DELETE FROM nodes WHERE id=?', (node_id,))
     log_action('node.delete', str(node_id))
     return jsonify({'ok': True})
+
+
+# ── discovery API ─────────────────────────────────────────────────────────────
+
+@app.route('/api/discovery')
+def api_discovery():
+    leases, err = discovery.parse_leases()
+    return jsonify({'leases': discovery.annotate(leases), 'error': err})
+
+
+@app.route('/api/discovery/import', methods=['POST'])
+@require('operator')
+def api_discovery_import():
+    """Import discovered systems into the inventory. Each system: {ip, mac,
+    hostname?}. With username+password each new node is onboarded immediately
+    (state walks onboarding → managed/failed); without credentials it is
+    imported as 'discovered' for later onboarding. Systems already matching a
+    node by MAC or address are reported, not duplicated."""
+    d = request.get_json(force=True) or {}
+    systems = d.get('systems') or []
+    username = (d.get('username') or '').strip()
+    password = d.get('password') or ''
+    if not isinstance(systems, list) or not systems:
+        return jsonify({'error': 'select at least one discovered system'}), 400
+    if len(systems) > 500:
+        return jsonify({'error': 'too many systems in one import'}), 400
+    if (username and not password) or (password and not username):
+        return jsonify({'error': 'supply both username and password to onboard, '
+                        'or neither to import only'}), 400
+    if username and not NODE_USER_RE.fullmatch(username):
+        return jsonify({'error': 'ssh user may contain only letters, digits, '
+                        'dot, dash, underscore'}), 400
+    if len(password) > 256:
+        return jsonify({'error': 'password too long'}), 400
+
+    results, seen = [], set()
+    for s in systems:
+        ip = (s.get('ip') or '').strip()
+        mac = (s.get('mac') or '').strip().upper()
+        hostname = (s.get('hostname') or '').strip()
+        if not ip or not NODE_ADDR_RE.fullmatch(ip):
+            results.append({'ip': ip, 'status': 'error', 'error': 'invalid address'})
+            continue
+        if mac and not re.fullmatch(r'[0-9A-F:.-]{1,23}', mac):
+            mac = ''
+        key = mac or ip
+        if key in seen:
+            continue
+        seen.add(key)
+        existing = None
+        if mac:
+            existing = db.query('SELECT id, name FROM nodes WHERE upper(mac)=?',
+                                (mac,), one=True)
+        existing = existing or db.query('SELECT id, name FROM nodes WHERE address=?',
+                                        (ip,), one=True)
+        if existing:
+            results.append({'ip': ip, 'node_id': existing['id'],
+                            'status': 'exists', 'name': existing['name']})
+            continue
+        # dnsmasq hostnames are client-supplied; use only if safe and unique
+        auto_name = True
+        name = ''
+        if hostname and NODE_NAME_RE.fullmatch(hostname) and not db.query(
+                'SELECT 1 FROM nodes WHERE name=?', (hostname,), one=True):
+            name, auto_name = hostname, False
+        name = name or _placeholder_name(ip)
+        state = 'onboarding' if username else 'discovered'
+        node_id = db.execute(
+            'INSERT INTO nodes (name, address, conn, ssh_user, ssh_port, groups, '
+            'mac, state, created_at) VALUES (?,?,?,?,?,?,?,?,?)',
+            (name, ip, 'ssh', username or 'root', 22, '', mac, state,
+             int(time.time())))
+        log_action('node.import', f'{name} ({ip}, {mac or "no mac"})')
+        job_id = None
+        if username:
+            job_id = executor.start_job(
+                'onboard', name,
+                {'node_id': node_id, 'mode': 'onboard', 'auto_name': auto_name},
+                session['username'], secret=password)
+            log_action('node.onboard', f'{name} job {job_id}')
+        results.append({'ip': ip, 'node_id': node_id, 'job_id': job_id,
+                        'status': 'onboarding' if username else 'imported',
+                        'name': name})
+    return jsonify({'results': results}), 201
 
 
 # ── job launch API ────────────────────────────────────────────────────────────

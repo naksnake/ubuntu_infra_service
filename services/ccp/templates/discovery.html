@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Discovery{% endblock %}
+{% block heading %}Discovery{% endblock %}
+{% block body %}
+<div class="card">
+  <h2>Systems on the lab network</h2>
+  <p class="muted">Everything that took a DHCP lease from the lab. Select the new
+  ones, enter the login they were installed with, and CCP imports and onboards
+  them — validating access and installing its SSH key before they become managed.</p>
+  {% if error %}<div class="warnbox">{{ error }}</div>{% endif %}
+  <table>
+    <thead><tr>{% if role_ok('operator') %}<th></th>{% endif %}
+      <th>IP</th><th>MAC</th><th>Hostname</th><th>Lease</th><th>Inventory</th></tr></thead>
+    <tbody>
+      {% for l in leases %}
+      <tr class="{{ 'lease-expired' if l.expired }}">
+        {% if role_ok('operator') %}
+        <td>{% if not l.node_id %}<input type="checkbox" class="disc-cb"
+              data-ip="{{ l.ip }}" data-mac="{{ l.mac }}" data-hostname="{{ l.hostname }}">{% endif %}</td>
+        {% endif %}
+        <td class="mono">{{ l.ip }}</td>
+        <td class="mono">{{ l.mac or '—' }}</td>
+        <td>{{ l.hostname or '—' }}</td>
+        <td><small>{{ 'expired' if l.expired else ('static' if l.expiry_ts == 0 else 'active') }}</small></td>
+        <td>{% if l.node_id %}<span class="badge ns-{{ l.node_state }}">{{ l.node_state }}</span>
+            <small>{{ l.node_name }}</small>
+          {% else %}<span class="pill">new</span>{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="empty">No DHCP leases yet — boot a machine on the lab network.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if role_ok('operator') %}
+<div class="card">
+  <h2>Import selected</h2>
+  <div class="row">
+    <div><label>Username (same login on every selected system)</label>
+      <input id="d-user" value="root" autocomplete="off"></div>
+    <div><label>Password</label>
+      <input id="d-pass" type="password" autocomplete="new-password"></div>
+  </div>
+  <div style="margin-top:14px">
+    <button class="btn" onclick="importSelected(true)">Import &amp; onboard selected</button>
+    <button class="btn btn-ghost" onclick="importSelected(false)"
+      title="Create inventory records now, onboard with credentials later from the Nodes page">Import only</button>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}<script>
+async function importSelected(onboard){
+  const systems=[...document.querySelectorAll('.disc-cb:checked')].map(c=>({
+    ip:c.dataset.ip,mac:c.dataset.mac,hostname:c.dataset.hostname}));
+  if(!systems.length){toast('Select at least one new system',true);return;}
+  const body={systems};
+  if(onboard){
+    body.username=document.getElementById('d-user').value.trim();
+    body.password=document.getElementById('d-pass').value;
+    if(!body.username||!body.password){toast('Username and password are required to onboard',true);return;}
+  }
+  try{
+    const d=await api('POST','/api/discovery/import',body);
+    const n=d.results.filter(r=>r.status!=='error').length;
+    toast(onboard?`Onboarding ${n} system(s)…`:`Imported ${n} system(s)`);
+    location.href='/nodes';
+  }catch(e){toast(e.message,true);}
+}
+</script>{% endblock %}

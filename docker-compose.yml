@@ -215,6 +215,10 @@ services:
       # files and the SSH key — no single-file mounts (which Docker would
       # auto-create as directories on a bare `docker compose up`)
       - ./data/ccp:/data/ccp:rw
+      # dnsmasq lease database (written by lab_dhcp) — read-only source for
+      # the Discovery page; deploy.sh pre-creates the file so this mount
+      # never auto-creates a directory
+      - ./data/dnsmasq.leases:/data/dnsmasq.leases:ro
     environment:
       - CCP_SECRET_KEY=${CCP_SECRET_KEY}
       - CCP_ADMIN_USER=${CCP_ADMIN_USER:-admin}
@@ -227,6 +231,7 @@ services:
       # overrides per user
       - CCP_USER_QUOTA_MB=${CCP_USER_QUOTA_MB:-10240}
       - CCP_SSH_KEY=/data/ccp/ssh/id_ccp
+      - CCP_LEASES_FILE=/data/dnsmasq.leases
       # hard per-job wall-clock cap (seconds) so a hung command/playbook can't
       # pin a worker thread forever
       - CCP_JOB_TIMEOUT=${CCP_JOB_TIMEOUT:-900}
