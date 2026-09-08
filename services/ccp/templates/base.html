@@ -22,6 +22,7 @@
       <a href="{{ url_for('scripts_page') }}" class="{{ 'active' if request.path=='/scripts' }}">❏ Scripts</a>
       <a href="{{ url_for('jobs_page') }}" class="{{ 'active' if request.path.startswith('/jobs') }}">≣ Jobs</a>
       <a href="{{ url_for('files_page') }}" class="{{ 'active' if request.path=='/files' }}">⬆ Files</a>
+      <a href="{{ url_for('deploy_page') }}" class="{{ 'active' if request.path=='/deploy' }}">⇪ Deploy files</a>
       {% if role_ok('admin') %}
       <div class="nav-sep">Admin</div>
       <a href="{{ url_for('users_page') }}" class="{{ 'active' if request.path=='/users' }}">☺ Users</a>

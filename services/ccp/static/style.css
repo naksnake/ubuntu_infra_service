@@ -26,7 +26,8 @@ small{color:var(--muted)}
 .who{margin-top:auto;padding:12px 8px 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
 .who-name{font-weight:600}
 
-.content{flex:1;min-width:0;padding:22px 26px;max-width:1200px}
+/* wide view: content uses all remaining horizontal space, never a narrow column */
+.content{flex:1;min-width:0;padding:22px 26px;max-width:none;width:100%}
 .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;gap:12px}
 .flash{background:rgba(248,81,73,.12);border:1px solid var(--danger);color:#ffb4ae;
   padding:10px 14px;border-radius:8px;margin-bottom:14px}
@@ -150,6 +151,43 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
 .console .c-ok{color:#63d67f;font-weight:700}
 .console .c-err{color:#ff9a92;font-weight:700}
 .console .c-info{color:#8b98a9}
+/* console goes full width and only caps height when it is a live log pane */
+.console{max-width:none}
+
+/* nested group → host collapsible results (infra output grouping) */
+.rgroup{border:1px solid var(--line);border-radius:8px;margin:0 0 8px;background:var(--panel2)}
+.rgroup > summary,.rhost > summary{cursor:pointer;padding:7px 12px;font-family:var(--mono);
+  font-size:12px;list-style:none;user-select:none;display:flex;gap:8px;align-items:center;
+  flex-wrap:wrap}
+.rgroup > summary{font-weight:700;color:#8fb7ff;background:rgba(76,141,255,.10);
+  border-radius:8px}
+.rgroup[open] > summary{border-bottom:1px solid var(--line);border-radius:8px 8px 0 0}
+.rgroup > summary::-webkit-details-marker,.rhost > summary::-webkit-details-marker{display:none}
+.rgroup > summary::before,.rhost > summary::before{content:'▸';color:var(--muted);font-size:10px}
+.rgroup[open] > summary::before,.rhost[open] > summary::before{content:'▾'}
+.rgroup .rbody{padding:8px 10px}
+.rhost{border:1px solid var(--line);border-radius:6px;margin:0 0 6px;background:var(--bg)}
+.rhost:last-child{margin-bottom:0}
+.rhost > summary{color:var(--ink)}
+.rhost pre{margin:0;padding:10px 12px;border-top:1px solid var(--line);
+  white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size:12.5px;
+  color:#d7e0ea;line-height:1.5;overflow-x:auto}
+.rstat{font-weight:700;letter-spacing:.03em}
+.rstat.ok{color:#63d67f}.rstat.err{color:#ff9a92}.rstat.chg{color:#e5c15a}
+.rcount{color:var(--muted);font-weight:400}
+
+/* file / target pick lists */
+.picklist{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px;
+  padding:8px;background:var(--bg)}
+.picklist > label{display:flex;align-items:center;gap:8px;margin:0;padding:6px;
+  color:var(--ink);cursor:pointer;border-radius:6px;font-size:12.5px}
+.picklist > label:hover{background:var(--panel2)}
+.picklist input{width:auto;margin:0}
+.picklist label.ineligible{opacity:.5;cursor:not-allowed}
+.picklist .rgroup{margin-bottom:6px}
+.picklist .rbody label{display:flex;align-items:center;gap:8px;margin:0;padding:5px 6px;
+  cursor:pointer;border-radius:6px;font-size:12.5px}
+.picklist .rbody label:hover{background:var(--panel2)}
 .toast{position:fixed;top:18px;right:18px;background:var(--panel2);border:1px solid var(--line);
   color:var(--ink);padding:11px 16px;border-radius:8px;opacity:0;transform:translateY(-8px);
   transition:.2s;pointer-events:none;z-index:50;max-width:360px}

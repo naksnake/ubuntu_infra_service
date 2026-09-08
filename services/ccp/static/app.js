@@ -48,12 +48,97 @@ function selectedNodePayload(root) {
   return { node_ids: ids, group, cluster_id };
 }
 
-// Render job output with per-node framing so it's obvious which host (and
-// which check) produced each block: '===== name (addr) … =====' headers are
-// highlighted, and exit/pass/fail lines are colored. Falls back to plain text.
+// ── job output rendering ─────────────────────────────────────────────────────
+// Multi-node output is grouped into nested collapsibles: infrastructure group
+// <details> containing one host <details> each, summarised as
+//   [group] 🌐 host (ip) | STATUS: SUCCESS
+// Host blocks are delimited by '===== host (addr) … =====' headers (emitted by
+// ClusterShell, the Slurm stages and file deploys); '##GROUP## name' lines mark
+// which infrastructure group the following hosts belong to. Logs without any
+// host header (onboarding, hardware scans) fall back to line colouring.
+
+function _statusOf(header, body) {
+  const m = /\|\s*STATUS:\s*([A-Z]+)/.exec(header);
+  if (m) return m[1];
+  const exit = /^\[.*\bexit\s+(\d+)\]\s*$/m.exec(body);
+  if (exit) return exit[1] === '0' ? 'SUCCESS' : 'FAILED';
+  if (/\b(fatal|error):|FAILED\b|not a valid controller|Unable to (contact|determine)/i.test(body))
+    return 'FAILED';
+  if (/\bCHANGED\b/.test(body)) return 'CHANGED';
+  return body.trim() ? 'SUCCESS' : 'UNKNOWN';
+}
+
+function _statCls(s) {
+  return s === 'SUCCESS' ? 'ok' : (s === 'CHANGED' ? 'chg'
+    : (s === 'UNKNOWN' ? '' : 'err'));
+}
+
+// '<host> (<addr>, ssh root@:22)' / '<host> (<addr>) : label' → {host, addr, label}
+function _parseHostHeader(inner) {
+  const m = /^([^\s(]+)\s*(?:\(([^)]*)\))?\s*(?::\s*(.*?))?\s*$/.exec(
+    inner.replace(/\|\s*STATUS:\s*[A-Z]+\s*$/, '').trim());
+  if (!m) return { host: inner.trim(), addr: '', label: '' };
+  const addr = (m[2] || '').split(',')[0].trim();
+  return { host: m[1], addr, label: (m[3] || '').trim() };
+}
+
 function renderConsole(el, text) {
-  const lines = String(text == null ? '' : text).split('\n');
-  el.innerHTML = lines.map(line => {
+  const raw = String(text == null ? '' : text);
+  const lines = raw.split('\n');
+  const hasHosts = lines.some(l => /^=====.*=====\s*$/.test(l));
+  if (!hasHosts) { el.innerHTML = _colorLines(lines); return; }
+
+  const preamble = [];
+  const groups = [];          // [{name, hosts:[{host,addr,label,body[]}]}]
+  let curGroup = null, curHost = null;
+
+  const groupFor = name => {
+    let g = groups.find(x => x.name === name);
+    if (!g) { g = { name, hosts: [] }; groups.push(g); }
+    return g;
+  };
+
+  for (const line of lines) {
+    const gm = /^##GROUP##\s*(.*)$/.exec(line);
+    if (gm) { curGroup = groupFor(gm[1].trim() || 'ungrouped'); curHost = null; continue; }
+    const hm = /^=====\s*(.*?)\s*=====\s*$/.exec(line);
+    if (hm) {
+      const meta = _parseHostHeader(hm[1]);
+      curHost = { ...meta, header: hm[1], body: [] };
+      (curGroup || (curGroup = groupFor('nodes'))).hosts.push(curHost);
+      continue;
+    }
+    if (curHost) curHost.body.push(line);
+    else preamble.push(line);
+  }
+
+  let html = preamble.join('\n').trim() ? `<div>${_colorLines(preamble)}</div>` : '';
+  for (const g of groups) {
+    const stats = g.hosts.map(h => _statusOf(h.header, h.body.join('\n')));
+    const tally = {};
+    stats.forEach(s => { tally[s] = (tally[s] || 0) + 1; });
+    const bad = stats.some(s => s !== 'SUCCESS' && s !== 'UNKNOWN');
+    const summary = Object.keys(tally).map(k =>
+      `<span class="rstat ${_statCls(k)}" style="margin:0">${tally[k]} ${k}</span>`).join(' · ');
+    html += `<details class="rgroup" ${bad || g.hosts.length === 1 ? 'open' : ''}>` +
+      `<summary>[${esc(g.name)}] <span class="rcount">${g.hosts.length} host` +
+      `${g.hosts.length === 1 ? '' : 's'}</span> ${summary}</summary><div class="rbody">`;
+    g.hosts.forEach((h, i) => {
+      const st = stats[i];
+      html += `<details class="rhost" ${st !== 'SUCCESS' || g.hosts.length === 1 ? 'open' : ''}>` +
+        `<summary>[${esc(g.name)}] 🌐 ${esc(h.host)}` +
+        (h.addr ? ` (${esc(h.addr)})` : '') +
+        (h.label ? ` <span class="rcount">· ${esc(h.label)}</span>` : '') +
+        ` | STATUS: <span class="rstat ${_statCls(st)}">${st}</span></summary>` +
+        `<pre>${_colorLines(h.body)}</pre></details>`;
+    });
+    html += '</div></details>';
+  }
+  el.innerHTML = html;
+}
+
+function _colorLines(lines) {
+  return lines.map(line => {
     if (/^=====.*=====\s*$/.test(line)) return '<span class="c-host">' + esc(line) + '</span>';
     if (/^\[.*\bexit\s+0\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK) PASSED\b/.test(line) || /^MANAGED\b/.test(line))
       return '<span class="c-ok">' + esc(line) + '</span>';

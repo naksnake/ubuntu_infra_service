@@ -130,6 +130,8 @@ def _run(job_id, kind, spec):
             rc = _run_hostname(job_id, spec, log)
         elif kind == 'slurm_action':
             rc = _run_slurm_action(job_id, spec, log)
+        elif kind == 'filedeploy':
+            rc = _run_filedeploy(job_id, spec, log)
         else:
             log.write(f'unknown job kind: {kind}\n')
             rc = 2
@@ -641,6 +643,212 @@ def _run_hwscan(job_id, spec, log):
               f'{" (" + facts["gpu_model"] + ")" if facts["gpu_model"] else ""}, '
               f'{facts["os_name"] or "unknown OS"}\n')
     return 0
+
+
+# ── file deployment (staging → nodes) ────────────────────────────────────────
+# Two strategies over the same target selection: clush --copy for raw parallel
+# delivery, or the Ansible copy module (idempotent, reports changed vs ok).
+# Output is emitted with '##GROUP##' / '===== host (addr) | STATUS: X ====='
+# markers so the UI renders it as nested group → host collapsibles.
+
+def _group_of(node):
+    """First infrastructure group of a node, for output grouping."""
+    for g in (node['groups'] or '').split(','):
+        if g.strip():
+            return g.strip()
+    return 'ungrouped'
+
+
+def _run_filedeploy(job_id, spec, log):
+    """Copy staged files to selected nodes. spec: {node_ids, srcs (absolute,
+    validated by the API), dest, method}."""
+    nodes = _resolve_nodes(spec.get('node_ids', []), log)
+    srcs = [s for s in spec.get('srcs', []) if os.path.exists(s)]
+    dest = spec.get('dest') or ''
+    method = 'ansible' if spec.get('method') == 'ansible' else 'clush'
+    if not nodes:
+        log.write('[ccp] no managed target nodes resolved\n')
+        return 2
+    if not srcs:
+        log.write('[ccp] none of the selected files exist any more\n')
+        return 2
+    log.write(f'[ccp] deploying {len(srcs)} file(s) to {len(nodes)} node(s) '
+              f'at {dest} via {method}\n')
+    for s in srcs:
+        try:
+            log.write(f'[ccp]   {os.path.basename(s)} '
+                      f'({_fmt_bytes(os.path.getsize(s))})\n')
+        except OSError:
+            log.write(f'[ccp]   {os.path.basename(s)}\n')
+    log.write('\n')
+    if method == 'ansible':
+        return _filedeploy_ansible(nodes, srcs, dest, log)
+    return _filedeploy_clush(nodes, srcs, dest, log)
+
+
+def _filedeploy_clush(nodes, srcs, dest, log):
+    """clush -w <nodelist> --copy <src...> --dest <dest>, one run per
+    (user, port) bucket, plus direct cp for local nodes."""
+    worst = 0
+    by_group = {}
+    for n in nodes:
+        by_group.setdefault(_group_of(n), []).append(n)
+
+    for group, members in sorted(by_group.items()):
+        log.write(f'##GROUP## {group}\n')
+        local = [n for n in members if n['conn'] == 'local']
+        remote = [n for n in members if n['conn'] != 'local']
+
+        for n in local:
+            rc, out = 0, ''
+            try:
+                os.makedirs(dest, exist_ok=True)
+                p = subprocess.run(['cp', '-v', *srcs, dest],
+                                   capture_output=True, text=True,
+                                   timeout=JOB_TIMEOUT)
+                rc, out = p.returncode, (p.stdout or '') + (p.stderr or '')
+            except Exception as exc:
+                rc, out = 1, str(exc)
+            status = 'CHANGED' if rc == 0 else 'FAILED'
+            log.write(f'===== {n["name"]} ({n["address"]}, local) | '
+                      f'STATUS: {status} =====\n{out.rstrip()}\n'
+                      f'[{n["name"]} exit {rc}]\n\n')
+            worst = max(worst, rc)
+
+        if not remote:
+            continue
+        buckets = {}
+        for n in remote:
+            buckets.setdefault((n['ssh_user'], n['ssh_port']), []).append(n)
+        for (user, port), bnodes in buckets.items():
+            nodelist = ','.join(n['address'] for n in bnodes)
+            cmd = ['clush', '-w', nodelist, '-u', str(JOB_TIMEOUT),
+                   '--user', user]
+            opts = list(SSH_COMMON) + ['-p', str(port)]
+            if os.path.exists(SSH_KEY):
+                opts += ['-i', SSH_KEY]
+            cmd += ['-o', ' '.join(shlex.quote(o) for o in opts)]
+            cmd += ['--copy', *srcs, '--dest', dest]
+            log.write(f'[ccp] {" ".join(shlex.quote(c) for c in cmd)}\n')
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=JOB_TIMEOUT + 30)
+                rc, out = p.returncode, (p.stdout or '') + (p.stderr or '')
+            except FileNotFoundError:
+                rc, out = 1, 'clush (ClusterShell) not installed in the CCP container'
+            except subprocess.TimeoutExpired:
+                rc, out = 124, f'clush timed out after {JOB_TIMEOUT}s'
+            # clush --copy reports failures per node; attribute them where we can
+            for n in bnodes:
+                mine = '\n'.join(l for l in out.splitlines()
+                                 if n['address'] in l or n['name'] in l)
+                nrc = 0 if rc == 0 else (1 if mine or rc != 0 else 0)
+                status = 'CHANGED' if nrc == 0 else 'FAILED'
+                body = mine or (f'copied {len(srcs)} file(s) to {dest}'
+                                if nrc == 0 else out.strip())
+                log.write(f'===== {n["name"]} ({n["address"]}, ssh {user}@:{port}) | '
+                          f'STATUS: {status} =====\n{body.rstrip()}\n'
+                          f'[{n["name"]} exit {nrc}]\n\n')
+            worst = max(worst, rc)
+    return worst
+
+
+def _filedeploy_ansible(nodes, srcs, dest, log):
+    """Ansible copy module via a generated inventory — idempotent, and it
+    distinguishes changed from ok per host."""
+    with tempfile.TemporaryDirectory() as tmp:
+        inv_path = os.path.join(tmp, 'inventory.ini')
+        with open(inv_path, 'w') as inv:
+            groups = {}
+            inv.write('[all]\n')
+            for n in nodes:
+                if n['conn'] == 'local':
+                    inv.write(f'{n["name"]} ansible_connection=local\n')
+                else:
+                    line = (f'{n["name"]} ansible_host={n["address"]} '
+                            f'ansible_user={n["ssh_user"]} ansible_port={n["ssh_port"]}')
+                    if os.path.exists(SSH_KEY):
+                        line += f' ansible_ssh_private_key_file={SSH_KEY}'
+                    inv.write(line + '\n')
+                groups.setdefault(_group_of(n), []).append(n['name'])
+            for g, names in groups.items():
+                safe = re.sub(r'[^A-Za-z0-9_]', '_', g)
+                inv.write(f'\n[{safe}]\n' + '\n'.join(names) + '\n')
+
+        pb_path = os.path.join(tmp, 'deploy.yml')
+        files_yaml = '\n'.join(f'    - {shlex.quote(s)}' for s in srcs)
+        with open(pb_path, 'w') as pb:
+            pb.write(f'''---
+- name: Deploy staged files (CCP)
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    ccp_dest: {shlex.quote(dest)}
+    ccp_files:
+{files_yaml}
+  tasks:
+    - name: Ensure the destination directory exists
+      ansible.builtin.file:
+        path: "{{{{ ccp_dest }}}}"
+        state: directory
+      when: ccp_dest is search('/$') or true
+
+    - name: Copy the staged files
+      ansible.builtin.copy:
+        src: "{{{{ item }}}}"
+        dest: "{{{{ ccp_dest }}}}"
+        mode: preserve
+      loop: "{{{{ ccp_files }}}}"
+''')
+        cmd = ['ansible-playbook', '-i', inv_path, pb_path]
+        env = dict(os.environ, ANSIBLE_HOST_KEY_CHECKING='False',
+                   ANSIBLE_FORCE_COLOR='0', ANSIBLE_RETRY_FILES_ENABLED='False',
+                   ANSIBLE_LOCAL_TEMP='/tmp/.ansible-ccp',
+                   ANSIBLE_STDOUT_CALLBACK='default')
+        log.write(f'[ccp] {" ".join(shlex.quote(c) for c in cmd)}\n\n')
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True,
+                               timeout=JOB_TIMEOUT, env=env)
+            rc, out = p.returncode, (p.stdout or '') + (p.stderr or '')
+        except FileNotFoundError:
+            log.write('[ccp] ansible-playbook not installed in the CCP container\n')
+            return 1
+        except subprocess.TimeoutExpired:
+            log.write(f'[ccp] ansible timed out after {JOB_TIMEOUT}s\n')
+            return 124
+
+        # per-host status from the recap, output grouped by infra group
+        recap = {}
+        for m in re.finditer(r'^(\S+)\s*:\s*ok=(\d+)\s+changed=(\d+).*?'
+                             r'failed=(\d+)', out, re.MULTILINE):
+            recap[m.group(1)] = {'changed': int(m.group(3)),
+                                 'failed': int(m.group(4))}
+        by_group = {}
+        for n in nodes:
+            by_group.setdefault(_group_of(n), []).append(n)
+        for group, members in sorted(by_group.items()):
+            log.write(f'##GROUP## {group}\n')
+            for n in members:
+                r = recap.get(n['name'], {})
+                if not r:
+                    status, nrc = 'FAILED', 1
+                elif r['failed']:
+                    status, nrc = 'FAILED', 1
+                elif r['changed']:
+                    status, nrc = 'CHANGED', 0
+                else:
+                    status, nrc = 'SUCCESS', 0
+                mine = '\n'.join(l for l in out.splitlines()
+                                 if n['name'] in l)
+                log.write(f'===== {n["name"]} ({n["address"]}) | STATUS: {status} '
+                          f'=====\n{mine.rstrip() or "(no per-host output)"}\n'
+                          f'[{n["name"]} exit {nrc}]\n\n')
+        log.write('##GROUP## ansible run log\n')
+        log.write(f'===== ansible-playbook (recap) | STATUS: '
+                  f'{"SUCCESS" if rc == 0 else "FAILED"} =====\n{out.rstrip()}\n'
+                  f'[ansible-playbook exit {rc}]\n')
+        return rc
 
 
 # ── slurm lifecycle stages ───────────────────────────────────────────────────

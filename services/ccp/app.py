@@ -241,6 +241,29 @@ def nodes_page():
     return render_template('nodes.html', nodes=nodes)
 
 
+@app.route('/deploy')
+def deploy_page():
+    """Staging assets → target selection → deployment, with live per-node
+    results. Files come from the caller's own file space."""
+    root = _user_root()
+    staged = []
+    for base, _dirs, names in os.walk(root):
+        for n in sorted(names):
+            if n.startswith('.'):
+                continue
+            fp = pathlib.Path(base) / n
+            if not fp.is_file() or fp.is_symlink():
+                continue
+            try:
+                st = fp.stat()
+            except OSError:
+                continue
+            staged.append({'path': str(fp.relative_to(root)),
+                           'size': st.st_size, 'mtime': int(st.st_mtime)})
+    staged.sort(key=lambda f: f['path'])
+    return render_template('deploy.html', staged=staged)
+
+
 @app.route('/rack')
 def rack_page():
     """Rack view generated purely from hostname topology — nothing is drawn
@@ -914,6 +937,90 @@ def api_discovery_import():
                         'status': 'onboarding' if username else 'imported',
                         'name': name})
     return jsonify({'results': results}), 201
+
+
+# ── file deployment API ───────────────────────────────────────────────────────
+
+@app.route('/api/deploy/targets')
+def api_deploy_targets():
+    """Groups with their member nodes, for the two-level target selector.
+    Only managed (or local) nodes can receive a deployment."""
+    rows = db.query(
+        'SELECT n.*, c.name AS cluster_name FROM nodes n '
+        'LEFT JOIN clusters c ON c.id = n.cluster_id ORDER BY n.name')
+    groups = {}
+    for r in rows:
+        node = {'id': r['id'], 'name': r['name'], 'address': r['address'],
+                'state': r['state'], 'conn': r['conn'],
+                'eligible': bool(executor.node_eligible(r))}
+        names = [g.strip() for g in (r['groups'] or '').split(',') if g.strip()]
+        if r['cluster_name']:
+            names.append(f'cluster:{r["cluster_name"]}')
+        for g in (names or ['ungrouped']):
+            groups.setdefault(g, []).append(node)
+    return jsonify({'groups': [{'name': g, 'nodes': n}
+                               for g, n in sorted(groups.items())]})
+
+
+@app.route('/api/deploy/files', methods=['POST'])
+@require('operator')
+def api_deploy_files():
+    """Push staged files from the caller's own file space to selected
+    nodes/groups. Body: {files:[relpath], node_ids:[], groups:[], dest, method}.
+
+    Sources are resolved inside the caller's storage root with the same layered
+    validation as the files API, so a deploy can never read another user's
+    space or escape the root."""
+    d = request.get_json(force=True) or {}
+    rel_files = d.get('files') or []
+    dest = (d.get('dest') or '').strip()
+    method = 'ansible' if d.get('method') == 'ansible' else 'clush'
+    if not rel_files:
+        return jsonify({'error': 'select at least one staged file'}), 400
+    if len(rel_files) > 64:
+        return jsonify({'error': 'too many files in one deployment'}), 400
+    # The destination reaches clush/ansible as an argv element, never a shell
+    # string — but keep it to a strict allowlist anyway (same stance as every
+    # other path this panel accepts) so no metacharacter can ever matter.
+    if not re.fullmatch(r'/[A-Za-z0-9._/-]{0,511}', dest) or '..' in dest:
+        return jsonify({'error': 'destination must be an absolute path on the '
+                        'target nodes using letters, digits, dot, dash, '
+                        'underscore and / — e.g. /opt/assets'}), 400
+
+    root = _user_root()
+    srcs = []
+    for rel in rel_files:
+        p = _inside(root, _safe_rel(rel))
+        if not p.is_file():
+            return jsonify({'error': f'not a staged file: {rel}'}), 404
+        srcs.append(str(p))
+
+    # group names expand to their member nodes, then the lifecycle gate applies
+    ids = [int(x) for x in (d.get('node_ids') or []) if str(x).isdigit()]
+    wanted_groups = [str(g).strip() for g in (d.get('groups') or []) if str(g).strip()]
+    if wanted_groups:
+        for r in db.query('SELECT n.id, n.groups, c.name AS cluster_name '
+                          'FROM nodes n LEFT JOIN clusters c ON c.id = n.cluster_id'):
+            names = [g.strip() for g in (r['groups'] or '').split(',') if g.strip()]
+            if r['cluster_name']:
+                names.append(f'cluster:{r["cluster_name"]}')
+            if not names:
+                names = ['ungrouped']
+            if any(g in wanted_groups for g in names):
+                ids.append(r['id'])
+    ids, names, excluded = _selected_nodes({'node_ids': sorted(set(ids))})
+    if not ids:
+        return jsonify({'error': _target_error(excluded)}), 400
+
+    job_id = executor.start_job(
+        'filedeploy', ','.join(names),
+        {'node_ids': ids, 'srcs': srcs, 'dest': dest, 'method': method},
+        session['username'])
+    log_action('deploy.files',
+               f'{len(srcs)} file(s) → {dest} on {len(ids)} node(s) via {method} '
+               f'(job {job_id})')
+    return jsonify({'job_id': job_id, 'nodes': names,
+                    'excluded': excluded}), 202
 
 
 # ── job launch API ────────────────────────────────────────────────────────────
