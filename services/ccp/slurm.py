@@ -7,8 +7,11 @@ Debian nodes using the distro slurm-wlm packages — deliberate, documented,
 and visible to the operator because the playbook itself lands in the job log.
 
 NodeAddr is always emitted so the cluster works without DNS or /etc/hosts
-coordination; node names come from the inventory (hostname-driven, so they
-already match each machine's real hostname after onboarding/rename).
+coordination. Node names are the CCP inventory names; the deploy playbook
+pins each slurmd to its NodeName with `slurmd -N <name>` (via a SLURMD_OPTIONS
+systemd drop-in) so a node whose OS hostname still differs from its inventory
+name — e.g. a box called 'gpu-node' — is identified correctly instead of
+failing with "Unable to determine this slurmd's NodeName".
 """
 
 MEM_RESERVE_MB = 512      # keep a slice for the OS so slurmd doesn't overcommit
@@ -195,11 +198,32 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name):
         enabled: true
       when: inventory_hostname == slurm_controller
 
+    # Pin each slurmd's NodeName explicitly. Without this, slurmd identifies
+    # itself by matching the machine's OS hostname against a NodeName line in
+    # slurm.conf and aborts with "Unable to determine this slurmd's NodeName"
+    # whenever the box hostname differs from its CCP inventory name (e.g. a
+    # node still called 'gpu-node'). inventory_hostname IS the NodeName here,
+    # so -N makes slurmd's identity independent of the OS hostname.
+    - name: Ensure the slurmd systemd drop-in directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/slurmd.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Force slurmd's NodeName (SLURMD_OPTIONS)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/slurmd.service.d/10-ccp-nodename.conf
+        mode: "0644"
+        content: |
+          [Service]
+          Environment=SLURMD_OPTIONS=-N {{{{ inventory_hostname }}}}
+
     - name: Start slurmd on every node
       ansible.builtin.systemd:
         name: slurmd
         state: restarted
         enabled: true
+        daemon_reload: true
 '''
 
 

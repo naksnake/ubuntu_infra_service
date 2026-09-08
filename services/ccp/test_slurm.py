@@ -94,6 +94,14 @@ check('munge key generated on controller and distributed',
       'mungekey' in pb and 'slurp' in pb and 'b64decode' in pb)
 check('controller-only slurmctld', 'slurmctld' in pb
       and 'inventory_hostname == slurm_controller' in pb)
+check('slurmd NodeName pinned via -N (independent of OS hostname)',
+      'SLURMD_OPTIONS=-N {{ inventory_hostname }}' in pb
+      and 'slurmd.service.d' in pb, pb)
+check('slurmd start does a daemon-reload so the drop-in is read',
+      'daemon_reload: true' in pb)
+import yaml as _yaml
+_docs = list(_yaml.safe_load_all(pb))
+check('deploy playbook is valid YAML', _docs and isinstance(_docs[0], list), type(_docs[0]))
 cleanup = slurm.cleanup_playbook()
 check('cleanup stops services and removes configs',
       'slurmd' in cleanup and '/etc/slurm/slurm.conf' in cleanup)
