@@ -741,14 +741,23 @@ def api_slurm_deploy(cluster_id):
     if not controller:
         return jsonify({'error': 'the stored controller is no longer a managed '
                         'member — regenerate the configuration'}), 400
+    d = request.get_json(silent=True) or {}
+    reinstall = bool(d.get('reinstall'))
+    version = (d.get('version') or '').strip()
+    if version and not re.fullmatch(r'[A-Za-z0-9.+:~_-]{1,64}', version):
+        return jsonify({'error': 'version must be an apt version string, e.g. '
+                        '23.11.4-1.2ubuntu5'}), 400
     playbook = slurm.deploy_playbook(c['slurm_conf'], c['gres_conf'],
-                                     controller['name'])
+                                     controller['name'],
+                                     reinstall=reinstall, version=version or None)
     job_id = executor.start_job(
         'slurm_deploy', c['name'],
         {'node_ids': [m['id'] for m in members], 'playbook': playbook,
          'extra_vars': '', 'cluster_id': cluster_id, 'advance_to': 'DEPLOY'},
         session['username'])
-    log_action('slurm.deploy', f'{c["name"]} job {job_id}')
+    log_action('slurm.deploy', f'{c["name"]} job {job_id}'
+               + (' (clean reinstall)' if reinstall else '')
+               + (f' pinned {version}' if version else ''))
     return jsonify({'job_id': job_id}), 202
 
 

@@ -117,6 +117,10 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
 .slurmbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0;
   padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2)}
 .slurmbar select{width:auto;min-width:160px}
+.slurmbar .inlinechk{display:flex;align-items:center;gap:5px;margin:0;
+  font-size:12px;color:var(--muted);cursor:pointer;white-space:nowrap}
+.slurmbar .inlinechk input{width:auto;margin:0}
+.slurmbar .verpin{width:auto;max-width:190px;font-size:12px;padding:5px 8px}
 .lifecycle{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin:10px 0 2px}
 .lifecycle .stage{font-size:10px;font-weight:700;letter-spacing:.05em;color:var(--muted);
   padding:2px 8px;border:1px solid var(--line);border-radius:999px}

@@ -172,14 +172,21 @@ def _resolve_slurmctld_host(slurm_conf):
     return '\n'.join(out) + '\n'
 
 
-def deploy_playbook(slurm_conf, gres_conf, controller_name):
+def deploy_playbook(slurm_conf, gres_conf, controller_name,
+                    reinstall=False, version=None):
     """The built-in deployment playbook (Ubuntu/Debian slurm-wlm): munge key
     generated on the controller and distributed to every node, configs pushed,
     spool dirs created, slurmctld on the controller and slurmd everywhere.
     The generated configs are inlined so the playbook in the job log is the
     complete, auditable record of what was deployed. The SlurmctldHost name is
     resolved to the controller's real hostname at deploy time (see
-    _resolve_slurmctld_host); slurmd identity is pinned with -N."""
+    _resolve_slurmctld_host); slurmd identity is pinned with -N.
+
+    reinstall=True purges the installed Slurm/munge packages and all of their
+    config and state first, then installs again — the way out of a fleet that
+    drifted onto incompatible versions or a half-configured install.
+    version pins the apt version (e.g. '23.11.4-1.2ubuntu5'), which is what
+    actually converges a mixed fleet; it must exist in every node's sources."""
     slurm_conf = _resolve_slurmctld_host(slurm_conf)
     gres_task = ''
     if gres_conf:
@@ -192,6 +199,50 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name):
         content: |
 {_yaml_block(gres_conf, 10)}
 '''
+    # Optional clean slate: purge the installed Slurm/munge and every scrap of
+    # their config and state before installing again. Used to escape a fleet
+    # that drifted onto different versions, or a half-configured install.
+    purge_tasks = '' if not reinstall else '''
+    - name: Stop Slurm and munge before the clean reinstall
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop: [slurmd, slurmctld, munge]
+      failed_when: false
+
+    - name: Purge the installed Slurm and munge packages
+      ansible.builtin.apt:
+        name:
+          - slurm-wlm
+          - slurm-wlm-basic-plugins
+          - slurm-client
+          - slurmd
+          - slurmctld
+          - munge
+        state: absent
+        purge: true
+        autoremove: true
+
+    - name: Remove leftover Slurm and munge config and state
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/slurm
+        - /etc/slurm-llnl
+        - /etc/munge
+        - /var/spool/slurmctld
+        - /var/spool/slurmd
+        - /var/log/slurm
+        - /etc/systemd/system/slurmd.service.d/10-ccp-nodename.conf
+'''
+    # An exact version pin is what actually converges a drifted fleet — but the
+    # pinned version has to exist in every node's apt sources.
+    pkg = 'slurm-wlm' if not version else f'slurm-wlm={version}'
+    pin_opts = '' if not version else '        allow_downgrade: true\n'
+    install_name = ('Install munge and slurm-wlm' if not version
+                    else f'Install munge and slurm-wlm pinned to {version}')
+
     return f'''---
 - name: Deploy Slurm (CCP built-in, Ubuntu/Debian slurm-wlm)
   hosts: all
@@ -199,13 +250,13 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name):
   gather_facts: true          # ansible_hostname feeds SlurmctldHost below
   vars:
     slurm_controller: {controller_name}
-  tasks:
-    - name: Install munge and slurm-wlm
+  tasks:{purge_tasks}
+    - name: {install_name}
       ansible.builtin.apt:
-        name: [munge, slurm-wlm]
+        name: [munge, {pkg}]
         state: present
         update_cache: true
-
+{pin_opts}
     # A slurmd cannot talk to a slurmctld more than ~2 releases apart, and
     # `apt install slurm-wlm` installs whatever each Ubuntu release pins — so a
     # mixed-release fleet yields nodes that never register, with no obvious
@@ -224,9 +275,14 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name):
         success_msg: "every node runs {{{{ slurm_ver.stdout | trim }}}}"
         fail_msg: |
           Slurm versions differ across this cluster, so the nodes will never
-          register with the controller. Install the same Slurm version
-          everywhere (in practice: the same Ubuntu release on every node, or
-          pin the package), then deploy again.
+          register with the controller. Options, best first:
+            1. Reinstall the nodes to one Ubuntu release (this is a PXE
+               provisioning platform — that is the durable fix), then Deploy.
+            2. Deploy with "Pin version" set to a version present in every
+               node's apt sources, plus "Clean reinstall" to replace what is
+               installed now.
+          Distro packages cannot converge on their own: each Ubuntu release
+          ships its own Slurm, so nodes on different releases always differ.
           {{{{ ansible_play_hosts | zip(ansible_play_hosts
               | map('extract', hostvars, ['slurm_ver', 'stdout'])
               | map('trim')) | list }}}}

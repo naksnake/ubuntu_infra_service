@@ -44,6 +44,10 @@
     <button class="btn btn-sm btn-ok" onclick="slurmDeploy({{ c.id }},'{{ c.name }}')"
       {{ 'disabled' if not c.slurm_conf }}
       title="Install munge + slurm-wlm, distribute the munge key, push the generated configs and start services (built-in playbook, Ubuntu/Debian)">Deploy</button>
+    <label class="inlinechk" title="Purge the installed Slurm/munge packages, config and state on every node before installing again — use this to escape a fleet stuck on mismatched versions">
+      <input type="checkbox" id="reinst-{{ c.id }}"> clean reinstall</label>
+    <input id="ver-{{ c.id }}" class="verpin" placeholder="pin version (optional)"
+      title="Exact apt version to install on every node, e.g. 23.11.4-1.2ubuntu5 — it must exist in every node's apt sources">
     <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'validate')"
       title="sinfo + srun across every node on the controller">Validate</button>
     <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'benchmark')"
@@ -131,10 +135,19 @@ async function slurmGenerate(cid){
   }catch(e){toast(e.message,true);}
 }
 async function slurmDeploy(cid,name){
-  if(!confirm('Deploy Slurm to all managed members of '+name+'? This installs '+
-    'munge + slurm-wlm and (re)starts slurmctld/slurmd.'))return;
+  const reinstall=document.getElementById('reinst-'+cid)?.checked||false;
+  const version=(document.getElementById('ver-'+cid)?.value||'').trim();
+  let msg='Deploy Slurm to all managed members of '+name+'? This installs '+
+    'munge + slurm-wlm and (re)starts slurmctld/slurmd.';
+  if(reinstall)msg='CLEAN REINSTALL on all managed members of '+name+
+    ':\n\nthe installed Slurm/munge packages, their config and their state '+
+    '(/etc/slurm, /etc/munge, spool and log dirs) are PURGED, then '+
+    (version?'version '+version:'slurm-wlm')+' is installed and configured '+
+    'from scratch.\n\nQueued jobs and accounting state are lost. Continue?';
+  else if(version)msg+='\n\nPinning to version '+version+'.';
+  if(!confirm(msg))return;
   try{
-    const d=await api('POST','/api/clusters/'+cid+'/slurm/deploy');
+    const d=await api('POST','/api/clusters/'+cid+'/slurm/deploy',{reinstall,version});
     toast('Deployment started (job '+d.job_id+')');
     location.href='/jobs/'+d.job_id;
   }catch(e){toast(e.message,true);}

@@ -147,6 +147,44 @@ check('slurmd start does a daemon-reload so the drop-in is read',
 import yaml as _yaml
 _docs = list(_yaml.safe_load_all(pb))
 check('deploy playbook is valid YAML', _docs and isinstance(_docs[0], list), type(_docs[0]))
+check('plain deploy does not purge anything',
+      'Purge the installed Slurm' not in pb and 'state: absent' not in pb)
+
+print('== clean reinstall + version pin ==')
+pb_re = slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu',
+                              reinstall=True, version='23.11.4-1.2ubuntu5')
+tasks_re = _yaml.safe_load(pb_re)[0]['tasks']
+names_re = [t['name'] for t in tasks_re]
+check('reinstall playbook is valid YAML', isinstance(tasks_re, list))
+check('services stopped before the purge',
+      names_re.index('Stop Slurm and munge before the clean reinstall')
+      < names_re.index('Purge the installed Slurm and munge packages'))
+purge = tasks_re[names_re.index('Purge the installed Slurm and munge packages')]
+check('purge removes packages with purge+autoremove',
+      purge['ansible.builtin.apt']['state'] == 'absent'
+      and purge['ansible.builtin.apt']['purge'] is True
+      and purge['ansible.builtin.apt']['autoremove'] is True, purge)
+leftovers = tasks_re[names_re.index('Remove leftover Slurm and munge config and state')]
+paths = leftovers['loop']
+for p in ('/etc/slurm', '/etc/munge', '/var/spool/slurmctld', '/var/spool/slurmd'):
+    check(f'purge clears {p}', p in paths, paths)
+check('purge clears the CCP NodeName drop-in too',
+      any('10-ccp-nodename.conf' in p for p in paths), paths)
+inst_i = next(i for i, n in enumerate(names_re) if n.startswith('Install munge'))
+inst = tasks_re[inst_i]['ansible.builtin.apt']
+check('install is pinned to the requested version',
+      'slurm-wlm=23.11.4-1.2ubuntu5' in inst['name'], inst)
+check('pinned install allows a downgrade',
+      inst.get('allow_downgrade') is True, inst)
+check('purge happens before the install', inst_i > names_re.index(
+      'Remove leftover Slurm and munge config and state'))
+gate_i = next((i for i, n in enumerate(names_re)
+               if n.startswith('Fail fast when Slurm versions differ')), -1)
+check('version gate still runs after a pinned install',
+      gate_i > inst_i, (gate_i, inst_i))
+check('gate message points at reinstall/pin and the PXE fix',
+      'Pin version' in pb_re and 'Clean reinstall' in pb_re
+      and 'one Ubuntu release' in pb_re)
 cleanup = slurm.cleanup_playbook()
 check('cleanup stops services and removes configs',
       'slurmd' in cleanup and '/etc/slurm/slurm.conf' in cleanup)
