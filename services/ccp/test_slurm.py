@@ -180,11 +180,75 @@ check('purge happens before the install', inst_i > names_re.index(
       'Remove leftover Slurm and munge config and state'))
 gate_i = next((i for i, n in enumerate(names_re)
                if n.startswith('Fail fast when Slurm versions differ')), -1)
-check('version gate still runs after a pinned install',
-      gate_i > inst_i, (gate_i, inst_i))
+# the gate must run BEFORE the install/purge (see the ordering block below);
+# convergence is then confirmed again afterwards
+check('version gate runs before the install, never after',
+      -1 < gate_i < inst_i, (gate_i, inst_i))
+check('a post-install confirmation re-checks convergence',
+      'Confirm every node ended up on the same Slurm version' in names_re
+      and names_re.index('Confirm every node ended up on the same Slurm version') > inst_i)
 check('gate message points at reinstall/pin and the PXE fix',
       'Pin version' in pb_re and 'Clean reinstall' in pb_re
       and 'same Ubuntu release' in pb_re)
+
+print('== nothing destructive may run before every gate has passed ==')
+# Gating after the purge once left nodes with slurm-wlm installed, slurmd
+# enabled and /etc/slurm deleted → slurmd went configless and looped on
+# "resolve_ctls_from_dns_srv: Unknown host" forever.
+def _first(names, prefix):
+    return next((i for i, n in enumerate(names) if n.startswith(prefix)), -1)
+
+DESTRUCTIVE = ('Stop Slurm and munge before the clean reinstall',
+               'Purge the installed Slurm and munge packages',
+               'Remove leftover Slurm and munge config and state',
+               'Install munge and slurm-wlm')
+for label, kw in (('plain', {}), ('reinstall', {'reinstall': True}),
+                  ('pinned', {'version': '23.11.4-1'}),
+                  ('reinstall+pin', {'reinstall': True, 'version': '23.11.4-1'})):
+    names = [t['name'] for t in
+             _yaml.safe_load(slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu', **kw))[0]['tasks']]
+    gates = [i for i, n in enumerate(names)
+             if n.startswith('Fail fast when Slurm versions differ')
+             or n.startswith('Fail when the pinned version')]
+    firsts = [_first(names, d) for d in DESTRUCTIVE]
+    firsts = [i for i in firsts if i > -1]
+    check(f'{label}: every gate precedes every destructive task',
+          gates and firsts and max(gates) < min(firsts), (gates, firsts, names))
+    hold = _first(names, 'Hold Slurm daemons down')
+    write = _first(names, 'Write slurm.conf')
+    inst = _first(names, 'Install munge and slurm-wlm')
+    check(f'{label}: daemons held down between install and config',
+          inst < hold < write, (inst, hold, write))
+    check(f'{label}: slurmd only started after slurm.conf exists',
+          write < _first(names, 'Start slurmd on every node'))
+
+print('== version probing must not fail on a node without slurm installed ==')
+names_t = _yaml.safe_load(slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu'))[0]['tasks']
+probe = next(t for t in names_t if t['name'] == 'Record the installed Slurm version')
+check('installed-version probe tolerates a fresh node',
+      probe.get('failed_when') is False, probe)
+
+print('== pinned deploy checks the pin is installable everywhere ==')
+pb_pin = slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu', version='23.11.4-1')
+tp = _yaml.safe_load(pb_pin)[0]['tasks']
+np_ = [t['name'] for t in tp]
+check('pin-availability gate present', 'Fail when the pinned version cannot be '
+      'installed everywhere' in np_, np_)
+check('pin gate names the offending nodes and the common versions',
+      'is not in the apt sources of' in pb_pin and 'available on EVERY node' in pb_pin)
+check('the differ-gate is skipped when a pin will converge the fleet',
+      any(t.get('when') is False for t in tp
+          if t['name'].startswith('Fail fast when Slurm versions differ')), tp)
+
+print('== cleanup is a real recovery path ==')
+cl = slurm.cleanup_playbook()
+check('cleanup disables the daemons (stops configless slurmd looping)',
+      'enabled: false' in cl and 'slurmd' in cl)
+check('cleanup removes the CCP NodeName drop-in',
+      '10-ccp-nodename.conf' in cl)
+check('cleanup removes the CCP /etc/hosts block',
+      'CCP CLUSTER HOSTS' in cl and 'state: absent' in cl)
+check('cleanup playbook is valid YAML', isinstance(_yaml.safe_load(cl), list))
 
 print('== the gate tells the operator which version to pin ==')
 avail_i = next((i for i, n in enumerate(names_re)

@@ -83,7 +83,8 @@ check('unknown stage → 400', r.status_code == 400)
 r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'validate'})
 check('validate before deploy → 400', r.status_code == 400, r.get_json())
 r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'cleanup'})
-check('cleanup before deploy → 400', r.status_code == 400)
+check('cleanup is always allowed — it is the recovery path for a node left '
+      'with slurmd enabled but no config', r.status_code == 202, r.get_json())
 
 print('== discover fans out hwscans and advances ==')
 r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'discover'})

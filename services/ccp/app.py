@@ -845,9 +845,10 @@ def api_slurm_action(cluster_id):
         return jsonify({'job_id': job_id}), 202
 
     if stage == 'cleanup':
-        if c['slurm_state'] == 'INIT':
-            return jsonify({'error': 'nothing to clean up — the cluster was '
-                            'never deployed'}), 400
+        # Always allowed: a deploy that failed part-way can leave slurmd
+        # enabled with no config (which loops on configless DNS SRV lookups),
+        # and that can happen while the cluster still reads INIT. Cleanup is
+        # the recovery path, so never refuse it.
         job_id = executor.start_job(
             'slurm_deploy', c['name'],
             {'node_ids': ids, 'playbook': slurm.cleanup_playbook(),

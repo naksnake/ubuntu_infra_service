@@ -243,6 +243,41 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
     install_name = ('Install munge and slurm-wlm' if not version
                     else f'Install munge and slurm-wlm pinned to {version}')
 
+    # Without a pin, `apt install slurm-wlm` leaves an already-installed node
+    # exactly as it was — so mismatched versions can only be rejected, not
+    # fixed. With a pin, the install converges them, so that gate is skipped
+    # and replaced by a check that the pin is actually installable everywhere.
+    gate_when = 'false' if version else 'true'
+    pin_gate = '' if not version else f'''
+    - name: Start the pin-availability check
+      run_once: true
+      ansible.builtin.set_fact:
+        slurm_pin_missing: []
+
+    - name: Collect nodes whose apt sources lack the pinned version
+      run_once: true
+      ansible.builtin.set_fact:
+        slurm_pin_missing: "{{{{ slurm_pin_missing + [item] }}}}"
+      loop: "{{{{ ansible_play_hosts }}}}"
+      when: >-
+        '{version}' not in (hostvars[item]['slurm_avail']['stdout_lines']
+                            | default([]))
+
+    - name: Fail when the pinned version cannot be installed everywhere
+      run_once: true
+      ansible.builtin.assert:
+        that:
+          - slurm_pin_missing | length == 0
+        success_msg: "{version} is installable on every node"
+        fail_msg: |
+          Pinned version {version} is not in the apt sources of:
+          {{% for h in slurm_pin_missing %}}  {{{{ h }}}} — offers: {{{{ hostvars[h]['slurm_avail']['stdout_lines'] | default([]) | join(', ') | default('(none)', true) }}}}
+          {{% endfor %}}
+          Versions available on EVERY node:
+            {{{{ slurm_common | default([]) | reverse | list | join('  ') | default('(none — the nodes are on different Ubuntu releases)', true) }}}}
+          Nothing was changed on any node.
+'''
+
     return f'''---
 - name: Deploy Slurm (CCP built-in, Ubuntu/Debian slurm-wlm)
   hosts: all
@@ -250,21 +285,22 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
   gather_facts: true          # ansible_hostname feeds SlurmctldHost below
   vars:
     slurm_controller: {controller_name}
-  tasks:{purge_tasks}
-    - name: {install_name}
+  tasks:
+    # ── read-only preflight ───────────────────────────────────────────────
+    # Everything that can reject this deploy runs BEFORE anything is changed.
+    # Gating after a purge once left nodes with slurm-wlm installed, slurmd
+    # enabled and /etc/slurm deleted — slurmd then falls back to configless
+    # mode and loops on "resolve_ctls_from_dns_srv: Unknown host" forever.
+    - name: Refresh the apt cache
       ansible.builtin.apt:
-        name: [munge, {pkg}]
-        state: present
         update_cache: true
-{pin_opts}
-    # A slurmd cannot talk to a slurmctld more than ~2 releases apart, and
-    # `apt install slurm-wlm` installs whatever each Ubuntu release pins — so a
-    # mixed-release fleet yields nodes that never register, with no obvious
-    # cause. Fail the deploy here with the actual versions instead.
+      changed_when: false
+
     - name: Record the installed Slurm version
       ansible.builtin.command: slurmd -V
       register: slurm_ver
       changed_when: false
+      failed_when: false          # not installed yet is a valid starting point
 
     # Which versions each node could install. Without this the operator has to
     # guess what to type into "Pin version" — and a pin that is missing on one
@@ -294,8 +330,10 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
                         | default([])) }}}}"
       loop: "{{{{ ansible_play_hosts[1:] }}}}"
 
+{pin_gate}
     - name: Fail fast when Slurm versions differ across the cluster
       run_once: true
+      when: {gate_when}
       ansible.builtin.assert:
         that:
           - ansible_play_hosts | map('extract', hostvars, ['slurm_ver', 'stdout'])
@@ -323,6 +361,42 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
           then Deploy. Alternatively serve one common Slurm build from your own
           apt repo / .deb on every node.
           {{% endif %}}
+
+    # ── from here on the node is modified ─────────────────────────────────
+{purge_tasks}
+    - name: {install_name}
+      ansible.builtin.apt:
+        name: [munge, {pkg}]
+        state: present
+{pin_opts}
+    # The package enables (and on a real host starts) slurmd immediately. Hold
+    # both daemons down until their config exists, so slurmd can never run
+    # configless and spam DNS SRV lookups; they are enabled again at the end.
+    - name: Hold Slurm daemons down until the config is in place
+      ansible.builtin.systemd:
+        name: "{{{{ item }}}}"
+        state: stopped
+      loop: [slurmd, slurmctld]
+      failed_when: false
+
+    - name: Re-read the Slurm version after installing
+      ansible.builtin.command: slurmd -V
+      register: slurm_ver_after
+      changed_when: false
+
+    - name: Confirm every node ended up on the same Slurm version
+      run_once: true
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts | map('extract', hostvars, ['slurm_ver_after', 'stdout'])
+            | map('trim') | unique | list | length == 1
+        success_msg: "every node runs {{{{ slurm_ver_after.stdout | trim }}}}"
+        fail_msg: |
+          The nodes still run different Slurm versions after installing:
+          {{% for h in ansible_play_hosts %}}  {{{{ h }}}}: {{{{ hostvars[h]['slurm_ver_after']['stdout'] | trim }}}}
+          {{% endfor %}}
+          Nothing further was configured, and the daemons are left stopped
+          rather than half-configured.
 
     - name: Generate the munge key on the controller
       ansible.builtin.command:
@@ -440,8 +514,13 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
 
 
 def cleanup_playbook():
-    """Teardown: stop and disable services, remove the configs. Packages are
-    left installed (safe to re-deploy; removal is an operator decision)."""
+    """Teardown / recovery: stop and DISABLE the daemons, then remove
+    everything CCP put on the node. Packages are left installed (safe to
+    re-deploy; removing them is an operator decision).
+
+    This is also the way out of a node whose slurmd is enabled but has no
+    config: without slurm.conf, slurmd falls back to configless mode and loops
+    on "resolve_ctls_from_dns_srv: Unknown host" — disabling it stops that."""
     return '''---
 - name: Slurm cleanup (CCP built-in)
   hosts: all
@@ -459,5 +538,20 @@ def cleanup_playbook():
       ansible.builtin.file:
         path: "{{ item }}"
         state: absent
-      loop: [/etc/slurm/slurm.conf, /etc/slurm/gres.conf]
+      loop:
+        - /etc/slurm/slurm.conf
+        - /etc/slurm/gres.conf
+        - /etc/systemd/system/slurmd.service.d/10-ccp-nodename.conf
+
+    - name: Remove the CCP-managed cluster peer entries from /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        marker: "# {mark} CCP CLUSTER HOSTS"
+        state: absent
+      failed_when: false
+
+    - name: Reload systemd after removing the drop-in
+      ansible.builtin.systemd:
+        daemon_reload: true
+      failed_when: false
 '''
