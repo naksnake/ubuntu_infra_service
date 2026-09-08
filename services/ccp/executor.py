@@ -374,10 +374,17 @@ def _run_onboard(job_id, spec, secret, log):
 # ── hostname management ──────────────────────────────────────────────────────
 
 def _hostname_script(new_name):
-    """Remote script: set the hostname via hostnamectl (fallback to
-    /etc/hostname + hostname) and keep /etc/hosts consistent, using sudo -n
-    when the SSH user is not root. new_name is validated by the API and
-    quoted here."""
+    """Remote script: set the hostname and prove it took effect.
+
+    hostnamectl is tried first but is NOT trusted — systemd refuses names it
+    considers invalid (an underscore, for one), hostnamed may be unavailable,
+    and a static-only change can leave the running name untouched. So on any
+    hostnamectl failure we fall back to /etc/hostname + sethostname(2), keep
+    /etc/hosts consistent, stop cloud-init from reverting the name on the next
+    boot, and finally re-read the live hostname and exit non-zero unless it
+    equals what was asked for. The caller only updates the inventory when this
+    script proves the change — CCP's name must never disagree with the box, or
+    Slurm's identity checks break."""
     q = shlex.quote(new_name)
     return f'''
 new={q}
@@ -386,11 +393,14 @@ if [ "$(id -u)" != 0 ]; then
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SUDO="sudo -n";
   else echo "CCP_ERR: not root and passwordless sudo unavailable"; exit 40; fi
 else SUDO=""; fi
+set_ok=0
 if command -v hostnamectl >/dev/null 2>&1; then
-  $SUDO hostnamectl set-hostname "$new" || exit 41
-else
+  if $SUDO hostnamectl set-hostname "$new" 2>&1; then set_ok=1
+  else echo "CCP_NOTE: hostnamectl refused the name — falling back to /etc/hostname"; fi
+fi
+if [ "$set_ok" != 1 ]; then
   printf '%s\\n' "$new" | $SUDO tee /etc/hostname >/dev/null || exit 41
-  $SUDO hostname "$new" || exit 41
+  $SUDO hostname "$new" 2>&1 || exit 41
 fi
 esc=$(printf '%s' "$old" | sed 's/[].[^$*\\/]/\\\\&/g')
 if [ -n "$old" ] && grep -qw "$old" /etc/hosts 2>/dev/null; then
@@ -398,7 +408,21 @@ if [ -n "$old" ] && grep -qw "$old" /etc/hosts 2>/dev/null; then
 else
   printf '127.0.1.1\\t%s\\n' "$new" | $SUDO tee -a /etc/hosts >/dev/null || exit 42
 fi
-echo "CCP_HOSTNAME_OK $(hostname)"
+# cloud images rewrite the hostname on every boot unless told not to
+if [ -f /etc/cloud/cloud.cfg ]; then
+  if grep -q '^preserve_hostname:' /etc/cloud/cloud.cfg 2>/dev/null; then
+    $SUDO sed -i 's/^preserve_hostname:.*/preserve_hostname: true/' /etc/cloud/cloud.cfg
+  else
+    printf 'preserve_hostname: true\\n' | $SUDO tee -a /etc/cloud/cloud.cfg >/dev/null
+  fi
+fi
+actual="$(hostname)"
+echo "CCP_HOSTNAME_ACTUAL $actual"
+if [ "$actual" != "$new" ]; then
+  echo "CCP_ERR: hostname is still '$actual' after the change"
+  exit 43
+fi
+echo "CCP_HOSTNAME_OK $actual"
 '''
 
 
@@ -420,12 +444,28 @@ def _run_hostname(job_id, spec, log):
     rc, out = _key_ssh(node['address'], node['ssh_user'], node['ssh_port'],
                        _hostname_script(new_name))
     log.write(out + '\n')
-    if rc != 0 or 'CCP_HOSTNAME_OK' not in out:
+
+    # What the box reports it is actually called now — the only thing we trust.
+    actual = ''
+    for line in out.splitlines():
+        if line.startswith('CCP_HOSTNAME_ACTUAL '):
+            actual = line.split(' ', 1)[1].strip()
+
+    if rc != 0 or f'CCP_HOSTNAME_OK {new_name}' not in out or actual != new_name:
         hints = {40: 'the SSH user needs root or passwordless sudo',
                  41: 'setting the hostname failed',
-                 42: 'updating /etc/hosts failed'}
+                 42: 'updating /etc/hosts failed',
+                 43: f'the node still reports {actual or "its old name"}'}
         log.write(f'[ccp] hostname change failed (exit {rc})'
                   f'{": " + hints[rc] if rc in hints else ""}\n')
+        if '_' in new_name:
+            log.write('[ccp] note: systemd rejects underscores in hostnames on '
+                      'many releases — try the hyphen form '
+                      f'({new_name.replace("_", "-")}), which CCP parses into '
+                      'the same rack/sled/role topology\n')
+        log.write(f'[ccp] inventory left unchanged: {node["name"]} — CCP never '
+                  'records a name the node does not actually have (Slurm '
+                  'identity checks depend on the two matching)\n')
         return 1
     db.execute('UPDATE nodes SET name=? WHERE id=?', (new_name, node['id']))
     t = topology.apply(node['id'], new_name)
@@ -445,6 +485,7 @@ def _run_hostname(job_id, spec, log):
 FACT_SCRIPT = r'''
 export LC_ALL=C
 echo CCP_FACTS_BEGIN
+echo "hostname=$(hostname)"
 if [ -r /etc/os-release ]; then . /etc/os-release; echo "os_name=${PRETTY_NAME:-unknown}"; fi
 echo "kernel=$(uname -r 2>/dev/null)"
 echo "arch=$(uname -m 2>/dev/null)"
@@ -525,6 +566,7 @@ def parse_facts(text):
                 if _GPU_PCI_RE.search(p)]
     mem_kb = intval('mem_kb')
     return {
+        'os_hostname': first('hostname'),
         'os_name': first('os_name'), 'kernel': first('kernel'),
         'cpu_model': first('cpu_model'), 'cpu_sockets': intval('cpu_sockets'),
         'cpu_cores': intval('cpu_cores'),
@@ -584,6 +626,16 @@ def _run_hwscan(job_id, spec, log):
         return 1
     facts = parse_facts(out)
     save_hardware(node['id'], facts)
+    # Inventory name vs the box's real hostname. Slurm identity no longer
+    # depends on them matching (slurmd is pinned with -N and SlurmctldHost is
+    # resolved from live facts), but drift means the rack view and NodeNames
+    # describe a name the machine doesn't answer to — say so plainly.
+    real = facts.get('os_hostname') or ''
+    if real and node['conn'] != 'local' and real != node['name']:
+        log.write(f'[ccp] NOTE: inventory calls this node {node["name"]} but the '
+                  f'machine reports its hostname as {real}. Use Rename on the '
+                  'Nodes page to make them agree (a failed earlier rename is '
+                  'the usual cause).\n')
     log.write(f'[ccp] saved: {facts["cpu_cores"] or "?"} CPUs, '
               f'{facts["mem_mb"] or "?"} MB RAM, {facts["gpu_count"]} GPU(s)'
               f'{" (" + facts["gpu_model"] + ")" if facts["gpu_model"] else ""}, '

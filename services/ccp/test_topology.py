@@ -90,7 +90,8 @@ print('== hostname change job: success refreshes inventory immediately ==')
 captured = {}
 def _rename_ok(a, u, p, cmd):
     captured['cmd'] = cmd
-    return (0, 'CCP_HOSTNAME_OK rack4_sled1_cpu\n')
+    return (0, 'CCP_HOSTNAME_ACTUAL rack4_sled1_cpu\n'
+               'CCP_HOSTNAME_OK rack4_sled1_cpu\n')
 executor._key_ssh = _rename_ok
 r = admin.post(f'/api/nodes/{nid}/hostname', headers=ah,
                json={'hostname': 'rack4_sled1_cpu'})
@@ -102,6 +103,44 @@ check('remote script uses hostnamectl with /etc/hostname fallback',
       'hostnamectl set-hostname' in captured['cmd'] and '/etc/hostname' in captured['cmd']
       and '/etc/hosts' in captured['cmd'], captured['cmd'])
 check('script handles non-root via sudo -n', 'sudo -n' in captured['cmd'])
+check('script re-reads the live hostname and fails if it did not change',
+      'CCP_HOSTNAME_ACTUAL' in captured['cmd'] and 'exit 43' in captured['cmd'],
+      captured['cmd'])
+check('script survives hostnamectl refusing the name (falls back, no abort)',
+      'hostnamectl refused' in captured['cmd'] and 'set_ok' in captured['cmd'])
+check('script stops cloud-init reverting the hostname on reboot',
+      'preserve_hostname: true' in captured['cmd'])
+
+print('== rename that does not take must NOT update the inventory ==')
+# the box accepts the command but keeps its old hostname (systemd refusing an
+# underscore, hostnamed unavailable, cloud-init, static-vs-transient). CCP must
+# never record a name the machine does not answer to — that mismatch is what
+# breaks Slurm's identity checks.
+before = node(nid)['name']
+executor._key_ssh = lambda a, u, p, cmd: (
+    43, 'CCP_HOSTNAME_ACTUAL gpu-node\nCCP_ERR: hostname is still \'gpu-node\' '
+        "after the change\n")
+r = admin.post(f'/api/nodes/{nid}/hostname', headers=ah,
+               json={'hostname': 'rack7_sled7_gpu'})
+jid = r.get_json()['job_id']
+check('silent no-op rename fails the job', db.query(
+    'SELECT status FROM jobs WHERE id=?', (jid,), one=True)['status'] == 'failed')
+check('inventory name NOT updated on a no-op rename',
+      node(nid)['name'] == before, node(nid)['name'])
+log = executor.job_log(jid)
+check('log reports what the node actually reports', 'gpu-node' in log, log)
+check('underscore name gets the hyphen hint',
+      'rack7-sled7-gpu' in log, log)
+check('log states the inventory was left alone',
+      'inventory left unchanged' in log, log)
+
+# a box that reports a DIFFERENT name than requested (not the old one either)
+executor._key_ssh = lambda a, u, p, cmd: (
+    0, 'CCP_HOSTNAME_ACTUAL something-else\nCCP_HOSTNAME_OK something-else\n')
+before = node(nid)['name']
+r = admin.post(f'/api/nodes/{nid}/hostname', headers=ah, json={'hostname': 'rack8-sled1-cpu'})
+check('rename reporting a different name is rejected',
+      node(nid)['name'] == before, node(nid)['name'])
 
 print('== hostname change job: failure leaves inventory untouched ==')
 executor._key_ssh = lambda a, u, p, cmd: (40, 'CCP_ERR: not root and passwordless sudo unavailable\n')
