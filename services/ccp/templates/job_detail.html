@@ -21,6 +21,6 @@ const con=document.getElementById('console'),st=document.getElementById('job-sta
 {% if job.status == 'running' %}
 pollJob({{ job.id }},con,st);
 {% else %}
-api('GET','/api/jobs/{{ job.id }}').then(j=>{con.textContent=j.output||'(no output)';}).catch(e=>con.textContent=e.message);
+api('GET','/api/jobs/{{ job.id }}').then(j=>{renderConsole(con,j.output||'(no output)');}).catch(e=>con.textContent=e.message);
 {% endif %}
 </script>{% endblock %}

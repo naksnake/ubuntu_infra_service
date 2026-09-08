@@ -159,6 +159,7 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name):
 - name: Deploy Slurm (CCP built-in, Ubuntu/Debian slurm-wlm)
   hosts: all
   become: true
+  gather_facts: true          # ansible_hostname feeds SlurmctldHost below
   vars:
     slurm_controller: {controller_name}
   tasks:
@@ -228,6 +229,18 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name):
         state: restarted
         enabled: true
       when: inventory_hostname == slurm_controller
+
+    # The slurm-wlm package enables slurmctld on every node, so non-controller
+    # boxes show a permanently-failed slurmctld ("not a valid controller").
+    # Stop and disable it there so `systemctl status` and logs stay clean and
+    # it never fights slurmd for attention.
+    - name: Disable slurmctld on non-controller nodes
+      ansible.builtin.systemd:
+        name: slurmctld
+        state: stopped
+        enabled: false
+      when: inventory_hostname != slurm_controller
+      failed_when: false
 
     # Pin each slurmd's NodeName explicitly. Without this, slurmd identifies
     # itself by matching the machine's OS hostname against a NodeName line in

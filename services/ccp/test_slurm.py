@@ -103,6 +103,11 @@ check('munge key generated on controller and distributed',
       'mungekey' in pb and 'slurp' in pb and 'b64decode' in pb)
 check('controller-only slurmctld', 'slurmctld' in pb
       and 'inventory_hostname == slurm_controller' in pb)
+check('slurmctld disabled on non-controllers (no failed-everywhere noise)',
+      'Disable slurmctld on non-controller nodes' in pb
+      and 'inventory_hostname != slurm_controller' in pb, pb)
+check('facts gathered for the SlurmctldHost resolution',
+      'gather_facts: true' in pb)
 check('slurmd NodeName pinned via -N (independent of OS hostname)',
       'SLURMD_OPTIONS=-N {{ inventory_hostname }}' in pb
       and 'slurmd.service.d' in pb, pb)

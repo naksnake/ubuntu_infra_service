@@ -139,6 +139,13 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
 .console{background:#0a0d12;border:1px solid var(--line);border-radius:10px;padding:14px;
   font-family:var(--mono);font-size:12.5px;white-space:pre-wrap;word-break:break-word;
   max-height:520px;overflow:auto;color:#d7e0ea;line-height:1.5}
+/* per-node output framing: a '===== node =====' header starts a new block */
+.console .c-host{display:block;margin:10px -14px 4px;padding:4px 14px;font-weight:700;
+  color:#8fb7ff;background:rgba(76,141,255,.12);border-left:3px solid var(--accent)}
+.console .c-host:first-child{margin-top:-4px}
+.console .c-ok{color:#63d67f;font-weight:700}
+.console .c-err{color:#ff9a92;font-weight:700}
+.console .c-info{color:#8b98a9}
 .toast{position:fixed;top:18px;right:18px;background:var(--panel2);border:1px solid var(--line);
   color:var(--ink);padding:11px 16px;border-radius:8px;opacity:0;transform:translateY(-8px);
   transition:.2s;pointer-events:none;z-index:50;max-width:360px}

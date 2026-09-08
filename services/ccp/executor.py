@@ -597,11 +597,15 @@ def _run_hwscan(job_id, spec, log):
 # (kind slurm_deploy) — see slurm.py. Each stage advances clusters.slurm_state
 # via the generic advance_to hook in _run() only on success.
 
-def _slurm_ssh(node, command, log):
+def _slurm_ssh(node, command, log, label=None):
+    """Run one command on a slurm node over key auth, framing its output with
+    a per-host header (same '=====' style as ClusterShell) and an exit footer,
+    so the job log always says which node — and which check — produced each
+    block."""
+    log.write(f'===== {node["name"]} ({node["address"]}) : {label or command} =====\n')
     rc, out = _key_ssh(node['address'], node['ssh_user'], node['ssh_port'], command)
     log.write(out.rstrip() + '\n')
-    if rc != 0:
-        log.write(f'[exit {rc}]\n')
+    log.write(f'[{node["name"]} exit {rc}]\n\n')
     return rc
 
 
@@ -620,65 +624,66 @@ def _run_slurm_action(job_id, spec, log):
         return 2
     n = len(members)
 
+    log.write(f'[ccp] stage {stage} — controller {controller["name"]} '
+              f'({controller["address"]}), {n} member(s)\n\n')
+
     if stage == 'validate':
         worst = 0
-        log.write('== sinfo: partition overview ==\n')
-        worst = max(worst, _slurm_ssh(controller, 'sinfo', log))
-        log.write('\n== sinfo -N -l: node states ==\n')
-        worst = max(worst, _slurm_ssh(controller, 'sinfo -N -l', log))
-        log.write(f'\n== srun across all {n} node(s): every hostname must answer ==\n')
+        worst = max(worst, _slurm_ssh(controller, 'sinfo', log,
+                                      'sinfo — partition overview'))
+        worst = max(worst, _slurm_ssh(controller, 'sinfo -N -l', log,
+                                      'sinfo -N -l — node states'))
         worst = max(worst, _slurm_ssh(
-            controller, f'srun -N {n} --ntasks-per-node=1 -t 2 hostname', log))
-        log.write('\nVALIDATE ' + ('PASSED' if worst == 0 else 'FAILED') + '\n')
+            controller, f'srun -N {n} --ntasks-per-node=1 -t 2 hostname', log,
+            f'srun across all {n} node(s) — every hostname must answer'))
+        log.write('VALIDATE ' + ('PASSED' if worst == 0 else 'FAILED') + '\n')
         return worst
 
     if stage == 'monitor':
         worst = 0
-        for title, cmd in (('cluster/partition state', 'sinfo'),
+        for label, cmd in (('cluster / partition state', 'sinfo'),
                            ('per-node state', 'sinfo -N -l'),
-                           ('queue', 'squeue')):
-            log.write(f'== {title}: {cmd} ==\n')
-            worst = max(worst, _slurm_ssh(controller, cmd, log))
-            log.write('\n')
+                           ('job queue', 'squeue')):
+            worst = max(worst, _slurm_ssh(controller, cmd, log,
+                                          f'{label} — {cmd}'))
         return worst
 
     if stage == 'benchmark':
         worst = 0
-        log.write(f'== scheduler dispatch: timed srun across {n} node(s) ==\n')
         worst = max(worst, _slurm_ssh(
-            controller,
-            f'time -p srun -N {n} --ntasks-per-node=1 -t 5 hostname', log))
+            controller, f'time -p srun -N {n} --ntasks-per-node=1 -t 5 hostname',
+            log, f'scheduler dispatch — timed srun across {n} node(s)'))
 
         others = [m for m in members if m['id'] != controller['id']]
         if others:
-            log.write('\n== node-to-node latency: ping from the controller ==\n')
             for m in others:
-                log.write(f'-- {controller["name"]} → {m["name"]} ({m["address"]}) --\n')
                 worst = max(worst, _slurm_ssh(
-                    controller, f'ping -c 3 -W 2 {m["address"]}', log))
+                    controller, f'ping -c 3 -W 2 {m["address"]}', log,
+                    f'latency {controller["name"]} → {m["name"]} ({m["address"]})'))
         else:
-            log.write('\n[ccp] single-node cluster — node-to-node tests need '
-                      'at least two members\n')
+            log.write('[ccp] single-node cluster — node-to-node tests need '
+                      'at least two members\n\n')
 
         # bandwidth between two real nodes (never loopback): iperf3 server on
         # one member, client on another, orchestrated over the CCP key
         pair = [m for m in members if m['conn'] == 'ssh'][:2]
         if len(pair) == 2:
             srv, cli = pair
-            log.write(f'\n== node-to-node bandwidth: iperf3 {cli["name"]} → '
-                      f'{srv["name"]} ==\n')
+            log.write(f'===== {srv["name"]} ({srv["address"]}) : start iperf3 '
+                      f'server =====\n')
             rc, out = _key_ssh(srv['address'], srv['ssh_user'], srv['ssh_port'],
                                'command -v iperf3 >/dev/null 2>&1 && '
                                '(pkill -x iperf3 2>/dev/null; iperf3 -s -1 -D) && '
                                'echo IPERF_SERVER_READY || echo IPERF_MISSING')
-            log.write(out.rstrip() + '\n')
+            log.write(out.rstrip() + f'\n[{srv["name"]} exit {rc}]\n\n')
             if rc == 0 and 'IPERF_SERVER_READY' in out:
                 worst = max(worst, _slurm_ssh(
-                    cli, f'iperf3 -c {srv["address"]} -t 5 -f m', log))
+                    cli, f'iperf3 -c {srv["address"]} -t 5 -f m', log,
+                    f'bandwidth {cli["name"]} → {srv["name"]} ({srv["address"]})'))
             else:
                 log.write('[ccp] iperf3 not installed on the nodes — bandwidth '
-                          'test skipped (apt install iperf3 to enable)\n')
-        log.write('\nBENCHMARK ' + ('PASSED' if worst == 0 else 'FAILED') + '\n')
+                          'test skipped (apt install iperf3 to enable)\n\n')
+        log.write('BENCHMARK ' + ('PASSED' if worst == 0 else 'FAILED') + '\n')
         return worst
 
     log.write(f'[ccp] unknown slurm stage: {stage}\n')

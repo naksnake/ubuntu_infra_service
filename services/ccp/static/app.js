@@ -48,6 +48,23 @@ function selectedNodePayload(root) {
   return { node_ids: ids, group, cluster_id };
 }
 
+// Render job output with per-node framing so it's obvious which host (and
+// which check) produced each block: '===== name (addr) … =====' headers are
+// highlighted, and exit/pass/fail lines are colored. Falls back to plain text.
+function renderConsole(el, text) {
+  const lines = String(text == null ? '' : text).split('\n');
+  el.innerHTML = lines.map(line => {
+    if (/^=====.*=====\s*$/.test(line)) return '<span class="c-host">' + esc(line) + '</span>';
+    if (/^\[.*\bexit\s+0\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK) PASSED\b/.test(line) || /^MANAGED\b/.test(line))
+      return '<span class="c-ok">' + esc(line) + '</span>';
+    if (/^\[.*\bexit\s+([1-9]\d*)\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK) FAILED\b/.test(line) || /^FAILED[:\s]/.test(line) || /\b(fatal|error):/i.test(line) || /not a valid controller|Unable to (contact|determine)/i.test(line))
+      return '<span class="c-err">' + esc(line) + '</span>';
+    if (/^\[ccp\]/.test(line) || /^\[\d+\/\d+\]/.test(line) || /^\[verify\]/.test(line) || /^\s+(credentials OK|key installed|command execution OK|node renamed)/.test(line))
+      return '<span class="c-info">' + esc(line) + '</span>';
+    return esc(line);
+  }).join('\n');
+}
+
 // Poll a job until it is no longer running, streaming output into `el`.
 function pollJob(jobId, el, statusEl, onDone) {
   let stop = false;
@@ -55,7 +72,7 @@ function pollJob(jobId, el, statusEl, onDone) {
     if (stop) return;
     try {
       const j = await api('GET', '/api/jobs/' + jobId);
-      el.textContent = j.output || '(waiting for output…)';
+      renderConsole(el, j.output || '(waiting for output…)');
       el.scrollTop = el.scrollHeight;
       if (statusEl) {
         statusEl.textContent = j.status + (j.exit_code != null ? ' · exit ' + j.exit_code : '');
