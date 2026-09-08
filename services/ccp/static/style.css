@@ -117,6 +117,11 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
 .slurmbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0;
   padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2)}
 .slurmbar select{width:auto;min-width:160px}
+.lifecycle{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin:10px 0 2px}
+.lifecycle .stage{font-size:10px;font-weight:700;letter-spacing:.05em;color:var(--muted);
+  padding:2px 8px;border:1px solid var(--line);border-radius:999px}
+.lifecycle .stage.cur{color:#8fb7ff;border-color:var(--accent);background:rgba(76,141,255,.12)}
+.stage-sep{color:var(--line);font-size:10px}
 
 /* slurm lifecycle states */
 .sl-init{background:rgba(139,152,169,.15);color:#b6c1cf}

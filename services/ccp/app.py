@@ -752,6 +752,76 @@ def api_slurm_deploy(cluster_id):
     return jsonify({'job_id': job_id}), 202
 
 
+SLURM_DEPLOYED_STATES = ('DEPLOY', 'VALIDATE', 'BENCHMARK', 'REPORT', 'MONITOR')
+
+
+@app.route('/api/clusters/<int:cluster_id>/slurm/action', methods=['POST'])
+@require('operator')
+def api_slurm_action(cluster_id):
+    """Run a lifecycle stage. Stages map to jobs on the existing engine:
+    discover → hardware rescans of every member; validate/benchmark/monitor →
+    real commands on the controller (srun across all nodes, node-to-node ping
+    and iperf3 — never loopback); report → local aggregation; cleanup → the
+    teardown playbook. Success advances clusters.slurm_state."""
+    c, members, err = _slurm_cluster_or_error(cluster_id)
+    if err:
+        return err
+    d = request.get_json(force=True) or {}
+    stage = (d.get('stage') or '').strip().lower()
+    ids = [m['id'] for m in members]
+    who = session['username']
+
+    if stage == 'discover':
+        job_ids = [executor.start_job('hwscan', m['name'], {'node_id': m['id']}, who)
+                   for m in members]
+        db.execute("UPDATE clusters SET slurm_state='DISCOVER' WHERE id=?",
+                   (cluster_id,))
+        log_action('slurm.discover', f'{c["name"]} jobs {job_ids}')
+        return jsonify({'job_ids': job_ids}), 202
+
+    if stage in ('validate', 'benchmark', 'monitor'):
+        if c['slurm_state'] not in SLURM_DEPLOYED_STATES:
+            return jsonify({'error': f'{stage} needs a deployed cluster — run '
+                            'Deploy first'}), 400
+        controller = next((m for m in members
+                           if m['id'] == c['controller_node_id']), None)
+        if not controller:
+            return jsonify({'error': 'the controller is no longer a managed '
+                            'member — regenerate and redeploy'}), 400
+        job_id = executor.start_job(
+            'slurm_action', c['name'],
+            {'stage': stage, 'cluster_id': cluster_id, 'node_ids': ids,
+             'controller_id': controller['id'], 'advance_to': stage.upper()},
+            who)
+        log_action(f'slurm.{stage}', f'{c["name"]} job {job_id}')
+        return jsonify({'job_id': job_id}), 202
+
+    if stage == 'report':
+        job_id = executor.start_job(
+            'slurm_action', c['name'],
+            {'stage': 'report', 'cluster_id': cluster_id, 'node_ids': ids,
+             'advance_to': 'REPORT' if c['slurm_state'] in SLURM_DEPLOYED_STATES
+             else None},
+            who)
+        log_action('slurm.report', f'{c["name"]} job {job_id}')
+        return jsonify({'job_id': job_id}), 202
+
+    if stage == 'cleanup':
+        if c['slurm_state'] == 'INIT':
+            return jsonify({'error': 'nothing to clean up — the cluster was '
+                            'never deployed'}), 400
+        job_id = executor.start_job(
+            'slurm_deploy', c['name'],
+            {'node_ids': ids, 'playbook': slurm.cleanup_playbook(),
+             'extra_vars': '', 'cluster_id': cluster_id, 'advance_to': 'CLEANUP'},
+            who)
+        log_action('slurm.cleanup', f'{c["name"]} job {job_id}')
+        return jsonify({'job_id': job_id}), 202
+
+    return jsonify({'error': 'stage must be one of: discover, validate, '
+                    'benchmark, report, monitor, cleanup'}), 400
+
+
 # ── discovery API ─────────────────────────────────────────────────────────────
 
 @app.route('/api/discovery')

@@ -128,6 +128,8 @@ def _run(job_id, kind, spec):
             rc = _run_hwscan(job_id, spec, log)
         elif kind == 'hostname':
             rc = _run_hostname(job_id, spec, log)
+        elif kind == 'slurm_action':
+            rc = _run_slurm_action(job_id, spec, log)
         else:
             log.write(f'unknown job kind: {kind}\n')
             rc = 2
@@ -586,6 +588,142 @@ def _run_hwscan(job_id, spec, log):
               f'{facts["mem_mb"] or "?"} MB RAM, {facts["gpu_count"]} GPU(s)'
               f'{" (" + facts["gpu_model"] + ")" if facts["gpu_model"] else ""}, '
               f'{facts["os_name"] or "unknown OS"}\n')
+    return 0
+
+
+# ── slurm lifecycle stages ───────────────────────────────────────────────────
+# validate / benchmark / monitor run real commands on the controller over key
+# auth; report aggregates locally. Deployment and cleanup are Ansible jobs
+# (kind slurm_deploy) — see slurm.py. Each stage advances clusters.slurm_state
+# via the generic advance_to hook in _run() only on success.
+
+def _slurm_ssh(node, command, log, timeout=180):
+    rc, out = _key_ssh(node['address'], node['ssh_user'], node['ssh_port'], command)
+    log.write(out.rstrip() + '\n')
+    if rc != 0:
+        log.write(f'[exit {rc}]\n')
+    return rc
+
+
+def _run_slurm_action(job_id, spec, log):
+    stage = spec.get('stage')
+    members = _resolve_nodes(spec.get('node_ids', []), log)
+    if stage == 'report':
+        return _slurm_report(spec, members, log)
+    controller = db.query('SELECT * FROM nodes WHERE id=?',
+                          (spec.get('controller_id'),), one=True)
+    if not controller or not node_eligible(controller):
+        log.write('[ccp] controller node is missing or not managed\n')
+        return 2
+    if not members:
+        log.write('[ccp] no managed members\n')
+        return 2
+    n = len(members)
+
+    if stage == 'validate':
+        worst = 0
+        log.write('== sinfo: partition overview ==\n')
+        worst = max(worst, _slurm_ssh(controller, 'sinfo', log))
+        log.write('\n== sinfo -N -l: node states ==\n')
+        worst = max(worst, _slurm_ssh(controller, 'sinfo -N -l', log))
+        log.write(f'\n== srun across all {n} node(s): every hostname must answer ==\n')
+        worst = max(worst, _slurm_ssh(
+            controller, f'srun -N {n} --ntasks-per-node=1 -t 2 hostname', log))
+        log.write('\nVALIDATE ' + ('PASSED' if worst == 0 else 'FAILED') + '\n')
+        return worst
+
+    if stage == 'monitor':
+        worst = 0
+        for title, cmd in (('cluster/partition state', 'sinfo'),
+                           ('per-node state', 'sinfo -N -l'),
+                           ('queue', 'squeue')):
+            log.write(f'== {title}: {cmd} ==\n')
+            worst = max(worst, _slurm_ssh(controller, cmd, log))
+            log.write('\n')
+        return worst
+
+    if stage == 'benchmark':
+        worst = 0
+        log.write(f'== scheduler dispatch: timed srun across {n} node(s) ==\n')
+        worst = max(worst, _slurm_ssh(
+            controller,
+            f'time -p srun -N {n} --ntasks-per-node=1 -t 5 hostname', log))
+
+        others = [m for m in members if m['id'] != controller['id']]
+        if others:
+            log.write('\n== node-to-node latency: ping from the controller ==\n')
+            for m in others:
+                log.write(f'-- {controller["name"]} → {m["name"]} ({m["address"]}) --\n')
+                worst = max(worst, _slurm_ssh(
+                    controller, f'ping -c 3 -W 2 {m["address"]}', log))
+        else:
+            log.write('\n[ccp] single-node cluster — node-to-node tests need '
+                      'at least two members\n')
+
+        # bandwidth between two real nodes (never loopback): iperf3 server on
+        # one member, client on another, orchestrated over the CCP key
+        pair = [m for m in members if m['conn'] == 'ssh'][:2]
+        if len(pair) == 2:
+            srv, cli = pair
+            log.write(f'\n== node-to-node bandwidth: iperf3 {cli["name"]} → '
+                      f'{srv["name"]} ==\n')
+            rc, out = _key_ssh(srv['address'], srv['ssh_user'], srv['ssh_port'],
+                               'command -v iperf3 >/dev/null 2>&1 && '
+                               '(pkill -x iperf3 2>/dev/null; iperf3 -s -1 -D) && '
+                               'echo IPERF_SERVER_READY || echo IPERF_MISSING')
+            log.write(out.rstrip() + '\n')
+            if rc == 0 and 'IPERF_SERVER_READY' in out:
+                worst = max(worst, _slurm_ssh(
+                    cli, f'iperf3 -c {srv["address"]} -t 5 -f m', log))
+            else:
+                log.write('[ccp] iperf3 not installed on the nodes — bandwidth '
+                          'test skipped (apt install iperf3 to enable)\n')
+        log.write('\nBENCHMARK ' + ('PASSED' if worst == 0 else 'FAILED') + '\n')
+        return worst
+
+    log.write(f'[ccp] unknown slurm stage: {stage}\n')
+    return 2
+
+
+def _slurm_report(spec, members, log):
+    """Aggregate what CCP already knows into a cluster report: membership,
+    hardware totals, stored configs, and the latest lifecycle job outcomes."""
+    cluster = db.query('SELECT * FROM clusters WHERE id=?',
+                       (spec.get('cluster_id'),), one=True)
+    if not cluster:
+        log.write('[ccp] cluster no longer exists\n')
+        return 2
+    log.write(f'===== Cluster report: {cluster["name"]} =====\n')
+    log.write(f'kind={cluster["kind"]} lifecycle={cluster["slurm_state"]}\n\n')
+    total_cpu = total_mem = total_gpu = 0
+    gpu_models = {}
+    log.write('-- members --\n')
+    for m in members:
+        hw = db.query('SELECT * FROM hardware WHERE node_id=?', (m['id'],), one=True)
+        cpu = (hw['cpu_cores'] if hw else 0) or 0
+        mem = (hw['mem_mb'] if hw else 0) or 0
+        gpu = (hw['gpu_count'] if hw else 0) or 0
+        total_cpu += cpu
+        total_mem += mem
+        total_gpu += gpu
+        if gpu and hw['gpu_model']:
+            gpu_models[hw['gpu_model']] = gpu_models.get(hw['gpu_model'], 0) + gpu
+        role = ' [controller]' if m['id'] == cluster['controller_node_id'] else ''
+        log.write(f'{m["name"]}{role}: {m["address"]} — '
+                  f'{cpu or "?"} CPUs, {mem // 1024 if mem else "?"} GB, '
+                  f'{gpu} GPU(s), state {m["state"]}\n')
+    log.write(f'\n-- capacity --\ntotal: {len(members)} nodes, {total_cpu} CPUs, '
+              f'{total_mem // 1024} GB RAM, {total_gpu} GPUs\n')
+    for model, count in gpu_models.items():
+        log.write(f'  {count}× {model}\n')
+    log.write(f'\n-- configuration --\nslurm.conf {"stored" if cluster["slurm_conf"] else "NOT generated"}, '
+              f'gres.conf {"stored" if cluster["gres_conf"] else "empty"}\n')
+    log.write('\n-- recent lifecycle jobs --\n')
+    for j in db.query("SELECT * FROM jobs WHERE kind IN ('slurm_deploy','slurm_action') "
+                      'AND target=? ORDER BY id DESC LIMIT 10', (cluster['name'],)):
+        spec_j = json.loads(j['spec'] or '{}')
+        log.write(f'#{j["id"]} {spec_j.get("stage", j["kind"])}: {j["status"]}'
+                  f' ({time.strftime("%Y-%m-%d %H:%M", time.localtime(j["created_at"]))})\n')
     return 0
 
 

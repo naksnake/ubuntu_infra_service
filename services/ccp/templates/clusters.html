@@ -23,7 +23,13 @@
     <small class="muted">{{ c.managed }}/{{ c.members }} managed</small></h2>
   {% if c.description %}<p class="muted">{{ c.description }}</p>{% endif %}
 
-  {% if c.kind == 'slurm' and role_ok('operator') %}
+  {% if c.kind == 'slurm' %}
+  <div class="lifecycle">
+    {% for st in ('INIT','DISCOVER','DEPLOY','VALIDATE','BENCHMARK','REPORT','MONITOR','CLEANUP') %}
+    <span class="stage {{ 'cur' if c.slurm_state == st }}">{{ st }}</span>{% if not loop.last %}<span class="stage-sep">▸</span>{% endif %}
+    {% endfor %}
+  </div>
+  {% if role_ok('operator') %}
   <div class="slurmbar">
     <label style="margin:0">Controller</label>
     <select id="ctl-{{ c.id }}">
@@ -31,12 +37,25 @@
       <option value="{{ n.id }}" {{ 'selected' if c.controller_node_id == n.id }}>{{ n.name }}</option>
       {% endfor %}
     </select>
+    <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'discover')"
+      title="Rescan hardware on every member">Discover</button>
     <button class="btn btn-sm" onclick="slurmGenerate({{ c.id }})"
       title="Build slurm.conf + gres.conf from discovered hardware and preview them">Generate config</button>
     <button class="btn btn-sm btn-ok" onclick="slurmDeploy({{ c.id }},'{{ c.name }}')"
       {{ 'disabled' if not c.slurm_conf }}
-      title="Install munge + slurm-wlm, distribute the munge key, push the generated configs and start services (built-in playbook, Ubuntu/Debian)">Deploy Slurm</button>
+      title="Install munge + slurm-wlm, distribute the munge key, push the generated configs and start services (built-in playbook, Ubuntu/Debian)">Deploy</button>
+    <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'validate')"
+      title="sinfo + srun across every node on the controller">Validate</button>
+    <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'benchmark')"
+      title="Timed srun dispatch, node-to-node ping, node-to-node iperf3 bandwidth (never loopback)">Benchmark</button>
+    <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'report')"
+      title="Aggregate membership, capacity and lifecycle history into a report">Report</button>
+    <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'monitor')"
+      title="sinfo / squeue snapshot from the controller">Monitor</button>
+    <button class="btn btn-sm btn-danger" onclick="slurmCleanup({{ c.id }},'{{ c.name }}')"
+      title="Stop and disable slurmd/slurmctld and remove the generated configs">Cleanup</button>
   </div>
+  {% endif %}
   {% endif %}
 
   <table>
@@ -119,6 +138,18 @@ async function slurmDeploy(cid,name){
     toast('Deployment started (job '+d.job_id+')');
     location.href='/jobs/'+d.job_id;
   }catch(e){toast(e.message,true);}
+}
+async function slurmAction(cid,stage){
+  try{
+    const d=await api('POST','/api/clusters/'+cid+'/slurm/action',{stage});
+    if(d.job_ids){toast('Hardware rescan queued for '+d.job_ids.length+' node(s)');location.reload();}
+    else{toast(stage+' started (job '+d.job_id+')');location.href='/jobs/'+d.job_id;}
+  }catch(e){toast(e.message,true);}
+}
+async function slurmCleanup(cid,name){
+  if(!confirm('Tear down Slurm on all managed members of '+name+'? Services are '+
+    'stopped and the generated configs removed (packages stay installed).'))return;
+  return slurmAction(cid,'cleanup');
 }
 async function addCluster(){
   const p={name:v('c-name'),kind:v('c-kind'),description:v('c-desc')};
