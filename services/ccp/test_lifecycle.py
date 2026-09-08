@@ -234,5 +234,65 @@ check('M1 columns added in place',
       all(c in cols for c in ('state', 'state_detail', 'mac', 'onboarded_at')))
 conn.close()
 
+
+print('== set the node hostname during onboarding (Slurm needs the match) ==')
+HOSTS = {'192.168.100.60': 'ubuntu'}          # a fresh node with a default name
+def _pw(*a, **kw): return (0, '')
+def _key(addr, u, p, cmd):
+    if 'CCP_HOSTNAME_ACTUAL' in cmd or 'hostnamectl' in cmd:
+        import re as _re
+        m = _re.search(r'\nnew=(\S+)\n', cmd)
+        want = m.group(1).strip("'") if m else ''
+        HOSTS[addr] = want                     # the box accepts it
+        return (0, f'CCP_HOSTNAME_ACTUAL {want}\nCCP_HOSTNAME_OK {want}\n')
+    if 'CCP_OK' in cmd:
+        return (0, f'CCP_OK\n{HOSTS.get(addr, "unknown")}\n')
+    return (0, 'ok\n')
+executor._password_ssh, executor._key_ssh = _pw, _key
+r = admin.post('/api/nodes', headers=ah,
+               json={'address': '192.168.100.60', 'username': 'ubuntu',
+                     'password': 'pw', 'name': 'rack9-sled1-gpu',
+                     'set_hostname': True})
+nid_h = r.get_json()['id']
+n = node(nid_h)
+check('node onboarded managed', n['state'] == 'managed', dict(n))
+check('the box hostname was set to the inventory name',
+      HOSTS['192.168.100.60'] == 'rack9-sled1-gpu', HOSTS)
+check('inventory keeps the requested name', n['name'] == 'rack9-sled1-gpu')
+log = executor.job_log(r.get_json()['job_id'])
+check('log records the hostname being set', 'setting the node hostname' in log, log)
+
+print('== hostname set fails → CCP adopts the real name, never diverges ==')
+HOSTS['192.168.100.61'] = 'gpu-node'
+def _key_refuse(addr, u, p, cmd):
+    if 'CCP_HOSTNAME_ACTUAL' in cmd or 'hostnamectl' in cmd:
+        return (43, f'CCP_HOSTNAME_ACTUAL {HOSTS[addr]}\n'
+                    f"CCP_ERR: hostname is still '{HOSTS[addr]}'\n")
+    if 'CCP_OK' in cmd:
+        return (0, f'CCP_OK\n{HOSTS.get(addr, "unknown")}\n')
+    return (0, 'ok\n')
+executor._key_ssh = _key_refuse
+r = admin.post('/api/nodes', headers=ah,
+               json={'address': '192.168.100.61', 'username': 'ubuntu',
+                     'password': 'pw', 'name': 'rack9_sled2_gpu',
+                     'set_hostname': True})
+n = node(r.get_json()['id'])
+check('node still becomes managed (access works)', n['state'] == 'managed', dict(n))
+check('inventory adopts the machine\'s real hostname instead of diverging',
+      n['name'] == 'gpu-node', n['name'])
+log = executor.job_log(r.get_json()['job_id'])
+check('log explains the failure and the hyphen alternative',
+      'could not set the hostname' in log and 'rack9-sled2-gpu' in log, log)
+
+print('== opting out leaves the hostname alone ==')
+HOSTS['192.168.100.62'] = 'stays-put'
+executor._key_ssh = _key
+r = admin.post('/api/nodes', headers=ah,
+               json={'address': '192.168.100.62', 'username': 'u',
+                     'password': 'pw', 'name': 'rack9-sled3-cpu',
+                     'set_hostname': False})
+check('hostname untouched when the option is off',
+      HOSTS['192.168.100.62'] == 'stays-put', HOSTS)
+
 print(f'\n{ok} passed, {fail} failed')
 sys.exit(1 if fail else 0)

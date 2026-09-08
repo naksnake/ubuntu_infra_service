@@ -88,8 +88,10 @@ function renderConsole(el, text) {
   const hasHosts = lines.some(l => /^=====.*=====\s*$/.test(l));
   if (!hasHosts) { el.innerHTML = _colorLines(lines); return; }
 
+  // ── 1. tokenize the raw stream into discrete host objects ──
   const preamble = [];
-  const groups = [];          // [{name, hosts:[{host,addr,label,body[]}]}]
+  const groups = [];          // [{name, hosts:[…]}]
+  const byName = new Map();   // host name -> host object (for late exit lines)
   let curGroup = null, curHost = null;
 
   const groupFor = name => {
@@ -101,38 +103,59 @@ function renderConsole(el, text) {
   for (const line of lines) {
     const gm = /^##GROUP##\s*(.*)$/.exec(line);
     if (gm) { curGroup = groupFor(gm[1].trim() || 'ungrouped'); curHost = null; continue; }
+
     const hm = /^=====\s*(.*?)\s*=====\s*$/.exec(line);
     if (hm) {
       const meta = _parseHostHeader(hm[1]);
-      curHost = { ...meta, header: hm[1], body: [] };
+      curHost = { ...meta, header: hm[1], logs: [], exit_code: null };
       (curGroup || (curGroup = groupFor('nodes'))).hosts.push(curHost);
+      byName.set(meta.host, curHost);
       continue;
     }
-    if (curHost) curHost.body.push(line);
+
+    // A trailing '[<host> exit N]' / '[<host> timed out …]' belongs to the host
+    // it NAMES, wherever it appears in the stream — never to whichever block
+    // happens to be open (ClusterShell flushes these after all the output).
+    const fm = /^\[(\S+)\s+(?:exit\s+(\d+)|(timed out[^\]]*))\]\s*$/.exec(line);
+    if (fm) {
+      const owner = byName.get(fm[1]);
+      if (owner) {
+        owner.exit_code = fm[2] !== undefined ? parseInt(fm[2], 10) : 124;
+        if (fm[3]) owner.logs.push(line);
+        continue;
+      }
+    }
+    if (curHost) curHost.logs.push(line);
     else preamble.push(line);
   }
 
+  // ── 2. one host object → one independent <details> ──
   let html = preamble.join('\n').trim() ? `<div>${_colorLines(preamble)}</div>` : '';
   for (const g of groups) {
-    const stats = g.hosts.map(h => _statusOf(h.header, h.body.join('\n')));
+    const stats = g.hosts.map(h => h.exit_code === null
+      ? _statusOf(h.header, h.logs.join('\n'))
+      : (h.exit_code === 0 ? (_statusOf(h.header, '') === 'CHANGED' ? 'CHANGED' : 'SUCCESS')
+                           : 'FAILED'));
     const tally = {};
     stats.forEach(s => { tally[s] = (tally[s] || 0) + 1; });
-    const bad = stats.some(s => s !== 'SUCCESS' && s !== 'UNKNOWN');
     const summary = Object.keys(tally).map(k =>
-      `<span class="rstat ${_statCls(k)}" style="margin:0">${tally[k]} ${k}</span>`).join(' · ');
-    html += `<details class="rgroup" ${bad || g.hosts.length === 1 ? 'open' : ''}>` +
-      `<summary>[${esc(g.name)}] <span class="rcount">${g.hosts.length} host` +
-      `${g.hosts.length === 1 ? '' : 's'}</span> ${summary}</summary><div class="rbody">`;
+      `<span class="rstat ${_statCls(k)}">${tally[k]} ${k}</span>`).join(' · ');
+    // static header, not a toggle: it must never wrap/mush the host blocks
+    html += `<div class="rgroup"><div class="rghead">[${esc(g.name)}] ` +
+      `<span class="rcount">${g.hosts.length} host${g.hosts.length === 1 ? '' : 's'}` +
+      `</span> ${summary}</div><div class="rbody">`;
     g.hosts.forEach((h, i) => {
       const st = stats[i];
+      const exitLine = h.exit_code === null ? ''
+        : `\n<span class="${h.exit_code === 0 ? 'c-ok' : 'c-err'}">[${esc(h.host)} exit ${h.exit_code}]</span>`;
       html += `<details class="rhost" ${st !== 'SUCCESS' || g.hosts.length === 1 ? 'open' : ''}>` +
         `<summary>[${esc(g.name)}] 🌐 ${esc(h.host)}` +
         (h.addr ? ` (${esc(h.addr)})` : '') +
         (h.label ? ` <span class="rcount">· ${esc(h.label)}</span>` : '') +
         ` | STATUS: <span class="rstat ${_statCls(st)}">${st}</span></summary>` +
-        `<pre>${_colorLines(h.body)}</pre></details>`;
+        `<pre>${_colorLines(h.logs)}${exitLine}</pre></details>`;
     });
-    html += '</div></details>';
+    html += '</div></div>';
   }
   el.innerHTML = html;
 }

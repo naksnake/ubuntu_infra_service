@@ -163,18 +163,18 @@ def _run_shell(job_id, spec, log):
     remote = [n for n in nodes if n['conn'] != 'local']
 
     for n in local:
-        log.write(f'===== {n["name"]} ({n["address"]}, local) =====\n')
         try:
             p = subprocess.run(['/bin/sh', '-c', command],
                                capture_output=True, text=True, timeout=JOB_TIMEOUT)
-            log.write(p.stdout)
-            if p.stderr:
-                log.write(p.stderr)
-            log.write(f'[exit {p.returncode}]\n\n')
-            worst = max(worst, p.returncode)
+            rc, out = p.returncode, (p.stdout or '') + (p.stderr or '')
         except subprocess.TimeoutExpired:
-            log.write(f'[ccp] command timed out after {JOB_TIMEOUT}s\n[exit 124]\n\n')
-            worst = max(worst, 124)
+            rc = 124
+            out = f'[ccp] command timed out after {JOB_TIMEOUT}s\n'
+        status = 'SUCCESS' if rc == 0 else 'FAILED'
+        log.write(f'===== {n["name"]} ({n["address"]}, local) | '
+                  f'STATUS: {status} =====\n{out.rstrip(chr(10))}\n'
+                  f'[{n["name"]} exit {rc}]\n\n')
+        worst = max(worst, rc)
 
     if remote:
         worst = max(worst, _run_shell_clustershell(remote, command, log))
@@ -207,22 +207,41 @@ def _run_shell_clustershell(remote, command, log):
         task.set_info('ssh_options', ' '.join(shlex.quote(o) for o in ssh_opts))
         task.run(command, nodes=NodeSet.fromlist(addrs), timeout=JOB_TIMEOUT)
 
-        if task.num_timeout():
-            worst = max(worst, 124)
-            for node in task.iter_keys_timeout():
-                log.write(f'[{addr2name.get(str(node), node)} timed out after {JOB_TIMEOUT}s]\n')
+        # ClusterShell hands back all output buffers first and all return codes
+        # afterwards. Collate them per host BEFORE writing anything, so each
+        # host's block owns its own output and its own exit line — emitting as
+        # they arrive leaked every trailing '[host exit N]' into whichever
+        # block happened to be last.
+        collected = {}          # address -> {'out': str, 'rc': int|None}
+
+        def slot(addr):
+            return collected.setdefault(str(addr), {'out': '', 'rc': None})
+
+        for addr in addrs:
+            slot(addr)
         for buf, nodelist in task.iter_buffers():
+            text = (buf.message().decode('utf-8', 'replace')
+                    if hasattr(buf, 'message') else str(buf))
             for node in nodelist:
-                name = addr2name.get(str(node), str(node))
-                log.write(f'===== {name} ({node}, ssh {user}@:{port}) =====\n')
-                log.write(buf.message().decode('utf-8', 'replace')
-                          if hasattr(buf, 'message') else str(buf))
-                log.write('\n')
+                slot(node)['out'] += text
         for rc, nodelist in task.iter_retcodes():
-            worst = max(worst, rc)
             for node in nodelist:
-                log.write(f'[{addr2name.get(str(node), node)} exit {rc}]\n')
-        log.write('\n')
+                slot(node)['rc'] = rc
+        for node in task.iter_keys_timeout():
+            s = slot(node)
+            s['rc'] = 124
+            s['out'] += f'[ccp] timed out after {JOB_TIMEOUT}s\n'
+
+        for addr in addrs:
+            s = collected[str(addr)]
+            rc = 124 if s['rc'] is None and task.num_timeout() else (s['rc'] or 0)
+            name = addr2name.get(str(addr), str(addr))
+            status = 'SUCCESS' if rc == 0 else 'FAILED'
+            log.write(f'===== {name} ({addr}, ssh {user}@:{port}) | '
+                      f'STATUS: {status} =====\n')
+            log.write(s['out'].rstrip('\n') + '\n')
+            log.write(f'[{name} exit {rc}]\n\n')
+            worst = max(worst, rc)
     return worst
 
 
@@ -342,6 +361,43 @@ def _run_onboard(job_id, spec, secret, log):
                         f'{(lines[-1] if lines else "no output")[:200]}')
         remote_name = lines[-1] if lines[-1] != 'CCP_OK' else ''
         log.write(f'      command execution OK (remote hostname: {remote_name or "?"})\n')
+
+        # Apply the operator's chosen hostname to the node itself, so the
+        # machine, the inventory and the Slurm NodeName all agree from the
+        # start. Without this a node keeps a default name like 'ubuntu' and
+        # the Slurm config generated later never matches it.
+        want = db.query('SELECT name FROM nodes WHERE id=?', (node_id,), one=True)['name']
+        if (spec.get('set_hostname') and not spec.get('auto_name')
+                and remote_name and want != remote_name):
+            log.write(f'[ccp] setting the node hostname to {want} '
+                      f'(currently {remote_name}) …\n')
+            hrc, hout = _key_ssh(addr, user, port, _hostname_script(want))
+            log.write(hout.rstrip() + '\n')
+            got = ''
+            for line in hout.splitlines():
+                if line.startswith('CCP_HOSTNAME_ACTUAL '):
+                    got = line.split(' ', 1)[1].strip()
+            if hrc == 0 and got == want:
+                log.write(f'      hostname set to {want}\n')
+                remote_name = want
+            else:
+                # never let CCP hold a name the box does not answer to: adopt
+                # the machine's real hostname instead and say why
+                log.write(f'[ccp] could not set the hostname (node still reports '
+                          f'{got or remote_name}).\n')
+                if '_' in want:
+                    log.write('[ccp] note: systemd rejects underscores in '
+                              f'hostnames on many releases — try '
+                              f'{want.replace("_", "-")}\n')
+                if (_SAFE_NAME.fullmatch(remote_name) and not db.query(
+                        'SELECT 1 FROM nodes WHERE name=? AND id<>?',
+                        (remote_name, node_id), one=True)):
+                    db.execute('UPDATE nodes SET name=? WHERE id=?',
+                               (remote_name, node_id))
+                    topology.apply(node_id, remote_name)
+                    log.write(f'[ccp] inventory now uses the node\'s real name '
+                              f'{remote_name}; rename it from the Nodes page once '
+                              'the hostname can be set\n')
 
         # adopt the node's real hostname when the row was created nameless
         if spec.get('auto_name') and remote_name and _SAFE_NAME.fullmatch(remote_name):

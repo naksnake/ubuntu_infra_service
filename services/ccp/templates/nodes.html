@@ -18,6 +18,8 @@
     <div><label>SSH port</label><input id="n-port" type="number" value="22"></div>
     <div><label>Groups (comma-separated)</label><input id="n-groups" placeholder="gpu,lab"></div>
   </div>
+  <label class="inlinechk" style="margin-top:10px" title="Runs hostnamectl set-hostname on the node so its hostname matches the name above — required for Slurm to identify it later">
+    <input type="checkbox" id="n-sethost" checked> Set this hostname on the node</label>
   <div style="margin-top:14px">
     <button class="btn" onclick="onboardNew()">Validate &amp; onboard</button>
     <button class="btn btn-ghost" onclick="addLocal()" title="Register this host itself (runs via subprocess, no SSH)">Add this host (local)</button>
@@ -90,6 +92,8 @@
   confirm command execution before marking the node managed.</p>
   <label>Username</label><input id="od-user" autocomplete="off">
   <label>Password</label><input id="od-pass" type="password" autocomplete="new-password">
+  <label class="inlinechk" style="margin-top:10px"><input type="checkbox" id="od-sethost" checked>
+    Also set the node's hostname to its inventory name</label>
   <div style="margin-top:14px">
     <button class="btn" onclick="submitOnboard()">Onboard</button>
     <button class="btn btn-ghost" onclick="document.getElementById('onboard-dlg').close()">Cancel</button>
@@ -102,7 +106,8 @@ function v(id){return document.getElementById(id).value;}
 
 async function onboardNew(){
   const p={address:v('n-addr'),username:v('n-user'),password:v('n-pass'),
-    name:v('n-name'),ssh_port:v('n-port'),groups:v('n-groups')};
+    name:v('n-name'),ssh_port:v('n-port'),groups:v('n-groups'),
+    set_hostname:document.getElementById('n-sethost').checked};
   if(!p.address||!p.username||!p.password){toast('Address, username and password are required',true);return;}
   try{await api('POST','/api/nodes',p);toast('Onboarding started — validating credentials…');location.reload();}
   catch(e){toast(e.message,true);}
@@ -126,7 +131,8 @@ function openOnboard(id,name,user){
 async function submitOnboard(){
   const u=v('od-user'),p=v('od-pass');
   if(!u||!p){toast('Username and password are required',true);return;}
-  try{await api('POST','/api/nodes/'+onboardId+'/onboard',{username:u,password:p});
+  try{await api('POST','/api/nodes/'+onboardId+'/onboard',{username:u,password:p,
+      set_hostname:document.getElementById('od-sethost').checked});
     document.getElementById('onboard-dlg').close();
     toast('Onboarding started');location.reload();}
   catch(e){toast(e.message,true);}

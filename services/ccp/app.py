@@ -440,14 +440,15 @@ def _placeholder_name(address):
     return name
 
 
-def _start_onboarding(node, password):
+def _start_onboarding(node, password, set_hostname=True):
     """Queue the onboarding job for an ssh node and mark it in progress."""
     db.execute("UPDATE nodes SET state='onboarding', state_detail='' WHERE id=?",
                (node['id'],))
     return executor.start_job(
         'onboard', node['name'],
         {'node_id': node['id'], 'mode': 'onboard',
-         'auto_name': bool(node.get('auto_name'))},
+         'auto_name': bool(node.get('auto_name')),
+         'set_hostname': bool(set_hostname)},
         session['username'], secret=password)
 
 
@@ -472,6 +473,9 @@ def api_add_node():
         if len(password) > 256:
             return jsonify({'error': 'password too long'}), 400
     auto_name = not fields['name']
+    # default on: the node's own hostname should match its inventory name, or
+    # the Slurm config generated later will not match the machine
+    set_hostname = d.get('set_hostname', True) is not False
     name = fields['name'] or _placeholder_name(fields['address'])
     state = 'managed' if conn == 'local' else 'onboarding'
     try:
@@ -488,7 +492,8 @@ def api_add_node():
         return jsonify({'id': node_id}), 201
     job_id = executor.start_job(
         'onboard', name,
-        {'node_id': node_id, 'mode': 'onboard', 'auto_name': auto_name},
+        {'node_id': node_id, 'mode': 'onboard', 'auto_name': auto_name,
+         'set_hostname': set_hostname},
         session['username'], secret=password)
     log_action('node.onboard', f'{name} job {job_id}')
     return jsonify({'id': node_id, 'job_id': job_id}), 201
@@ -519,7 +524,8 @@ def api_onboard_node(node_id):
     db.execute('UPDATE nodes SET ssh_user=? WHERE id=?', (username, node_id))
     node = dict(node)
     node['auto_name'] = node['name'].startswith('node-')
-    job_id = _start_onboarding(node, password)
+    job_id = _start_onboarding(node, password,
+                               set_hostname=d.get('set_hostname', True) is not False)
     log_action('node.onboard', f'{node["name"]} job {job_id}')
     return jsonify({'job_id': job_id}), 202
 
@@ -874,6 +880,7 @@ def api_discovery_import():
     systems = d.get('systems') or []
     username = (d.get('username') or '').strip()
     password = d.get('password') or ''
+    set_hostname = d.get('set_hostname', True) is not False
     if not isinstance(systems, list) or not systems:
         return jsonify({'error': 'select at least one discovered system'}), 400
     if len(systems) > 500:
@@ -930,7 +937,8 @@ def api_discovery_import():
         if username:
             job_id = executor.start_job(
                 'onboard', name,
-                {'node_id': node_id, 'mode': 'onboard', 'auto_name': auto_name},
+                {'node_id': node_id, 'mode': 'onboard', 'auto_name': auto_name,
+                 'set_hostname': set_hostname},
                 session['username'], secret=password)
             log_action('node.onboard', f'{name} job {job_id}')
         results.append({'ip': ip, 'node_id': node_id, 'job_id': job_id,
