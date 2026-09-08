@@ -120,7 +120,7 @@ def _run(job_id, kind, spec):
     try:
         if kind == 'shell':
             rc = _run_shell(job_id, spec, log)
-        elif kind == 'ansible':
+        elif kind in ('ansible', 'slurm_deploy'):
             rc = _run_ansible(job_id, spec, log)
         elif kind in ('onboard', 'verify'):
             rc = _run_onboard(job_id, spec, secret, log)
@@ -131,6 +131,11 @@ def _run(job_id, kind, spec):
         else:
             log.write(f'unknown job kind: {kind}\n')
             rc = 2
+        # slurm lifecycle jobs advance the cluster's stage on success
+        if rc == 0 and spec.get('advance_to') and spec.get('cluster_id'):
+            db.execute('UPDATE clusters SET slurm_state=? WHERE id=?',
+                       (spec['advance_to'], spec['cluster_id']))
+            log.write(f'\n[ccp] cluster lifecycle → {spec["advance_to"]}\n')
         _finish(job_id, 'success' if rc == 0 else 'failed', rc)
     except Exception as exc:  # never let a job thread die silently
         log.write(f'\n[ccp] job crashed: {exc}\n')

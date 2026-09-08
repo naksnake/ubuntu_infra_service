@@ -33,6 +33,7 @@ import ansible_sources
 import db
 import discovery
 import executor
+import slurm
 import topology
 
 app = Flask(__name__)
@@ -675,6 +676,80 @@ def api_cluster_unassign(cluster_id, node_id):
                    (cluster_id,))
     log_action('cluster.unassign', f'{c["name"]}: node {node_id}')
     return jsonify({'ok': True})
+
+
+# ── slurm API ─────────────────────────────────────────────────────────────────
+
+def _slurm_cluster_or_error(cluster_id):
+    """Common checks for slurm endpoints. Returns (cluster, members, error).
+    members = managed members (local or managed ssh) of the cluster."""
+    c = _get_cluster(cluster_id)
+    if not c:
+        return None, None, (jsonify({'error': 'not found'}), 404)
+    if c['kind'] != 'slurm':
+        return None, None, (jsonify({'error': 'not a Slurm cluster — set kind '
+                                     'to slurm when creating it'}), 400)
+    members = db.query(
+        "SELECT * FROM nodes WHERE cluster_id=? AND (state='managed' OR "
+        "conn='local') ORDER BY name", (cluster_id,))
+    if not members:
+        return None, None, (jsonify({'error': 'the cluster has no managed '
+                                     'members yet'}), 400)
+    return c, members, None
+
+
+@app.route('/api/clusters/<int:cluster_id>/slurm/generate', methods=['POST'])
+@require('operator')
+def api_slurm_generate(cluster_id):
+    """Generate slurm.conf + gres.conf from discovered hardware and store them
+    on the cluster for preview/deploy."""
+    c, members, err = _slurm_cluster_or_error(cluster_id)
+    if err:
+        return err
+    d = request.get_json(force=True) or {}
+    controller_id = d.get('controller_node_id') or c['controller_node_id']
+    controller = next((m for m in members if m['id'] == controller_id), None)
+    if not controller:
+        return jsonify({'error': 'pick a controller that is a managed member '
+                        'of the cluster'}), 400
+    marks = ','.join('?' for _ in members)
+    hw = {r['node_id']: dict(r) for r in db.query(
+        f'SELECT * FROM hardware WHERE node_id IN ({marks})',
+        tuple(m['id'] for m in members))}
+    conf, gres, warnings = slurm.generate(c['name'], members, controller, hw)
+    db.execute('UPDATE clusters SET slurm_conf=?, gres_conf=?, '
+               'controller_node_id=? WHERE id=?',
+               (conf, gres, controller['id'], cluster_id))
+    log_action('slurm.generate', c['name'])
+    return jsonify({'slurm_conf': conf, 'gres_conf': gres, 'warnings': warnings})
+
+
+@app.route('/api/clusters/<int:cluster_id>/slurm/deploy', methods=['POST'])
+@require('operator')
+def api_slurm_deploy(cluster_id):
+    """Deploy Slurm with the built-in playbook (munge key distribution,
+    slurm-wlm install, generated configs, services) through the existing
+    Ansible engine. Advances the lifecycle to DEPLOY on success."""
+    c, members, err = _slurm_cluster_or_error(cluster_id)
+    if err:
+        return err
+    if not c['slurm_conf']:
+        return jsonify({'error': 'generate slurm.conf first (preview it, then '
+                        'deploy)'}), 400
+    controller = next((m for m in members
+                       if m['id'] == c['controller_node_id']), None)
+    if not controller:
+        return jsonify({'error': 'the stored controller is no longer a managed '
+                        'member — regenerate the configuration'}), 400
+    playbook = slurm.deploy_playbook(c['slurm_conf'], c['gres_conf'],
+                                     controller['name'])
+    job_id = executor.start_job(
+        'slurm_deploy', c['name'],
+        {'node_ids': [m['id'] for m in members], 'playbook': playbook,
+         'extra_vars': '', 'cluster_id': cluster_id, 'advance_to': 'DEPLOY'},
+        session['username'])
+    log_action('slurm.deploy', f'{c["name"]} job {job_id}')
+    return jsonify({'job_id': job_id}), 202
 
 
 # ── discovery API ─────────────────────────────────────────────────────────────
