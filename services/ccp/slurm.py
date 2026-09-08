@@ -175,12 +175,13 @@ def _resolve_slurmctld_host(slurm_conf):
 SOURCE_DEFAULT_VERSION = '25.11.8'
 SOURCE_URL_TEMPLATE = 'https://download.schedmd.com/slurm/slurm-{version}.tar.bz2'
 # validated on Ubuntu 24.04: everything ./configure needs for a munge-enabled
-# build with the default plugin set (no slurmdbd/MySQL, no REST daemon)
+# build with the default plugin set (no slurmdbd/MySQL, no REST daemon). Only
+# package names that exist in every supported Ubuntu release belong here — a
+# name missing on one release fails the whole deploy before anything is built.
 SOURCE_BUILD_DEPS = ['munge', 'build-essential', 'pkg-config', 'libmunge-dev',
                      'libpam0g-dev', 'libssl-dev', 'libhwloc-dev', 'libjson-c-dev',
-                     'libyaml-dev', 'libhttp-parser-dev', 'libdbus-1-dev',
-                     'libreadline-dev', 'libncurses-dev', 'libnuma-dev', 'python3',
-                     'bzip2', 'curl']
+                     'libyaml-dev', 'libdbus-1-dev', 'libreadline-dev',
+                     'libncurses-dev', 'libnuma-dev', 'python3', 'bzip2', 'curl']
 
 
 def deploy_playbook(slurm_conf, gres_conf, controller_name,
