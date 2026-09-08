@@ -225,7 +225,10 @@ def dashboard():
 
 @app.route('/nodes')
 def nodes_page():
-    return render_template('nodes.html', nodes=db.query('SELECT * FROM nodes ORDER BY name'))
+    nodes = db.query(
+        'SELECT n.*, h.cpu_cores, h.mem_mb, h.gpu_count, h.gpu_model, h.os_name '
+        'FROM nodes n LEFT JOIN hardware h ON h.node_id = n.id ORDER BY n.name')
+    return render_template('nodes.html', nodes=nodes)
 
 
 @app.route('/discovery')
@@ -471,10 +474,34 @@ def api_verify_node(node_id):
     return jsonify({'job_id': job_id}), 202
 
 
+@app.route('/api/nodes/<int:node_id>/hwscan', methods=['POST'])
+@require('operator')
+def api_hwscan_node(node_id):
+    node = db.query('SELECT * FROM nodes WHERE id=?', (node_id,), one=True)
+    if not node:
+        return jsonify({'error': 'not found'}), 404
+    if not executor.node_eligible(node):
+        return jsonify({'error': 'only managed nodes can be scanned — '
+                        'onboard the node first'}), 400
+    job_id = executor.start_job('hwscan', node['name'], {'node_id': node_id},
+                                session['username'])
+    log_action('node.hwscan', f'{node["name"]} job {job_id}')
+    return jsonify({'job_id': job_id}), 202
+
+
 @app.route('/api/nodes')
 def api_list_nodes():
     rows = db.query('SELECT * FROM nodes ORDER BY name')
     return jsonify({'nodes': [dict(r) for r in rows]})
+
+
+@app.route('/api/nodes/<int:node_id>')
+def api_node_detail(node_id):
+    node = db.query('SELECT * FROM nodes WHERE id=?', (node_id,), one=True)
+    if not node:
+        return jsonify({'error': 'not found'}), 404
+    hw = db.query('SELECT * FROM hardware WHERE node_id=?', (node_id,), one=True)
+    return jsonify({'node': dict(node), 'hardware': dict(hw) if hw else None})
 
 
 @app.route('/api/nodes/<int:node_id>', methods=['DELETE'])

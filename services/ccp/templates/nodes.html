@@ -28,15 +28,19 @@
 <div class="card">
   <h2>Inventory ({{ nodes|length }})</h2>
   <table>
-    <thead><tr><th>State</th><th>Name</th><th>Address</th><th>MAC</th><th>SSH</th><th>Groups</th>{% if role_ok('operator') %}<th></th>{% endif %}</tr></thead>
+    <thead><tr><th>State</th><th>Name</th><th>Address</th><th>Hardware</th><th>SSH</th><th>Groups</th>{% if role_ok('operator') %}<th></th>{% endif %}</tr></thead>
     <tbody id="node-rows">
       {% for n in nodes %}
       <tr data-state="{{ n.state }}">
         <td><span class="badge ns-{{ n.state }}" {% if n.state_detail %}title="{{ n.state_detail }}"{% endif %}>{{ n.state }}</span>
             {% if n.state in ('failed','unverified') and n.state_detail %}<div class="statehint">{{ n.state_detail }}</div>{% endif %}</td>
-        <td><b>{{ n.name }}</b>{% if n.conn=='local' %} <span class="pill">local</span>{% endif %}</td>
+        <td><a href="#" onclick="showDetail({{ n.id }});return false"><b>{{ n.name }}</b></a>
+            {% if n.conn=='local' %} <span class="pill">local</span>{% endif %}
+            {% if n.mac %}<div class="statehint mono">{{ n.mac }}</div>{% endif %}</td>
         <td class="mono">{{ n.address }}</td>
-        <td class="mono">{{ n.mac or '—' }}</td>
+        <td>{% if n.cpu_cores %}<span class="mono">{{ n.cpu_cores }}c · {{ ((n.mem_mb or 0)/1024)|round(0)|int }}G{% if n.gpu_count %} · {{ n.gpu_count }}× GPU{% endif %}</span>
+            {% if n.gpu_model %}<div class="statehint">{{ n.gpu_model }}</div>{% endif %}
+            {% else %}—{% endif %}</td>
         <td class="mono">{% if n.conn=='ssh' %}{{ n.ssh_user }}@:{{ n.ssh_port }}{% else %}—{% endif %}</td>
         <td>{% for g in n.groups.split(',') if g.strip() %}<span class="pill">{{ g.strip() }}</span>{% endfor %}</td>
         {% if role_ok('operator') %}
@@ -50,6 +54,7 @@
             {% elif n.state == 'onboarding' %}
               <span class="muted">working…</span>
             {% elif n.state == 'managed' %}
+              <button class="btn btn-sm btn-ghost" onclick="rescan({{ n.id }},'{{ n.name }}')" title="Refresh hardware facts">Rescan HW</button>
               <button class="btn btn-sm btn-ghost" onclick="openOnboard({{ n.id }},'{{ n.name }}','{{ n.ssh_user }}')" title="Re-run onboarding, e.g. to change the SSH user">Re-onboard</button>
             {% endif %}
           {% endif %}
@@ -63,6 +68,12 @@
     </tbody>
   </table>
 </div>
+
+<dialog id="detail-dlg" class="dlg dlg-wide">
+  <h2 id="dt-name"></h2>
+  <div id="dt-body" class="muted">Loading…</div>
+  <div style="margin-top:14px"><button class="btn btn-ghost" onclick="document.getElementById('detail-dlg').close()">Close</button></div>
+</dialog>
 
 <dialog id="onboard-dlg" class="dlg">
   <h2>Onboard <span id="od-name"></span></h2>
@@ -115,6 +126,37 @@ async function verifyNode(id,name){
   try{await api('POST','/api/nodes/'+id+'/verify');
     toast('Verifying key access for '+name+'…');location.reload();}
   catch(e){toast(e.message,true);}
+}
+async function rescan(id,name){
+  try{const d=await api('POST','/api/nodes/'+id+'/hwscan');
+    toast('Hardware scan started for '+name+' (job '+d.job_id+')');}
+  catch(e){toast(e.message,true);}
+}
+
+async function showDetail(id){
+  const dlg=document.getElementById('detail-dlg'),body=document.getElementById('dt-body');
+  body.textContent='Loading…';dlg.showModal();
+  try{
+    const d=await api('GET','/api/nodes/'+id);
+    document.getElementById('dt-name').textContent=d.node.name;
+    const rows=[['State',d.node.state+(d.node.state_detail?' — '+d.node.state_detail:'')],
+      ['Address',d.node.address],['MAC',d.node.mac||'—'],
+      ['SSH',d.node.conn==='ssh'?d.node.ssh_user+'@:'+d.node.ssh_port:'local'],
+      ['Onboarded',fmtTime(d.node.onboarded_at)]];
+    const h=d.hardware;
+    if(h){rows.push(['OS',h.os_name||'—'],['Kernel',h.kernel||'—'],
+      ['CPU',(h.cpu_model||'—')+(h.cpu_cores?' — '+h.cpu_cores+' CPUs':'')+
+        (h.cpu_sockets?', '+h.cpu_sockets+' socket(s)':'')+
+        (h.threads_per_core?', '+h.threads_per_core+' thread(s)/core':'')],
+      ['Memory',h.mem_mb?Math.round(h.mem_mb/1024)+' GB':'—'],
+      ['Disks',h.disks||'—'],['Network',h.nics||'—'],
+      ['GPU',h.gpu_count?h.gpu_count+'× '+(h.gpu_model||'GPU'):'none detected'],
+      ['InfiniBand',h.infiniband||'—'],
+      ['Facts updated',fmtTime(h.updated_at)]);}
+    else rows.push(['Hardware','not scanned yet']);
+    body.innerHTML='<table>'+rows.map(r=>'<tr><th style="width:130px;text-align:left">'+
+      esc(r[0])+'</th><td>'+esc(r[1])+'</td></tr>').join('')+'</table>';
+  }catch(e){body.textContent=e.message;}
 }
 
 // While any node is onboarding, poll and reload when its state settles.

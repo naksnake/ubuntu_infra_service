@@ -81,6 +81,27 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner_id);
 
+-- One row per node, replaced on rescan. Summary columns feed the inventory,
+-- rack view and the Slurm builder; raw_json keeps the full fact payload so
+-- future features need no schema change.
+CREATE TABLE IF NOT EXISTS hardware (
+    node_id     INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+    cpu_model   TEXT NOT NULL DEFAULT '',
+    cpu_sockets INTEGER,
+    cpu_cores   INTEGER,                     -- total logical CPUs (Slurm CPUs=)
+    threads_per_core INTEGER,
+    mem_mb      INTEGER,
+    disks       TEXT NOT NULL DEFAULT '',    -- e.g. 'nvme0n1 1.9TB, sda 480GB'
+    nics        TEXT NOT NULL DEFAULT '',    -- e.g. 'eno1 192.168.100.21'
+    gpu_count   INTEGER NOT NULL DEFAULT 0,
+    gpu_model   TEXT NOT NULL DEFAULT '',
+    os_name     TEXT NOT NULL DEFAULT '',
+    kernel      TEXT NOT NULL DEFAULT '',
+    infiniband  TEXT NOT NULL DEFAULT '',
+    raw_json    TEXT NOT NULL DEFAULT '{}',
+    updated_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     ts       INTEGER NOT NULL,

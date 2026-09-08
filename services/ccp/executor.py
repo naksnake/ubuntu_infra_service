@@ -123,6 +123,8 @@ def _run(job_id, kind, spec):
             rc = _run_ansible(job_id, spec, log)
         elif kind in ('onboard', 'verify'):
             rc = _run_onboard(job_id, spec, secret, log)
+        elif kind == 'hwscan':
+            rc = _run_hwscan(job_id, spec, log)
         else:
             log.write(f'unknown job kind: {kind}\n')
             rc = 2
@@ -344,10 +346,172 @@ def _run_onboard(job_id, spec, secret, log):
                    'onboarded_at=? WHERE id=?', (int(time.time()), node_id))
         log.write('MANAGED: node passed credential validation, key bootstrap '
                   'and execution check\n')
+
+        # chain hardware discovery so facts are fresh the moment a node lands
+        final_name = db.query('SELECT name FROM nodes WHERE id=?',
+                              (node_id,), one=True)['name']
+        creator = db.query('SELECT created_by FROM jobs WHERE id=?',
+                           (job_id,), one=True)['created_by']
+        hw_job = start_job('hwscan', final_name, {'node_id': node_id}, creator)
+        log.write(f'[ccp] queued hardware discovery (job {hw_job})\n')
         return 0
     except Exception as exc:
         # never leave the row stuck in 'onboarding'
         return fail(f'onboarding crashed: {exc}')
+
+
+# ── hardware discovery ───────────────────────────────────────────────────────
+
+# POSIX sh, no dependencies beyond coreutils/iproute2; every section degrades
+# to nothing rather than failing. Output is key=value lines between markers so
+# parse_facts() never has to guess at free-form text.
+FACT_SCRIPT = r'''
+export LC_ALL=C
+echo CCP_FACTS_BEGIN
+if [ -r /etc/os-release ]; then . /etc/os-release; echo "os_name=${PRETTY_NAME:-unknown}"; fi
+echo "kernel=$(uname -r 2>/dev/null)"
+echo "arch=$(uname -m 2>/dev/null)"
+if command -v lscpu >/dev/null 2>&1; then
+  lscpu 2>/dev/null | sed -n \
+    -e 's/^Model name:[[:space:]]*/cpu_model=/p' \
+    -e 's/^Socket(s):[[:space:]]*/cpu_sockets=/p' \
+    -e 's/^Thread(s) per core:[[:space:]]*/threads_per_core=/p' \
+    -e 's/^CPU(s):[[:space:]]*/cpu_cores=/p'
+else
+  echo "cpu_model=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo 2>/dev/null | head -1)"
+  echo "cpu_cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null)"
+fi
+echo "mem_kb=$(sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\).*/\1/p' /proc/meminfo 2>/dev/null)"
+lsblk -dnb -o NAME,SIZE,TYPE 2>/dev/null | awk '$3=="disk"{print "disk="$1"|"$2}'
+ip -o -4 addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print "nic="$2"|"a[1]}'
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed 's/^/gpu=/'
+else
+  lspci 2>/dev/null | grep -iE 'vga|3d controller|display' | sed 's/^/pci_gpu=/'
+fi
+if command -v ibstat >/dev/null 2>&1; then ibstat -l 2>/dev/null | sed 's/^/ib=/'; fi
+echo CCP_FACTS_END
+'''
+
+_GPU_PCI_RE = re.compile(r'\b(nvidia|amd|ati|instinct|habana|gaudi)\b', re.I)
+
+
+def _fmt_bytes(n):
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB', 'PB'):
+        if n < 1000 or unit == 'PB':
+            return (f'{n:.1f}'.rstrip('0').rstrip('.') if unit != 'B'
+                    else str(int(n))) + unit
+        n /= 1000
+    return str(n)
+
+
+def parse_facts(text):
+    """Parse FACT_SCRIPT output into a hardware-row dict (summary columns +
+    raw dict). Tolerates missing sections and junk around the markers."""
+    lines = []
+    inside = False
+    for line in text.splitlines():
+        line = line.strip()
+        if line == 'CCP_FACTS_BEGIN':
+            inside, lines = True, []
+        elif line == 'CCP_FACTS_END':
+            inside = False
+        elif inside and '=' in line:
+            lines.append(line)
+    raw = {}
+    for line in lines:
+        k, _, v = line.partition('=')
+        raw.setdefault(k, []).append(v.strip())
+
+    def first(key, default=''):
+        return raw.get(key, [default])[0]
+
+    def intval(key):
+        try:
+            return int(first(key))
+        except ValueError:
+            return None
+
+    disks = []
+    for d in raw.get('disk', []):
+        name, _, size = d.partition('|')
+        try:
+            disks.append(f'{name} {_fmt_bytes(int(size))}')
+        except ValueError:
+            disks.append(name)
+    nics = [f'{n.split("|")[0]} {n.split("|")[1]}' if '|' in n else n
+            for n in raw.get('nic', [])]
+
+    gpus = raw.get('gpu', [])
+    if not gpus:   # no nvidia-smi: fall back to GPU-looking PCI devices
+        gpus = [p.split(': ', 1)[-1] for p in raw.get('pci_gpu', [])
+                if _GPU_PCI_RE.search(p)]
+    mem_kb = intval('mem_kb')
+    return {
+        'os_name': first('os_name'), 'kernel': first('kernel'),
+        'cpu_model': first('cpu_model'), 'cpu_sockets': intval('cpu_sockets'),
+        'cpu_cores': intval('cpu_cores'),
+        'threads_per_core': intval('threads_per_core'),
+        'mem_mb': mem_kb // 1024 if mem_kb else None,
+        'disks': ', '.join(disks), 'nics': ', '.join(nics),
+        'gpu_count': len(gpus), 'gpu_model': gpus[0] if gpus else '',
+        'infiniband': ', '.join(raw.get('ib', [])),
+        'raw': raw,
+    }
+
+
+def save_hardware(node_id, facts):
+    db.execute(
+        'INSERT INTO hardware (node_id, cpu_model, cpu_sockets, cpu_cores, '
+        'threads_per_core, mem_mb, disks, nics, gpu_count, gpu_model, os_name, '
+        'kernel, infiniband, raw_json, updated_at) '
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) '
+        'ON CONFLICT(node_id) DO UPDATE SET cpu_model=excluded.cpu_model, '
+        'cpu_sockets=excluded.cpu_sockets, cpu_cores=excluded.cpu_cores, '
+        'threads_per_core=excluded.threads_per_core, mem_mb=excluded.mem_mb, '
+        'disks=excluded.disks, nics=excluded.nics, gpu_count=excluded.gpu_count, '
+        'gpu_model=excluded.gpu_model, os_name=excluded.os_name, '
+        'kernel=excluded.kernel, infiniband=excluded.infiniband, '
+        'raw_json=excluded.raw_json, updated_at=excluded.updated_at',
+        (node_id, facts['cpu_model'], facts['cpu_sockets'], facts['cpu_cores'],
+         facts['threads_per_core'], facts['mem_mb'], facts['disks'],
+         facts['nics'], facts['gpu_count'], facts['gpu_model'],
+         facts['os_name'], facts['kernel'], facts['infiniband'],
+         json.dumps(facts['raw']), int(time.time())))
+
+
+def _run_hwscan(job_id, spec, log):
+    """Collect hardware facts from one node and persist them."""
+    node = db.query('SELECT * FROM nodes WHERE id=?', (spec.get('node_id'),), one=True)
+    if not node:
+        log.write('[ccp] node no longer exists\n')
+        return 2
+    if not node_eligible(node):
+        log.write(f'[ccp] node {node["name"]} is {node["state"]} — '
+                  'only managed nodes can be scanned\n')
+        return 2
+    log.write(f'[ccp] collecting hardware facts from {node["name"]} …\n')
+    if node['conn'] == 'local':
+        try:
+            p = subprocess.run(['/bin/sh', '-c', FACT_SCRIPT], capture_output=True,
+                               text=True, timeout=ONBOARD_STEP_TIMEOUT)
+            rc, out = p.returncode, (p.stdout or '') + (p.stderr or '')
+        except subprocess.TimeoutExpired:
+            rc, out = -1, 'timed out'
+    else:
+        rc, out = _key_ssh(node['address'], node['ssh_user'], node['ssh_port'],
+                           FACT_SCRIPT)
+    log.write(out + '\n')
+    if 'CCP_FACTS_BEGIN' not in out:
+        log.write(f'[ccp] fact collection failed (exit {rc})\n')
+        return 1
+    facts = parse_facts(out)
+    save_hardware(node['id'], facts)
+    log.write(f'[ccp] saved: {facts["cpu_cores"] or "?"} CPUs, '
+              f'{facts["mem_mb"] or "?"} MB RAM, {facts["gpu_count"]} GPU(s)'
+              f'{" (" + facts["gpu_model"] + ")" if facts["gpu_model"] else ""}, '
+              f'{facts["os_name"] or "unknown OS"}\n')
+    return 0
 
 
 # ── ansible ──────────────────────────────────────────────────────────────────
