@@ -589,17 +589,17 @@ def _run_hwscan(job_id, spec, log):
 def _run_ansible(job_id, spec, log):
     nodes = _resolve_nodes(spec.get('node_ids', []), log)
     playbook = spec.get('playbook', '')
+    playbook_path = spec.get('playbook_path', '')   # absolute; API-validated
     extra_vars = spec.get('extra_vars', '')
     if not nodes:
         log.write('[ccp] no target nodes resolved\n')
         return 2
-    if not playbook.strip():
+    if not playbook_path and not playbook.strip():
         log.write('[ccp] empty playbook\n')
         return 2
 
     with tempfile.TemporaryDirectory() as tmp:
         inv_path = os.path.join(tmp, 'inventory.ini')
-        pb_path = os.path.join(tmp, 'playbook.yml')
         with open(inv_path, 'w') as inv:
             inv.write('[all]\n')
             for n in nodes:
@@ -611,8 +611,16 @@ def _run_ansible(job_id, spec, log):
                     if os.path.exists(SSH_KEY):
                         line += f' ansible_ssh_private_key_file={SSH_KEY}'
                     inv.write(line + '\n')
-        with open(pb_path, 'w') as pb:
-            pb.write(playbook)
+        if playbook_path:
+            # filesystem source: run from the playbook's own directory so
+            # sibling roles/, group_vars/, ansible.cfg resolve naturally
+            pb_path = playbook_path
+            workdir = os.path.dirname(playbook_path)
+        else:
+            pb_path = os.path.join(tmp, 'playbook.yml')
+            workdir = tmp
+            with open(pb_path, 'w') as pb:
+                pb.write(playbook)
 
         cmd = ['ansible-playbook', '-i', inv_path, pb_path]
         if extra_vars.strip():
@@ -623,7 +631,7 @@ def _run_ansible(job_id, spec, log):
                    ANSIBLE_RETRY_FILES_ENABLED='False',
                    ANSIBLE_LOCAL_TEMP='/tmp/.ansible-ccp')
         log.write(f'[ccp] {" ".join(shlex.quote(c) for c in cmd)}\n\n')
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, cwd=workdir,
                                 stderr=subprocess.STDOUT, text=True, env=env)
         # watchdog: streaming line-by-line blocks until EOF, so a hung playbook
         # is killed out-of-band after JOB_TIMEOUT

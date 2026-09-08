@@ -1,24 +1,48 @@
 {% extends "base.html" %}
-{% block heading %}Ansible Playbook{% endblock %}
+{% block heading %}Ansible{% endblock %}
 {% block body %}
 {% if not role_ok('operator') %}<div class="warnbox">You have viewer access — running playbooks requires the operator role.</div>{% endif %}
 <div class="grid cols-2">
   <div class="card">
     <h2>Run a playbook</h2>
     {% include "_nodesel.html" %}
-    <label>Load from script repository</label>
-    <select id="script-pick" onchange="loadScript()">
-      <option value="">— none —</option>
-      {% for s in scripts %}<option value="{{ s.id }}" data-content="{{ s.content }}">{{ s.name }}</option>{% endfor %}
+
+    <label>Playbook from a source directory</label>
+    <select id="pb-path">
+      <option value="">— ad-hoc playbook below —</option>
+      {% for src in sources %}
+      <optgroup label="{{ src.source }}">
+        {% for p in src.playbooks %}
+        <option value="{{ p }}" data-source="{{ src.source }}">{{ p }}</option>
+        {% endfor %}
+      </optgroup>
+      {% endfor %}
     </select>
-    <label>Playbook (YAML)</label>
-    <textarea id="pb" rows="12">---
+    <small class="muted">Sources are scanned from
+      <span class="mono">{{ configured_dirs | join(', ') }}</span> — develop playbooks
+      there (roles/, group_vars/ and host_vars/ next to a playbook are honored);
+      CCP never edits them. The inventory is always generated from your selected
+      nodes.</small>
+
+    <details style="margin-top:12px" id="adhoc">
+      <summary class="muted">Ad-hoc playbook (one-off YAML — not saved)</summary>
+      {% if scripts %}
+      <label>Load a legacy saved playbook (deprecated)</label>
+      <select id="script-pick" onchange="loadScript()">
+        <option value="">— none —</option>
+        {% for s in scripts %}<option value="{{ s.id }}" data-content="{{ s.content }}">{{ s.name }}</option>{% endfor %}
+      </select>
+      {% endif %}
+      <label>Playbook (YAML)</label>
+      <textarea id="pb" rows="12">---
 - name: Demo play
   hosts: all
   gather_facts: true
   tasks:
     - name: Ping every target
       ansible.builtin.ping:</textarea>
+    </details>
+
     <label>Extra vars (optional, key=value or JSON)</label>
     <input id="ev" placeholder='e.g. pkg=htop  or  {"pkg":"htop"}'>
     <div style="margin-top:14px"><button class="btn" id="run-btn" onclick="run()" {{ 'disabled' if not role_ok('operator') }}>▶ Run playbook</button></div>
@@ -31,15 +55,25 @@
 {% endblock %}
 {% block scripts %}<script>
 function loadScript(){
-  const o=document.getElementById('script-pick').selectedOptions[0];
-  if(o&&o.dataset.content!==undefined&&o.value)document.getElementById('pb').value=o.dataset.content;
+  const o=document.getElementById('script-pick')?.selectedOptions[0];
+  if(o&&o.dataset.content!==undefined&&o.value){
+    document.getElementById('pb').value=o.dataset.content;
+    document.getElementById('adhoc').open=true;
+    document.getElementById('pb-path').value='';
+  }
 }
 async function run(){
   const payload=selectedNodePayload();
-  payload.playbook=document.getElementById('pb').value;
+  const pick=document.getElementById('pb-path').selectedOptions[0];
+  if(pick&&pick.value){
+    payload.playbook_path=pick.value;
+    payload.source=pick.dataset.source;
+  }else{
+    payload.playbook=document.getElementById('pb').value;
+    if(!payload.playbook.trim()){toast('Pick a playbook or write one',true);return;}
+  }
   payload.extra_vars=document.getElementById('ev').value.trim();
-  if(!payload.playbook.trim()){toast('Playbook is empty',true);return;}
-  if(!payload.node_ids.length&&!payload.group){toast('Select at least one node or a group',true);return;}
+  if(!payload.node_ids.length&&!payload.group&&!payload.cluster_id){toast('Select nodes, a group or a cluster',true);return;}
   const btn=document.getElementById('run-btn'),con=document.getElementById('console');
   btn.disabled=true;con.textContent='Launching ansible-playbook…';
   try{

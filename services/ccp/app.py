@@ -29,6 +29,7 @@ from flask import (Flask, request, session, redirect, url_for, render_template,
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
+import ansible_sources
 import db
 import discovery
 import executor
@@ -67,6 +68,7 @@ _RANK = {r: i for i, r in enumerate(ROLES)}
 
 db.init_db()
 executor.ensure_ssh_key()   # CCP's ed25519 identity, installed by onboarding
+ansible_sources.ensure_default_dirs()
 
 # node lifecycle states (see docs/ccp/RFC-0001-lifecycle-platform.md §4)
 NODE_STATES = ('discovered', 'onboarding', 'managed', 'failed', 'unverified')
@@ -291,6 +293,8 @@ def ansible_page():
     return render_template('ansible.html',
                            nodes=db.query('SELECT * FROM nodes ORDER BY name'),
                            clusters=db.query('SELECT * FROM clusters ORDER BY name'),
+                           sources=ansible_sources.scan_all(),
+                           configured_dirs=ansible_sources.ANSIBLE_DIRS,
                            scripts=db.query("SELECT * FROM scripts WHERE kind='playbook' ORDER BY name"))
 
 
@@ -813,19 +817,39 @@ def api_run_shell():
 @app.route('/api/run/ansible', methods=['POST'])
 @require('operator')
 def api_run_ansible():
+    """Run a playbook: either from a scanned filesystem source
+    ({source, playbook_path}) or inline YAML ({playbook}, ad-hoc)."""
     d = request.get_json(force=True) or {}
     playbook = d.get('playbook') or ''
-    if not playbook.strip():
+    playbook_path = ''
+    label = ''
+    if d.get('playbook_path'):
+        try:
+            playbook_path = ansible_sources.resolve_playbook(
+                d.get('source') or '', d.get('playbook_path') or '')
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        label = d.get('playbook_path')
+    elif not playbook.strip():
         return jsonify({'error': 'playbook content is required'}), 400
     ids, names, excluded = _selected_nodes(d)
     if not ids:
         return jsonify({'error': _target_error(excluded)}), 400
-    job_id = executor.start_job('ansible', ','.join(names),
-                                {'node_ids': ids, 'playbook': playbook,
-                                 'extra_vars': (d.get('extra_vars') or '').strip()},
+    spec = {'node_ids': ids, 'extra_vars': (d.get('extra_vars') or '').strip()}
+    if playbook_path:
+        spec['playbook_path'] = playbook_path
+    else:
+        spec['playbook'] = playbook
+    job_id = executor.start_job('ansible', ','.join(names), spec,
                                 session['username'])
-    log_action('run.ansible', f'job {job_id}')
+    log_action('run.ansible', f'job {job_id}' + (f' ({label})' if label else ''))
     return jsonify({'job_id': job_id}), 201
+
+
+@app.route('/api/ansible/sources')
+def api_ansible_sources():
+    return jsonify({'sources': ansible_sources.scan_all(),
+                    'configured': ansible_sources.ANSIBLE_DIRS})
 
 
 @app.route('/api/jobs/<int:job_id>')
@@ -856,6 +880,12 @@ def api_save_script():
     d = request.get_json(force=True) or {}
     name = (d.get('name') or '').strip()
     kind = 'playbook' if d.get('kind') == 'playbook' else 'shell'
+    if kind == 'playbook':
+        # deprecated: playbooks are developed outside CCP and consumed from
+        # filesystem sources (CCP_ANSIBLE_DIRS). Existing rows stay runnable.
+        return jsonify({'error': 'saving playbooks in CCP is deprecated — put '
+                        'them in an Ansible source directory instead '
+                        '(see the Ansible page)'}), 400
     if not name:
         return jsonify({'error': 'name is required'}), 400
     now, who = int(time.time()), session['username']

@@ -232,6 +232,12 @@ services:
       - CCP_USER_QUOTA_MB=${CCP_USER_QUOTA_MB:-10240}
       - CCP_SSH_KEY=/data/ccp/ssh/id_ccp
       - CCP_LEASES_FILE=/data/dnsmasq.leases
+      # colon-separated playbook source dirs scanned by the Ansible page.
+      # The default lives inside the /data/ccp mount (host: ./data/ccp/ansible).
+      # To use external checkouts, add more ro mounts and list them here, e.g.
+      #   - /root/rex/ansible_db:/sources/ansible_db:ro
+      #   - CCP_ANSIBLE_DIRS=/data/ccp/ansible:/sources/ansible_db
+      - CCP_ANSIBLE_DIRS=${CCP_ANSIBLE_DIRS:-/data/ccp/ansible}
       # hard per-job wall-clock cap (seconds) so a hung command/playbook can't
       # pin a worker thread forever
       - CCP_JOB_TIMEOUT=${CCP_JOB_TIMEOUT:-900}
