@@ -7,11 +7,16 @@ Debian nodes using the distro slurm-wlm packages — deliberate, documented,
 and visible to the operator because the playbook itself lands in the job log.
 
 NodeAddr is always emitted so the cluster works without DNS or /etc/hosts
-coordination. Node names are the CCP inventory names; the deploy playbook
-pins each slurmd to its NodeName with `slurmd -N <name>` (via a SLURMD_OPTIONS
-systemd drop-in) so a node whose OS hostname still differs from its inventory
-name — e.g. a box called 'gpu-node' — is identified correctly instead of
-failing with "Unable to determine this slurmd's NodeName".
+coordination, and daemon identity never depends on a box's OS hostname
+matching its CCP inventory name (they differ until the one-click rename):
+
+- slurmd is pinned to its NodeName with `slurmd -N <name>` via a
+  SLURMD_OPTIONS systemd drop-in (else: "Unable to determine this slurmd's
+  NodeName" on a box still called e.g. 'gpu-node');
+- the SlurmctldHost *name* is resolved to the controller's real hostname from
+  Ansible facts at deploy time (else slurmctld refuses to start with "This
+  host ... not a valid controller"); the (address) part is kept for
+  communication.
 """
 
 MEM_RESERVE_MB = 512      # keep a slice for the OS so slurmd doesn't overcommit
@@ -83,6 +88,9 @@ def generate(cluster_name, members, controller, hardware_by_node):
         # good lab defaults, tighten later if needed
         'ProctrackType=proctrack/linuxproc',
         'TaskPlugin=task/none',
+        # slurm's default MailProg (/bin/mail) doesn't exist on minimal
+        # Ubuntu/Debian and logs an error at every daemon start
+        'MailProg=/bin/true',
         'MpiDefault=none',
         'ReturnToService=2',
         'SchedulerType=sched/backfill',
@@ -107,12 +115,35 @@ def _yaml_block(text, indent):
     return '\n'.join(pad + line for line in text.splitlines())
 
 
+def _resolve_slurmctld_host(slurm_conf):
+    """Rewrite the SlurmctldHost *name* to the controller's real OS hostname,
+    resolved from Ansible facts at deploy time.
+
+    slurmctld refuses to start ("This host ... not a valid controller") unless
+    the name part of SlurmctldHost equals the machine's own `hostname -s` —
+    and a box's hostname can differ from its CCP inventory name (e.g. a
+    controller still called 'ubuntu-amd64-lab'). The name part exists only for
+    that self-identification; every daemon reaches the controller through the
+    (address) part, which is kept verbatim."""
+    out = []
+    for line in slurm_conf.splitlines():
+        if line.startswith('SlurmctldHost='):
+            addr = line[line.index('('):] if '(' in line else ''
+            line = ("SlurmctldHost="
+                    "{{ hostvars[slurm_controller]['ansible_hostname'] }}" + addr)
+        out.append(line)
+    return '\n'.join(out) + '\n'
+
+
 def deploy_playbook(slurm_conf, gres_conf, controller_name):
     """The built-in deployment playbook (Ubuntu/Debian slurm-wlm): munge key
     generated on the controller and distributed to every node, configs pushed,
     spool dirs created, slurmctld on the controller and slurmd everywhere.
     The generated configs are inlined so the playbook in the job log is the
-    complete, auditable record of what was deployed."""
+    complete, auditable record of what was deployed. The SlurmctldHost name is
+    resolved to the controller's real hostname at deploy time (see
+    _resolve_slurmctld_host); slurmd identity is pinned with -N."""
+    slurm_conf = _resolve_slurmctld_host(slurm_conf)
     gres_task = ''
     if gres_conf:
         gres_task = f'''

@@ -89,6 +89,15 @@ check('missing hardware → warning + minimal defaults',
 print('== deploy playbook ==')
 pb = slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu')
 check('playbook inlines slurm.conf', 'ClusterName=ai-train' in pb)
+check('SlurmctldHost name resolved to the real hostname at deploy time, '
+      'address kept',
+      "SlurmctldHost={{ hostvars[slurm_controller]['ansible_hostname'] }}"
+      '(192.168.100.21)' in pb
+      and 'SlurmctldHost=rack0_sled1_gpu' not in pb, pb)
+check('stored conf keeps the inventory-name intent',
+      'SlurmctldHost=rack0_sled1_gpu(192.168.100.21)' in conf)
+check('MailProg pinned so minimal installs do not log errors',
+      'MailProg=/bin/true' in conf)
 check('playbook inlines gres.conf', '/dev/nvidia[0-3]' in pb)
 check('munge key generated on controller and distributed',
       'mungekey' in pb and 'slurp' in pb and 'b64decode' in pb)
