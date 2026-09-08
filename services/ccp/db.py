@@ -47,7 +47,25 @@ CREATE TABLE IF NOT EXISTS nodes (
     -- name doesn't follow the scheme. Never entered manually.
     rack         INTEGER,
     sled         INTEGER,
-    role         TEXT NOT NULL DEFAULT ''
+    role         TEXT NOT NULL DEFAULT '',
+    cluster_id   INTEGER                       -- membership; app-enforced FK
+);
+
+-- First-class clusters: a cluster is an execution target and (kind='slurm')
+-- the unit of the Slurm lifecycle. Generated configs are stored here so they
+-- can be previewed/redeployed; slurm_state tracks the guided workflow.
+CREATE TABLE IF NOT EXISTS clusters (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL UNIQUE,
+    kind         TEXT NOT NULL DEFAULT 'generic',  -- generic | slurm
+    description  TEXT NOT NULL DEFAULT '',
+    slurm_state  TEXT NOT NULL DEFAULT 'INIT',
+        -- INIT | DISCOVER | DEPLOY | VALIDATE | BENCHMARK | REPORT | MONITOR | CLEANUP
+    controller_node_id INTEGER,
+    slurm_conf   TEXT NOT NULL DEFAULT '',
+    gres_conf    TEXT NOT NULL DEFAULT '',
+    created_by   TEXT NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS scripts (
@@ -194,6 +212,13 @@ def init_db():
         conn.commit()
         import topology                # local import: topology imports db
         topology.backfill(conn)
+
+    # M4 — cluster membership (the clusters table itself is CREATE IF NOT
+    # EXISTS above; only the nodes column needs an in-place ALTER).
+    ncols = [r['name'] for r in conn.execute('PRAGMA table_info(nodes)')]
+    if 'cluster_id' not in ncols:
+        conn.execute('ALTER TABLE nodes ADD COLUMN cluster_id INTEGER')
+        conn.commit()
 
     # A worker restart aborts any in-flight onboarding thread; reset those
     # rows to a retryable state (mirrors the running-jobs reaper below).

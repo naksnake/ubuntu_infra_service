@@ -39,12 +39,13 @@ function fmtTime(ts) {
   return new Date(ts * 1000).toLocaleString();
 }
 
-// Collect checked node ids + group from a standard selector block
+// Collect checked node ids + group + cluster from a standard selector block
 function selectedNodePayload(root) {
   const scope = root || document;
   const ids = [...scope.querySelectorAll('.node-cb:checked')].map(c => c.value);
   const group = (scope.querySelector('.group-input')?.value || '').trim();
-  return { node_ids: ids, group };
+  const cluster_id = scope.querySelector('.cluster-input')?.value || '';
+  return { node_ids: ids, group, cluster_id };
 }
 
 // Poll a job until it is no longer running, streaming output into `el`.
