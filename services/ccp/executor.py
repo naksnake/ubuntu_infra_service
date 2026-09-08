@@ -597,7 +597,7 @@ def _run_hwscan(job_id, spec, log):
 # (kind slurm_deploy) — see slurm.py. Each stage advances clusters.slurm_state
 # via the generic advance_to hook in _run() only on success.
 
-def _slurm_ssh(node, command, log, timeout=180):
+def _slurm_ssh(node, command, log):
     rc, out = _key_ssh(node['address'], node['ssh_user'], node['ssh_port'], command)
     log.write(out.rstrip() + '\n')
     if rc != 0:

@@ -81,9 +81,9 @@ lifecycle logic is tested by stubbing them.
 
 ```bash
 cd services/ccp
-python3 test_userfiles.py && python3 test_lifecycle.py && \
-python3 test_discovery.py && python3 test_hardware.py && \
-python3 test_topology.py && python3 test_clusters.py && python3 test_slurm.py
+for t in test_userfiles test_lifecycle test_discovery test_hardware \
+         test_topology test_clusters test_ansible_sources test_slurm \
+         test_slurm_lifecycle; do python3 $t.py || exit 1; done
 ```
 
 (Tests require only Flask; executor SSH calls are stubbed.)
