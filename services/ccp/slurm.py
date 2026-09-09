@@ -250,13 +250,15 @@ def _start_rescue(daemon, probe):
             set +e
             echo "### systemctl status {daemon}"
             systemctl status {daemon} --no-pager -l 2>&1 | head -30
-            echo; echo "### journalctl -u {daemon} -n 60"
-            journalctl -u {daemon} -n 60 --no-pager 2>&1
+            echo; echo "### unit state"
+            systemctl show {daemon} -p ActiveState,SubState,Result,ExecMainStatus,ExecMainCode,NRestarts,ExecMainStartTimestamp 2>&1
+            echo; echo "### journalctl -u {daemon} — THIS attempt only (last 15 min; anything older belongs to an earlier deploy)"
+            journalctl -u {daemon} --since "-15 min" --no-pager 2>&1 | tail -60
             echo; echo "### effective unit + drop-ins (systemctl cat {daemon})"
             systemctl cat {daemon} 2>&1
             echo; echo "### {daemon} -V: $({daemon} -V 2>&1)   cgroup: $(stat -fc %T /sys/fs/cgroup 2>&1)   munge: $(munge -n 2>&1 | unmunge 2>&1 | head -1)"
-            echo; echo "### journal errors (journalctl -u {daemon}, fatal/error lines, last 10)"
-            journalctl -u {daemon} -n 200 --no-pager 2>&1 | grep -iE 'fatal|error' | tail -10
+            echo; echo "### journal errors — this attempt only (fatal/error lines from the last 15 min)"
+            journalctl -u {daemon} --since "-15 min" --no-pager 2>&1 | grep -iE 'fatal|error' | tail -12
             echo; echo "### gres.conf lines for this node + NVIDIA device files"
             grep -E "NodeName=.*{{{{ inventory_hostname }}}}" /etc/slurm/gres.conf 2>&1; ls -l /dev/nvidia[0-9]* 2>&1 | head -8
             echo; echo "### foreground probe (8 s): {probe}"

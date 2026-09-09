@@ -1021,7 +1021,9 @@ slurmd -V 2>&1
 sec "services"
 for s in munge slurmd slurmctld; do printf '%-9s active=%-8s enabled=%s\n' "$s" "$($SUDO systemctl is-active $s 2>&1)" "$($SUDO systemctl is-enabled $s 2>&1)"; done
 sec "systemctl status slurmd"; $SUDO systemctl status slurmd --no-pager -l 2>&1 | head -25
-sec "journalctl -u slurmd -n 60"; $SUDO journalctl -u slurmd -n 60 --no-pager 2>&1
+sec "slurmd unit state"; $SUDO systemctl show slurmd -p ActiveState,SubState,Result,ExecMainStatus,ExecMainCode,NRestarts,ExecMainStartTimestamp 2>&1
+sec "journalctl -u slurmd -- last 30 min (this deploy)"; $SUDO journalctl -u slurmd --since "-30 min" --no-pager 2>&1 | tail -60
+sec "journalctl -u slurmd -n 60 -- history (may predate this deploy: check the timestamps)"; $SUDO journalctl -u slurmd -n 60 --no-pager 2>&1
 sec "journalctl -u slurmctld -n __CTLN__"; $SUDO journalctl -u slurmctld -n __CTLN__ --no-pager 2>&1
 sec "journalctl -u munge -n 10"; $SUDO journalctl -u munge -n 10 --no-pager 2>&1
 sec "munge round trip"; munge -n 2>&1 | unmunge 2>&1 | head -3
@@ -1368,6 +1370,30 @@ def maybe_auto_deploy(cluster_id, who, reason):
     return start_auto_deploy(c, [m['id'] for m in members], who, reason=reason)
 
 
+def _failure_excerpt(text, limit=60):
+    """The decisive lines of a failed stage: every 'fatal:'/'failed:' result
+    with its indented body (the YAML result format keeps them together); when
+    there is none, the last lines of the stage. Repeated under the final
+    AUTO DEPLOY FAILED line, because people copy the last red block."""
+    out, grab = [], False
+    for line in text.splitlines():
+        if re.match(r'^(fatal|failed): \[', line):
+            grab = True
+            out.append(line)
+        elif grab and (line == '' or line[:1] in (' ', '\t')):
+            out.append(line)
+        else:
+            grab = False
+        if len(out) >= limit:
+            out.append('    …')
+            break
+    if not out:
+        tail = [l for l in text.splitlines() if l.strip()
+                and not l.startswith(('##STAGE', 'AUTO DEPLOY'))][-25:]
+        out = tail
+    return out
+
+
 def _run_slurm_auto(job_id, spec, log):
     cid = spec.get('cluster_id')
     c = db.query('SELECT * FROM clusters WHERE id=?', (cid,), one=True)
@@ -1384,14 +1410,31 @@ def _run_slurm_auto(job_id, spec, log):
     log.write(f'[ccp] automatic Slurm deployment for {c["name"]}: {len(members)} node(s)'
               f'{" — " + spec["reason"] if spec.get("reason") else ""}\n')
 
+    stage_start = {'pos': 0}
+
     def stage(name, title):
         log.write(f'\n##STAGE## {stages.index(name) + 1}/{total} {name} — {title}\n')
+        log.flush()
+        stage_start['pos'] = log.tell()      # byte offset: the stage's own text starts here
+
+    def stage_text():
+        try:
+            with open(_log_path(job_id), 'rb') as fh:
+                fh.seek(stage_start['pos'])
+                return fh.read().decode('utf-8', 'replace')
+        except OSError:
+            return ''
 
     def done(name, ok, hint=''):
+        log.flush()
+        excerpt = [] if ok else _failure_excerpt(stage_text())
         log.write(f'##STAGE-END## {name} {"PASSED" if ok else "FAILED"}\n')
         if not ok:
             log.write(f'\nAUTO DEPLOY FAILED at stage {name}'
                       f'{": " + hint if hint else ""}\n')
+            if excerpt:
+                log.write('  reason (from the stage above):\n'
+                          + ''.join(f'    {l}\n' for l in excerpt))
 
     # 1. facts — fresh hardware + pre-flight from every member, in parallel
     stage('facts', f'hardware and pre-flight facts from {len(members)} node(s)')

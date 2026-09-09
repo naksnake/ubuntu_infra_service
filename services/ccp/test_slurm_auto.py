@@ -102,8 +102,13 @@ executor._password_ssh = lambda *a, **kw: (0, '')
 ANSIBLE = {'rc': 0, 'runs': []}
 def stub_ansible(job_id, spec, log):
     ANSIBLE['runs'].append(spec)
-    log.write('PLAY [Deploy Slurm (stub)] ****\nTASK [stub] ****\nok: [all]\n'
-              'PLAY RECAP ****\n')
+    log.write('PLAY [Deploy Slurm (stub)] ****\nTASK [stub] ****\nok: [all]\n')
+    if ANSIBLE['rc']:
+        log.write('TASK [Start slurmd on every node] ****\n'
+                  'fatal: [rack0-sled2-gpu]: FAILED! => \n    changed: false\n    msg: |-\n'
+                  '        slurmd failed to start on rack0-sled2-gpu. Its own reason:\n'
+                  '        Sep 09 10:07:02 rack0-sled2-gpu slurmd[4711]: fatal: boom reason\n')
+    log.write('PLAY RECAP ****\n')
     return ANSIBLE['rc']
 executor._run_ansible = stub_ansible
 
@@ -226,6 +231,12 @@ check('deploy failure reported at its stage',
 check('job failed, state stays DISCOVER, validation never attempted',
       job(jid)['status'] == 'failed' and cluster(cid)['slurm_state'] == 'DISCOVER'
       and not any('sinfo' in cmd for _, cmd in CALLS), dict(job(jid)))
+tail = log.rsplit('AUTO DEPLOY FAILED', 1)[1]
+check('the final failure line repeats the failed task with its reason (people copy the last block)',
+      'reason (from the stage above):' in tail and 'fatal: [rack0-sled2-gpu]: FAILED!' in tail
+      and 'fatal: boom reason' in tail, tail)
+check('the excerpt is the fatal block only, not the whole playbook',
+      'ok: [all]' not in tail and 'PLAY RECAP' not in tail, tail)
 ANSIBLE['rc'] = 0
 
 print('== an unreachable member stops before anything is changed ==')
@@ -236,6 +247,8 @@ log = executor.job_log(r.get_json()['job_id'])
 check('facts stage names the node and no playbook ran',
       'AUTO DEPLOY FAILED at stage facts: no facts from rack0-sled1-cpu' in log
       and '[rack0-sled1-cpu exit 255]' in log and len(ANSIBLE['runs']) == runs_before, log)
+check('a stage without fatal blocks repeats its last lines as the reason',
+      'No route to host' in log.rsplit('AUTO DEPLOY FAILED', 1)[1], log)
 NODES['10.0.3.1']['down'] = False
 
 print('== run_tests=false skips the sbatch stage ==')

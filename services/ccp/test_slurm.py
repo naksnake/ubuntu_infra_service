@@ -161,9 +161,12 @@ check('the block restarts+enables slurmd with a daemon-reload',
                                                     'enabled': True, 'daemon_reload': True},
       sd['block'])
 rescue_txt = str(sd['rescue'])
-check('rescue collects journal, status and the effective unit with drop-ins',
-      'journalctl -u slurmd -n 60' in rescue_txt and 'systemctl status slurmd' in rescue_txt
+check('rescue collects status, unit state, THIS attempt\'s journal and the effective unit',
+      'journalctl -u slurmd --since "-15 min"' in rescue_txt and 'systemctl status slurmd' in rescue_txt
+      and 'systemctl show slurmd -p ActiveState' in rescue_txt
       and 'systemctl cat slurmd' in rescue_txt, rescue_txt)
+check('rescue never quotes a journal older than this attempt (a stale restart loop '
+      'would be mistaken for the reason)', 'journalctl -u slurmd -n ' not in rescue_txt)
 check('rescue runs slurmd in the foreground with the pinned NodeName',
       'timeout 8 slurmd -D -vv -N {{ inventory_hostname }}' in rescue_txt, rescue_txt)
 check('rescue prints the diagnostics, then still fails the host',
