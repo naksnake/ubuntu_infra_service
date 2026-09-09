@@ -171,6 +171,15 @@ check('rescue prints the diagnostics, then still fails the host',
       and 'ansible.builtin.fail' in sd['rescue'][-1], sd['rescue'])
 check('the collection step can never mask the failure',
       sd['rescue'][0].get('failed_when') is False and sd['rescue'][0].get('changed_when') is False)
+collect_sh = sd['rescue'][0]['ansible.builtin.shell']
+check('journal fatal/error lines are extracted right before the probe',
+      'journal errors' in collect_sh and "grep -iE 'fatal|error'" in collect_sh, collect_sh)
+fail_msg = sd['rescue'][-1]['ansible.builtin.fail']['msg']
+check('the final failure message itself carries the tail of the diagnostics '
+      '(people copy the last red block)',
+      'slurmd_diag.stdout_lines[-45:] | join(ccp_nl)' in fail_msg and 'own reason' in fail_msg, fail_msg)
+check('join uses a YAML-defined real newline (Ansible escapes backslashes in Jinja)',
+      _docs[0][0]['vars'].get('ccp_nl') == '\n', _docs[0][0]['vars'])
 sc = next(t for t in _tasks_plain if t['name'] == 'Start slurmctld on the controller')
 check('slurmctld start guarded to the controller and rescued too',
       sc.get('when') == 'inventory_hostname == slurm_controller' and 'rescue' in sc, sc)

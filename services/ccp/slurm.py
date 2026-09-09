@@ -202,6 +202,8 @@ def _start_rescue(daemon, probe):
             echo; echo "### effective unit + drop-ins (systemctl cat {daemon})"
             systemctl cat {daemon} 2>&1
             echo; echo "### {daemon} -V: $({daemon} -V 2>&1)   cgroup: $(stat -fc %T /sys/fs/cgroup 2>&1)   munge: $(munge -n 2>&1 | unmunge 2>&1 | head -1)"
+            echo; echo "### journal errors (journalctl -u {daemon}, fatal/error lines, last 10)"
+            journalctl -u {daemon} -n 200 --no-pager 2>&1 | grep -iE 'fatal|error' | tail -10
             echo; echo "### foreground probe (8 s): {probe}"
             {probe} 2>&1 | tail -30
           args:
@@ -214,13 +216,16 @@ def _start_rescue(daemon, probe):
           ansible.builtin.debug:
             var: {daemon}_diag.stdout_lines
 
+        # The decisive lines are repeated inside the failure message itself:
+        # people copy the last red block, so it must carry the reason too.
         - name: {daemon} did not start
           ansible.builtin.fail:
-            msg: >-
-              {daemon} failed to start on {{{{ inventory_hostname }}}}. The
-              "{daemon} diagnostics" block above holds its journal and a
-              foreground run with the daemon's own reason; "Collect logs" on
-              the Clusters page gathers the same from every node into one job.
+            msg: |
+              {daemon} failed to start on {{{{ inventory_hostname }}}}. Its own reason — journal errors, then a foreground run:
+
+              {{{{ {daemon}_diag.stdout_lines[-45:] | join(ccp_nl) }}}}
+
+              The complete diagnostics are in the "{daemon} diagnostics" task above; "Collect logs" on the Clusters page gathers the same from every node into one job.
 '''
 
 
@@ -425,6 +430,9 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
   gather_facts: true          # ansible_hostname feeds SlurmctldHost below
   vars:
     slurm_controller: {controller_name}
+    # a real newline for join(): Ansible escapes backslashes inside Jinja
+    # expressions, so join('\\n') would print a literal backslash-n
+    ccp_nl: "\\n"
   tasks:
     # ── read-only preflight ───────────────────────────────────────────────
     # Everything that can reject this deploy runs BEFORE anything is changed.
