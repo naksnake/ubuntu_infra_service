@@ -225,10 +225,16 @@ SOURCE_URL_TEMPLATE = 'https://download.schedmd.com/slurm/slurm-{version}.tar.bz
 # build with the default plugin set (no slurmdbd/MySQL, no REST daemon). Only
 # package names that exist in every supported Ubuntu release belong here — a
 # name missing on one release fails the whole deploy before anything is built.
+# libhttp-parser-dev is published in every Ubuntu series (checked on Launchpad
+# through 26.10); without it Slurm ≥ 25.x builds no http_parser plugin and
+# every daemon logs "error: cannot create url_parser context" at start-up.
 SOURCE_BUILD_DEPS = ['munge', 'build-essential', 'pkg-config', 'libmunge-dev',
                      'libpam0g-dev', 'libssl-dev', 'libhwloc-dev', 'libjson-c-dev',
-                     'libyaml-dev', 'libdbus-1-dev', 'libreadline-dev',
-                     'libncurses-dev', 'libnuma-dev', 'python3', 'bzip2', 'curl']
+                     'libyaml-dev', 'libhttp-parser-dev', 'libdbus-1-dev',
+                     'libreadline-dev', 'libncurses-dev', 'libnuma-dev', 'python3',
+                     'bzip2', 'curl']
+# the plugin whose presence proves the build was made with libhttp-parser
+HTTP_PARSER_PLUGIN = '/usr/lib/slurm/http_parser_libhttp_parser.so'
 
 
 def _start_rescue(daemon, probe):
@@ -462,8 +468,15 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
         state: absent
         purge: true
 
+    # A build made before libhttp-parser-dev was in the dependency list is
+    # rebuilt once: same version, but every daemon logged "cannot create
+    # url_parser context" because the plugin was missing.
     - name: Check which Slurm is installed now
-      ansible.builtin.command: slurmd -V
+      ansible.builtin.shell: |
+        slurmd -V 2>/dev/null
+        test -e {HTTP_PARSER_PLUGIN} && echo plugin=http_parser
+      args:
+        executable: /bin/bash
       register: slurm_have
       changed_when: false
       failed_when: false
@@ -474,7 +487,7 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
         dest: /usr/local/src/slurm-{version}.tar.bz2
         mode: "0644"
         timeout: 180
-      when: "'slurm {version}' not in slurm_have.stdout"
+      when: "'slurm {version}' not in slurm_have.stdout or 'plugin=http_parser' not in slurm_have.stdout"
 
     # ./configure flags validated on Ubuntu 24.04. prefix=/usr puts sbatch,
     # srun, slurmd… on the normal PATH; sysconfdir matches every path CCP
@@ -495,7 +508,7 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
         slurmd -V
       args:
         executable: /bin/bash
-      when: "'slurm {version}' not in slurm_have.stdout"
+      when: "'slurm {version}' not in slurm_have.stdout or 'plugin=http_parser' not in slurm_have.stdout"
 
     - name: Ensure the slurm system user exists
       ansible.builtin.user:

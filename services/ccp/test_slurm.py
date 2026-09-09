@@ -318,9 +318,10 @@ check('default upstream release is 25.11.8', V == '25.11.8')
 check('toolchain and munge installed from the distro',
       'Install munge and the Slurm build toolchain' in names_src, names_src)
 tool = tasks_src[names_src.index('Install munge and the Slurm build toolchain')]
-check('build deps cover compiler, munge headers, hwloc and pam',
+check('build deps cover compiler, munge headers, hwloc, pam and http-parser',
       all(p in tool['ansible.builtin.apt']['name'] for p in
-          ('munge', 'build-essential', 'libmunge-dev', 'libhwloc-dev', 'libpam0g-dev')),
+          ('munge', 'build-essential', 'libmunge-dev', 'libhwloc-dev', 'libpam0g-dev',
+           'libhttp-parser-dev')),
       tool)
 rm_i = names_src.index('Remove distro Slurm packages so they cannot shadow the source build')
 rm = tasks_src[rm_i]['ansible.builtin.apt']
@@ -343,13 +344,17 @@ check('build is parallel, installs the systemd units and refreshes ld cache',
       and 'etc/slurmd.service etc/slurmctld.service /etc/systemd/system/' in build
       and 'ldconfig' in build, build)
 check('build script aborts on the first failing step', 'set -euo pipefail' in build)
+NEED = f"'slurm {V}' not in slurm_have.stdout or 'plugin=http_parser' not in slurm_have.stdout"
 for i in (dl_i, build_i):
-    check(f'{names_src[i][:30]}… skipped when this release is already installed',
-          tasks_src[i].get('when') == f"'slurm {V}' not in slurm_have.stdout",
-          tasks_src[i].get('when'))
+    check(f'{names_src[i][:30]}… skipped only when this release WITH the http_parser plugin is installed',
+          tasks_src[i].get('when') == NEED, tasks_src[i].get('when'))
 have_i = names_src.index('Check which Slurm is installed now')
 check('installed-release probe runs after the purge, before the download, and tolerates absence',
       rm_i < have_i < dl_i and tasks_src[have_i].get('failed_when') is False)
+check('probe reports the http_parser plugin (a build without it logs url_parser errors)',
+      'slurmd -V' in tasks_src[have_i]['ansible.builtin.shell']
+      and 'http_parser_libhttp_parser.so' in tasks_src[have_i]['ansible.builtin.shell']
+      and 'echo plugin=http_parser' in tasks_src[have_i]['ansible.builtin.shell'])
 check('slurm user created (packages used to do that)',
       'Ensure the slurm system user exists' in names_src
       and names_src.index('Ensure the slurm system user exists') > build_i)
@@ -402,7 +407,8 @@ check('custom release + local mirror URL honoured (air-gapped labs)',
       and dlm['ansible.builtin.get_url']['dest'] == '/usr/local/src/slurm-25.05.3.tar.bz2'
       and any(t['name'].startswith('Build and install slurm-25.05.3') for t in tm), dlm)
 check('idempotency guard follows the custom release',
-      dlm.get('when') == "'slurm 25.05.3' not in slurm_have.stdout", dlm.get('when'))
+      dlm.get('when') == "'slurm 25.05.3' not in slurm_have.stdout or 'plugin=http_parser' not in slurm_have.stdout",
+      dlm.get('when'))
 
 print('== version probing must not fail on a node without slurm installed ==')
 names_t = _yaml.safe_load(slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu'))[0]['tasks']
