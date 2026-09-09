@@ -184,6 +184,46 @@ SOURCE_BUILD_DEPS = ['munge', 'build-essential', 'pkg-config', 'libmunge-dev',
                      'libncurses-dev', 'libnuma-dev', 'python3', 'bzip2', 'curl']
 
 
+def _start_rescue(daemon, probe):
+    """Rescue branch for a daemon start. systemd's failure text is only
+    "control process exited with error code", which tells the operator
+    nothing — so on failure collect the daemon's own words (status, journal,
+    the effective unit with drop-ins, and a short foreground run that prints
+    the fatal straight to stdout), show them in the job log, then fail the
+    host for real. `probe` is the foreground command; slurmctld's must run as
+    the slurm user so a root-owned state file never breaks the real daemon."""
+    return f'''        - name: Collect why {daemon} would not start
+          ansible.builtin.shell: |
+            set +e
+            echo "### systemctl status {daemon}"
+            systemctl status {daemon} --no-pager -l 2>&1 | head -30
+            echo; echo "### journalctl -u {daemon} -n 60"
+            journalctl -u {daemon} -n 60 --no-pager 2>&1
+            echo; echo "### effective unit + drop-ins (systemctl cat {daemon})"
+            systemctl cat {daemon} 2>&1
+            echo; echo "### {daemon} -V: $({daemon} -V 2>&1)   cgroup: $(stat -fc %T /sys/fs/cgroup 2>&1)   munge: $(munge -n 2>&1 | unmunge 2>&1 | head -1)"
+            echo; echo "### foreground probe (8 s): {probe}"
+            {probe} 2>&1 | tail -30
+          args:
+            executable: /bin/bash
+          register: {daemon}_diag
+          changed_when: false
+          failed_when: false
+
+        - name: {daemon} diagnostics from {{{{ inventory_hostname }}}}
+          ansible.builtin.debug:
+            var: {daemon}_diag.stdout_lines
+
+        - name: {daemon} did not start
+          ansible.builtin.fail:
+            msg: >-
+              {daemon} failed to start on {{{{ inventory_hostname }}}}. The
+              "{daemon} diagnostics" block above holds its journal and a
+              foreground run with the daemon's own reason; "Collect logs" on
+              the Clusters page gathers the same from every node into one job.
+'''
+
+
 def deploy_playbook(slurm_conf, gres_conf, controller_name,
                     reinstall=False, version=None, install_from='apt',
                     tarball_url=None):
@@ -373,6 +413,11 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
         state: present
 {pin_opts}'''
 
+    ctl_rescue = _start_rescue(
+        'slurmctld', 'runuser -u slurm -- timeout 8 slurmctld -D -vv')
+    d_rescue = _start_rescue(
+        'slurmd', 'timeout 8 slurmd -D -vv -N {{ inventory_hostname }}')
+
     return f'''---
 - name: Deploy Slurm (CCP built-in, Ubuntu/Debian slurm-wlm)
   hosts: all
@@ -555,13 +600,19 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
         content: |
 {_yaml_block(slurm_conf, 10)}
 {gres_task}
+    # Both daemon starts are block/rescue: systemd only ever says "control
+    # process exited with error code", so on failure the rescue prints the
+    # journal, the effective unit and a foreground run of the daemon.
     - name: Start slurmctld on the controller
-      ansible.builtin.systemd:
-        name: slurmctld
-        state: restarted
-        enabled: true
       when: inventory_hostname == slurm_controller
-
+      block:
+        - name: Restart and enable slurmctld
+          ansible.builtin.systemd:
+            name: slurmctld
+            state: restarted
+            enabled: true
+      rescue:
+{ctl_rescue}
     # The slurm-wlm package enables slurmctld on every node, so non-controller
     # boxes show a permanently-failed slurmctld ("not a valid controller").
     # Stop and disable it there so `systemctl status` and logs stay clean and
@@ -595,12 +646,15 @@ def deploy_playbook(slurm_conf, gres_conf, controller_name,
           Environment=SLURMD_OPTIONS=-N {{{{ inventory_hostname }}}}
 
     - name: Start slurmd on every node
-      ansible.builtin.systemd:
-        name: slurmd
-        state: restarted
-        enabled: true
-        daemon_reload: true
-'''
+      block:
+        - name: Restart and enable slurmd (daemon-reload so the drop-in is read)
+          ansible.builtin.systemd:
+            name: slurmd
+            state: restarted
+            enabled: true
+            daemon_reload: true
+      rescue:
+{d_rescue}'''
 
 
 def cleanup_playbook():

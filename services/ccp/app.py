@@ -859,6 +859,22 @@ def api_slurm_action(cluster_id):
         log_action('slurm.report', f'{c["name"]} job {job_id}')
         return jsonify({'job_id': job_id}), 202
 
+    if stage == 'diagnose':
+        # Always allowed and never changes state: this is how an operator
+        # (or whoever they ask for help) sees why a deploy failed — journals,
+        # unit files, configs and a foreground run of slurmd from every
+        # member, in one job log they can copy or download.
+        controller = next((m for m in members
+                           if m['id'] == c['controller_node_id']), None)
+        job_id = executor.start_job(
+            'slurm_action', c['name'],
+            {'stage': 'diagnose', 'cluster_id': cluster_id, 'node_ids': ids,
+             'controller_id': controller['id'] if controller else None,
+             'advance_to': None},
+            who)
+        log_action('slurm.diagnose', f'{c["name"]} job {job_id}')
+        return jsonify({'job_id': job_id}), 202
+
     if stage == 'cleanup':
         # Always allowed: a deploy that failed part-way can leave slurmd
         # enabled with no config (which loops on configless DNS SRV lookups),
@@ -873,7 +889,7 @@ def api_slurm_action(cluster_id):
         return jsonify({'job_id': job_id}), 202
 
     return jsonify({'error': 'stage must be one of: discover, validate, sbatch, '
-                    'benchmark, report, monitor, cleanup'}), 400
+                    'benchmark, report, monitor, diagnose, cleanup'}), 400
 
 
 # ── discovery API ─────────────────────────────────────────────────────────────
@@ -1147,6 +1163,19 @@ def api_job(job_id):
                     'created_by': job['created_by'], 'created_at': job['created_at'],
                     'finished_at': job['finished_at'],
                     'output': executor.job_log(job_id)})
+
+
+@app.route('/api/jobs/<int:job_id>/log')
+def api_job_log(job_id):
+    """The raw job log as a downloadable text file — the thing to attach when
+    asking for help with a failed deploy."""
+    job = db.query('SELECT * FROM jobs WHERE id=?', (job_id,), one=True)
+    if not job:
+        return jsonify({'error': 'not found'}), 404
+    resp = app.response_class(executor.job_log(job_id), mimetype='text/plain')
+    resp.headers['Content-Disposition'] = (
+        f'attachment; filename="ccp-job-{job_id}-{job["kind"]}.log"')
+    return resp
 
 
 @app.route('/api/jobs/<int:job_id>', methods=['DELETE'])

@@ -150,6 +150,34 @@ check('deploy playbook is valid YAML', _docs and isinstance(_docs[0], list), typ
 check('plain deploy does not purge anything',
       'Purge the installed Slurm' not in pb and 'state: absent' not in pb)
 
+print('== a daemon that will not start explains itself in the job log ==')
+# systemd's failure text is only "control process exited with error code";
+# the rescue must surface the daemon's own reason (journal + foreground run)
+_tasks_plain = _docs[0][0]['tasks']
+sd = next(t for t in _tasks_plain if t['name'] == 'Start slurmd on every node')
+check('slurmd start is a block with a rescue', 'block' in sd and 'rescue' in sd, list(sd))
+check('the block restarts+enables slurmd with a daemon-reload',
+      sd['block'][0]['ansible.builtin.systemd'] == {'name': 'slurmd', 'state': 'restarted',
+                                                    'enabled': True, 'daemon_reload': True},
+      sd['block'])
+rescue_txt = str(sd['rescue'])
+check('rescue collects journal, status and the effective unit with drop-ins',
+      'journalctl -u slurmd -n 60' in rescue_txt and 'systemctl status slurmd' in rescue_txt
+      and 'systemctl cat slurmd' in rescue_txt, rescue_txt)
+check('rescue runs slurmd in the foreground with the pinned NodeName',
+      'timeout 8 slurmd -D -vv -N {{ inventory_hostname }}' in rescue_txt, rescue_txt)
+check('rescue prints the diagnostics, then still fails the host',
+      sd['rescue'][-2]['ansible.builtin.debug'] == {'var': 'slurmd_diag.stdout_lines'}
+      and 'ansible.builtin.fail' in sd['rescue'][-1], sd['rescue'])
+check('the collection step can never mask the failure',
+      sd['rescue'][0].get('failed_when') is False and sd['rescue'][0].get('changed_when') is False)
+sc = next(t for t in _tasks_plain if t['name'] == 'Start slurmctld on the controller')
+check('slurmctld start guarded to the controller and rescued too',
+      sc.get('when') == 'inventory_hostname == slurm_controller' and 'rescue' in sc, sc)
+check('slurmctld foreground probe runs as the slurm user (root-owned state files '
+      'would break the real daemon)',
+      'runuser -u slurm -- timeout 8 slurmctld -D -vv' in str(sc['rescue']), sc['rescue'])
+
 print('== clean reinstall + version pin ==')
 pb_re = slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu',
                               reinstall=True, version='23.11.4-1.2ubuntu5')

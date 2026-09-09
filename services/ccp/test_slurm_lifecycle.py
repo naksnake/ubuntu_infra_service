@@ -111,6 +111,40 @@ r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': '
 check('cleanup is always allowed — it is the recovery path for a node left '
       'with slurmd enabled but no config', r.status_code == 202, r.get_json())
 
+print('== collect logs (diagnose) works in any state and changes nothing ==')
+CALLS.clear()
+r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'diagnose'})
+check('diagnose allowed before deploy (a failed deploy is exactly when it is needed)',
+      r.status_code == 202, r.get_json())
+jid = r.get_json()['job_id']
+log = executor.job_log(jid)
+diag = [(a, c) for a, c in CALLS if 'CCPDIAG' in c]
+check('bundle runs on every member', sorted(a for a, _ in diag) == ['10.0.2.1', '10.0.2.2'], CALLS)
+check('bundle gathers journal, unit + drop-ins, configs, hardware view and ports',
+      all('journalctl -u slurmd -n 60' in c and 'systemctl cat slurmd' in c
+          and '/etc/slurm/slurm.conf' in c and 'slurmd -C' in c and '6817|6818' in c
+          for _, c in diag), diag)
+check('foreground probe uses each node\'s own NodeName',
+      any('slurmd -D -vv -N rack0_sled1_gpu' in c for a, c in diag if a == '10.0.2.1')
+      and any('slurmd -D -vv -N rack0_sled2_gpu' in c for a, c in diag if a == '10.0.2.2'), diag)
+check('bundle works for a non-root ssh user (sudo -n prefix)', all('sudo -n' in c for _, c in diag))
+check('no controller yet → no controller-only checks', not any('scontrol ping' in c for _, c in diag))
+check('one frame per node in the log',
+      '===== rack0_sled1_gpu (10.0.2.1) : diagnostics bundle =====' in log
+      and '===== rack0_sled2_gpu (10.0.2.2) : diagnostics bundle =====' in log, log)
+check('marker tells the operator what to do with it', 'DIAGNOSTICS COLLECTED' in log and 'Download log' in log)
+check('diagnose never advances the lifecycle', cluster_state(cid) == 'INIT')
+job = db.query('SELECT * FROM jobs WHERE id=?', (jid,), one=True)
+check('collection job succeeds when every node answered', job['status'] == 'success', dict(job))
+r = admin.get(f'/api/jobs/{jid}/log')
+check('raw log downloadable as a text attachment',
+      r.status_code == 200 and r.mimetype == 'text/plain'
+      and 'attachment' in r.headers.get('Content-Disposition', '')
+      and f'ccp-job-{jid}-slurm_action.log' in r.headers['Content-Disposition']
+      and b'DIAGNOSTICS COLLECTED' in r.data, (r.status_code, dict(r.headers)))
+r = admin.get('/api/jobs/999999/log')
+check('unknown job log → 404', r.status_code == 404)
+
 print('== discover fans out hwscans and advances ==')
 r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'discover'})
 d = r.get_json()
@@ -136,6 +170,19 @@ check('validate runs sinfo + srun across all nodes on the controller',
       and all(a == '10.0.2.1' for a, _ in CALLS), CALLS)
 check('state → VALIDATE', cluster_state(cid) == 'VALIDATE')
 check('job succeeded with PASSED marker', 'VALIDATE PASSED' in log)
+
+print('== diagnose with a controller adds the controller-only checks ==')
+CALLS.clear()
+r = admin.post(f'/api/clusters/{cid}/slurm/action', headers=ah, json={'stage': 'diagnose'})
+diag = [(a, c) for a, c in CALLS if 'CCPDIAG' in c]
+ctl_cmd = next(c for a, c in diag if a == '10.0.2.1')
+oth_cmd = next(c for a, c in diag if a == '10.0.2.2')
+check('controller bundle adds scontrol ping / sinfo / slurmctld log and probe',
+      'scontrol ping' in ctl_cmd and 'sinfo -N -l' in ctl_cmd and 'slurmctld.log' in ctl_cmd
+      and 'runuser -u slurm -- timeout 8 slurmctld -D -vv' in ctl_cmd, ctl_cmd)
+check('member bundle has none of them', 'scontrol ping' not in oth_cmd and 'runuser' not in oth_cmd)
+check('controller frame labelled', '(controller)' in executor.job_log(r.get_json()['job_id']))
+check('state untouched by diagnose', cluster_state(cid) == 'VALIDATE')
 
 print('== sbatch: an AI-training-shaped batch job through the real scheduler ==')
 CALLS.clear(); TIMEOUTS.clear()

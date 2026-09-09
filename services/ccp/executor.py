@@ -926,16 +926,97 @@ def _filedeploy_ansible(nodes, srcs, dest, log):
 # (kind slurm_deploy) — see slurm.py. Each stage advances clusters.slurm_state
 # via the generic advance_to hook in _run() only on success.
 
-def _slurm_ssh(node, command, log, label=None):
+def _slurm_ssh(node, command, log, label=None, timeout=None):
     """Run one command on a slurm node over key auth, framing its output with
     a per-host header (same '=====' style as ClusterShell) and an exit footer,
     so the job log always says which node — and which check — produced each
     block."""
     log.write(f'===== {node["name"]} ({node["address"]}) : {label or command} =====\n')
-    rc, out = _key_ssh(node['address'], node['ssh_user'], node['ssh_port'], command)
+    kw = {'timeout': timeout} if timeout else {}
+    rc, out = _key_ssh(node['address'], node['ssh_user'], node['ssh_port'], command, **kw)
     log.write(out.rstrip() + '\n')
     log.write(f'[{node["name"]} exit {rc}]\n\n')
     return rc
+
+
+# Everything a person debugging "slurmd would not start" asks for, gathered
+# from one node in one SSH round trip: identity, binaries, service states,
+# journals, the effective unit with drop-ins, every config file, the hardware
+# as slurmd sees it, ports, hosts, GPUs — and, when slurmd is down, a short
+# foreground run that prints the daemon's own fatal. __NAME__ is the CCP
+# inventory name (= NodeName), __CTLN__/__CTL__ the controller-only parts.
+DIAG_SCRIPT = r'''SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo -n"
+sec(){ printf '\n### %s\n' "$*"; }
+sec "host"
+echo "hostname: $(hostname)   inventory name: __NAME__"
+grep -E '^PRETTY_NAME=' /etc/os-release 2>/dev/null
+echo "cpus: $(nproc)   mem: $(awk '/^MemTotal/{printf "%d", $2/1024}' /proc/meminfo) MB   cgroup: $(stat -fc %T /sys/fs/cgroup 2>&1)"
+sec "slurm binaries"
+for b in slurmd slurmctld slurmstepd sbatch srun sinfo; do printf '%-11s %s\n' "$b" "$(command -v $b 2>/dev/null || echo MISSING)"; done
+slurmd -V 2>&1
+sec "services"
+for s in munge slurmd slurmctld; do printf '%-9s active=%-8s enabled=%s\n' "$s" "$($SUDO systemctl is-active $s 2>&1)" "$($SUDO systemctl is-enabled $s 2>&1)"; done
+sec "systemctl status slurmd"; $SUDO systemctl status slurmd --no-pager -l 2>&1 | head -25
+sec "journalctl -u slurmd -n 60"; $SUDO journalctl -u slurmd -n 60 --no-pager 2>&1
+sec "journalctl -u slurmctld -n __CTLN__"; $SUDO journalctl -u slurmctld -n __CTLN__ --no-pager 2>&1
+sec "journalctl -u munge -n 10"; $SUDO journalctl -u munge -n 10 --no-pager 2>&1
+sec "munge round trip"; munge -n 2>&1 | unmunge 2>&1 | head -3
+sec "effective slurmd unit + drop-ins (systemctl cat slurmd)"; $SUDO systemctl cat slurmd 2>&1
+sec "/etc/default/slurmd"; cat /etc/default/slurmd 2>&1
+sec "/etc/slurm"; ls -la /etc/slurm 2>&1
+sec "slurm.conf"; $SUDO cat /etc/slurm/slurm.conf 2>&1
+sec "gres.conf"; $SUDO cat /etc/slurm/gres.conf 2>&1
+sec "cgroup.conf"; $SUDO cat /etc/slurm/cgroup.conf 2>&1
+sec "slurmd -C (hardware as slurmd sees it)"; $SUDO slurmd -C 2>&1 | head -4
+sec "spool and log dirs"; ls -ld /var/spool/slurmd /var/spool/slurmctld /var/log/slurm 2>&1
+sec "slurmd.log tail"; $SUDO tail -n 25 /var/log/slurm/slurmd.log 2>&1
+sec "listening on 6817/6818"; (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep -E ':(6817|6818)\b' || echo "(nothing listening on 6817/6818)"
+sec "/etc/hosts"; cat /etc/hosts 2>&1
+sec "GPU"; nvidia-smi -L 2>&1 | head -8; ls -l /dev/nvidia* 2>&1 | head -4
+if ! $SUDO systemctl is-active -q slurmd 2>/dev/null; then
+  sec "foreground probe (8 s): slurmd -D -vv -N __NAME__ -- the daemon's own reason"
+  $SUDO timeout 8 slurmd -D -vv -N __NAME__ 2>&1 | tail -30
+fi
+__CTL__
+exit 0
+'''
+
+DIAG_CONTROLLER = r'''sec "systemctl status slurmctld"; $SUDO systemctl status slurmctld --no-pager -l 2>&1 | head -25
+sec "slurmctld.log tail"; $SUDO tail -n 25 /var/log/slurm/slurmctld.log 2>&1
+sec "scontrol ping"; scontrol ping 2>&1
+sec "sinfo -N -l"; sinfo -N -l 2>&1
+sec "squeue"; squeue 2>&1
+if ! $SUDO systemctl is-active -q slurmctld 2>/dev/null; then
+  sec "foreground probe (8 s): slurmctld -D -vv as user slurm"
+  $SUDO runuser -u slurm -- timeout 8 slurmctld -D -vv 2>&1 | tail -30
+fi'''
+
+
+def _slurm_diagnose(controller, members, log):
+    """Collect the diagnostics bundle from every member (controller extras on
+    the controller), one '=====' frame per node, so the whole job log can be
+    handed to whoever is debugging. Works in any lifecycle state and changes
+    nothing on the nodes (the foreground probes run only while the daemon is
+    down and are killed after 8 s)."""
+    if not members:
+        log.write('[ccp] no managed members\n')
+        return 2
+    cid = controller['id'] if controller else None
+    log.write(f'[ccp] collecting logs from {len(members)} node(s)'
+              f'{" — controller " + controller["name"] if controller else " — no controller set yet"}\n\n')
+    worst = 0
+    for m in members:
+        is_ctl = m['id'] == cid
+        script = (DIAG_SCRIPT.replace('__NAME__', shlex.quote(m['name']))
+                  .replace('__CTLN__', '40' if is_ctl else '10')
+                  .replace('__CTL__', DIAG_CONTROLLER if is_ctl else ''))
+        worst = max(worst, _slurm_ssh(
+            m, f"bash -s <<'CCPDIAG'\n{script}CCPDIAG\n", log,
+            'diagnostics bundle' + (' (controller)' if is_ctl else ''),
+            timeout=150))
+    log.write(f'DIAGNOSTICS COLLECTED from {len(members)} node(s) — use "Copy log" '
+              'or "Download log" on this page and paste it when asking for help.\n')
+    return worst
 
 
 def _run_slurm_action(job_id, spec, log):
@@ -945,6 +1026,10 @@ def _run_slurm_action(job_id, spec, log):
         return _slurm_report(spec, members, log)
     controller = db.query('SELECT * FROM nodes WHERE id=?',
                           (spec.get('controller_id'),), one=True)
+    if stage == 'diagnose':
+        return _slurm_diagnose(
+            controller if controller and node_eligible(controller) else None,
+            members, log)
     if not controller or not node_eligible(controller):
         log.write('[ccp] controller node is missing or not managed\n')
         return 2
@@ -1209,7 +1294,11 @@ def _run_ansible(job_id, spec, log):
                    ANSIBLE_HOST_KEY_CHECKING='False',
                    ANSIBLE_FORCE_COLOR='0',
                    ANSIBLE_RETRY_FILES_ENABLED='False',
-                   ANSIBLE_LOCAL_TEMP='/tmp/.ansible-ccp')
+                   ANSIBLE_LOCAL_TEMP='/tmp/.ansible-ccp',
+                   # multi-line results (a failed task's msg, the daemon
+                   # diagnostics' stdout_lines) print as readable YAML instead
+                   # of one JSON line full of "\n"
+                   ANSIBLE_CALLBACK_RESULT_FORMAT='yaml')
         log.write(f'[ccp] {" ".join(shlex.quote(c) for c in cmd)}\n\n')
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, cwd=workdir,
                                 stderr=subprocess.STDOUT, text=True, env=env)

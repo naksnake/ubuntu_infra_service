@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block heading %}Job #{{ job.id }}{% endblock %}
-{% block actions %}<a class="btn btn-ghost btn-sm" href="{{ url_for('jobs_page') }}">← All jobs</a>{% endblock %}
+{% block actions %}<a class="btn btn-ghost btn-sm" href="{{ url_for('jobs_page') }}">← All jobs</a>
+<button class="btn btn-ghost btn-sm" onclick="copyLog()" title="Copy the raw job log to the clipboard — paste it when asking for help">Copy log</button>
+<a class="btn btn-ghost btn-sm" href="/api/jobs/{{ job.id }}/log" download title="Save the raw job log as a text file">Download log</a>{% endblock %}
 {% block body %}
 <div class="card">
   <div class="row">
@@ -23,4 +25,26 @@ pollJob({{ job.id }},con,st);
 {% else %}
 api('GET','/api/jobs/{{ job.id }}').then(j=>{renderConsole(con,j.output||'(no output)');}).catch(e=>con.textContent=e.message);
 {% endif %}
+// Copy the RAW log (not the rendered console): always fetched fresh so a
+// still-running job copies everything written so far. Clipboard API needs a
+// secure context, which a LAN http:// deployment is not — fall back to the
+// textarea trick, and to the Download link when even that is blocked.
+async function copyLog(){
+  try{
+    const j=await api('GET','/api/jobs/{{ job.id }}');
+    const t=j.output||'';
+    const ok=await copyText(t);
+    toast(ok?'Log copied ('+t.split('\n').length+' lines) — paste it when asking for help'
+            :'Copy blocked by the browser — use Download log',!ok);
+  }catch(e){toast(e.message,true);}
+}
+async function copyText(t){
+  if(navigator.clipboard&&window.isSecureContext){
+    try{await navigator.clipboard.writeText(t);return true;}catch(e){}
+  }
+  const ta=document.createElement('textarea');ta.value=t;ta.setAttribute('readonly','');
+  ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();
+  let ok=false;try{ok=document.execCommand('copy');}catch(e){}
+  document.body.removeChild(ta);return ok;
+}
 </script>{% endblock %}

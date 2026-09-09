@@ -137,6 +137,16 @@ where each stage maps to jobs on the existing engine:
   BENCHMARK = node-to-node checks run *through Slurm* (`srun`), not loopback;
   REPORT = aggregation of the stored job outputs; CLEANUP = teardown playbook
   (always allowed — it is the recovery path for a configless slurmd).
+- Failure must explain itself. systemd only ever reports "control process
+  exited with error code", so both daemon starts in the deploy playbook are
+  block/rescue: on failure the rescue prints `systemctl status`, the journal,
+  the effective unit with drop-ins and an 8-second foreground run of the
+  daemon (its own fatal on stdout), then fails the host. Independently, the
+  **Collect logs** action (any state, changes nothing) gathers the same bundle
+  plus every config file, ports, hosts and GPUs from every member into one job
+  log, and the job page offers Copy log / Download log so an operator can hand
+  it to whoever is helping. Ansible results print as YAML so multi-line
+  messages stay readable.
 
 Config generation is pure-python from `hardware` rows (`slurm.py`) so it is
 unit-testable without any node.

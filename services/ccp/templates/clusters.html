@@ -64,6 +64,8 @@
       title="Aggregate membership, capacity and lifecycle history into a report">Report</button>
     <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'monitor')"
       title="sinfo / squeue snapshot from the controller">Monitor</button>
+    <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'diagnose')"
+      title="Gather slurmd/slurmctld/munge status, journals, unit files, configs and a foreground run of slurmd from every node into one job log — copy or download it when asking for help. Works in any state, changes nothing.">Collect logs</button>
     <button class="btn btn-sm btn-danger" onclick="slurmCleanup({{ c.id }},'{{ c.name }}')"
       title="Stop and disable slurmd/slurmctld and remove the generated configs">Cleanup</button>
   </div>
