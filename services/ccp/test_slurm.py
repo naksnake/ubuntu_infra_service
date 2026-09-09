@@ -187,6 +187,52 @@ check('slurmctld foreground probe runs as the slurm user (root-owned state files
       'would break the real daemon)',
       'runuser -u slurm -- timeout 8 slurmctld -D -vv' in str(sc['rescue']), sc['rescue'])
 
+print('== GPU device files are verified before anything is changed ==')
+# slurmd waits 20 s for every File= device in gres.conf and then exits; a
+# rebooted node whose driver is not loaded has no /dev/nvidia* at all.
+def _idx(names, prefix):
+    return next((i for i, n in enumerate(names) if n.startswith(prefix)), -1)
+check('gres_devices expands File= ranges per node',
+      slurm.gres_devices(gres) == {
+          'rack0_sled1_gpu': ['/dev/nvidia0', '/dev/nvidia1', '/dev/nvidia2', '/dev/nvidia3'],
+          'rack0_sled2_gpu': ['/dev/nvidia0']}, slurm.gres_devices(gres))
+check('no gres.conf → nothing to verify', slurm.gres_devices('') == {})
+names_plain = [t['name'] for t in _tasks_plain]
+probe_i = _idx(names_plain, 'Probe GPU device files')
+gpu_gate_i = _idx(names_plain, 'Fail when a declared GPU device file is missing')
+check('probe + gate present when GPUs are declared',
+      probe_i > -1 and gpu_gate_i > probe_i, names_plain)
+probe_sh = _tasks_plain[probe_i]['ansible.builtin.shell']
+check('probe warms the driver (nvidia-smi creates the device files) then lists them',
+      'nvidia-smi -L' in probe_sh and 'ls /dev/nvidia[0-9]*' in probe_sh, probe_sh)
+check('probe and gate only touch declared GPU nodes',
+      _tasks_plain[probe_i]['when'] == 'inventory_hostname in ccp_gres_nodes')
+check('declared device files are passed to the play',
+      _docs[0][0]['vars']['ccp_gres_nodes'] == slurm.gres_devices(gres), _docs[0][0]['vars'])
+check('GPU gate precedes every destructive task',
+      gpu_gate_i < _idx(names_plain, 'Install munge and slurm-wlm'), (gpu_gate_i, names_plain))
+gmsg = _tasks_plain[gpu_gate_i]['ansible.builtin.assert']['fail_msg']
+check('gate message names node, missing files, present files and the fix',
+      'gpu_missing_here' in gmsg and 'present now' in gmsg and 'nvidia-persistenced' in gmsg
+      and 'Nothing was changed' in gmsg, gmsg)
+cg_i = _idx(names_plain, 'Write cgroup.conf')
+check('cgroup.conf written with the cgroup plugin disabled (matches linuxproc/none)',
+      cg_i > -1 and 'CgroupPlugin=disabled' in _tasks_plain[cg_i]['ansible.builtin.copy']['content'])
+check('cgroup.conf lands after the install and before slurmd starts',
+      _idx(names_plain, 'Install munge and slurm-wlm') < cg_i < _idx(names_plain, 'Start slurmd on every node'))
+pers_i = _idx(names_plain, 'Keep the NVIDIA device files across reboots')
+check('nvidia-persistenced enabled best-effort on GPU nodes only',
+      pers_i > -1 and _tasks_plain[pers_i].get('failed_when') is False
+      and _tasks_plain[pers_i]['when'] == 'inventory_hostname in ccp_gres_nodes', _tasks_plain[pers_i] if pers_i > -1 else None)
+check("rescue shows this node's gres lines and the NVIDIA device files",
+      '/etc/slurm/gres.conf' in collect_sh and 'ls -l /dev/nvidia[0-9]*' in collect_sh)
+d_nogpu = _yaml.safe_load(slurm.deploy_playbook(conf, '', 'rack0_sled1_gpu'))[0]
+n_nogpu = [t['name'] for t in d_nogpu['tasks']]
+check('no GPUs declared → no probe, no gate, empty map; cgroup.conf still written',
+      not any(n.startswith(('Probe GPU', 'Fail when a declared GPU', 'Keep the NVIDIA')) for n in n_nogpu)
+      and d_nogpu['vars']['ccp_gres_nodes'] == {} and _idx(n_nogpu, 'Write cgroup.conf') > -1, n_nogpu)
+check('cleanup removes cgroup.conf too', '/etc/slurm/cgroup.conf' in slurm.cleanup_playbook())
+
 print('== clean reinstall + version pin ==')
 pb_re = slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu',
                               reinstall=True, version='23.11.4-1.2ubuntu5')
@@ -246,7 +292,8 @@ for label, kw in (('plain', {}), ('reinstall', {'reinstall': True}),
              _yaml.safe_load(slurm.deploy_playbook(conf, gres, 'rack0_sled1_gpu', **kw))[0]['tasks']]
     gates = [i for i, n in enumerate(names)
              if n.startswith('Fail fast when Slurm versions differ')
-             or n.startswith('Fail when the pinned version')]
+             or n.startswith('Fail when the pinned version')
+             or n.startswith('Fail when a declared GPU device file')]
     firsts = [_first(names, d) for d in DESTRUCTIVE]
     firsts = [i for i in firsts if i > -1]
     check(f'{label}: every gate precedes every destructive task',

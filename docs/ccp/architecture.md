@@ -137,6 +137,16 @@ where each stage maps to jobs on the existing engine:
   BENCHMARK = node-to-node checks run *through Slurm* (`srun`), not loopback;
   REPORT = aggregation of the stored job outputs; CLEANUP = teardown playbook
   (always allowed — it is the recovery path for a configless slurmd).
+- Pre-flight also verifies, on every node declared with GPUs, that the
+  `File=` device files in gres.conf exist *now* (after an `nvidia-smi -L`
+  warm-up that recreates them when the driver is installed): slurmd waits
+  20 s for a missing device and then exits, which systemd reports only as
+  "control process exited". A missing device fails the deploy before anything
+  is changed, naming the node, the files and the fix; nvidia-persistenced is
+  enabled where present so the files survive reboots. The deploy writes a
+  cgroup.conf with `CgroupPlugin=disabled` to match the generated
+  linuxproc/none configuration, so slurmd never depends on the cgroup/v2
+  re-parenting that only happens when systemd launches it.
 - Failure must explain itself. systemd only ever reports "control process
   exited with error code", so both daemon starts in the deploy playbook are
   block/rescue: on failure the rescue prints `systemctl status`, the journal,
