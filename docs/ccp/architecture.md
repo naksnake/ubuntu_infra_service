@@ -137,6 +137,19 @@ where each stage maps to jobs on the existing engine:
   BENCHMARK = node-to-node checks run *through Slurm* (`srun`), not loopback;
   REPORT = aggregation of the stored job outputs; CLEANUP = teardown playbook
   (always allowed — it is the recovery path for a configless slurmd).
+- **Automatic deployment** (`slurm_auto` job) is the primary way a cluster is
+  built: facts (fresh hardware + pre-flight from every member, in parallel;
+  an unreachable member stops the run before anything changes) → hostnames
+  (a box that does not answer to its inventory name is renamed; warn-only)
+  → plan (controller: the saved one, else a node without GPUs; install:
+  distro packages pinned to the newest version every node offers, else the
+  same upstream release built from source — also when a node already runs a
+  source build) → generate (GPUs declared only up to the device files that
+  exist right now) → deploy (the built-in playbook) → validate → sbatch.
+  Stages are framed with `##STAGE##` markers and the first failure stops the
+  run. Membership changes and a member finishing onboarding re-run it when
+  the cluster's `auto_deploy` is on; one pipeline per cluster at a time.
+  The single-step actions remain for operators who want them.
 - Pre-flight also verifies, on every node declared with GPUs, that the
   `File=` device files in gres.conf exist *now* (after an `nvidia-smi -L`
   warm-up that recreates them when the driver is installed): slurmd waits

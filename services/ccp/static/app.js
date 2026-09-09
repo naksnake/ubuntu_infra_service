@@ -91,25 +91,49 @@ const SSH_NOISE = [
   /^Warning: Permanently added the \S+ host key for IP address/,
 ];
 
-function renderConsole(el, text) {
+// The stream is tokenized into an ORDERED list of sections (one per
+// '##STAGE## k/N name' marker of the automatic pipeline, plus the untitled
+// lead-in), each holding text blocks and host groups in the order they were
+// written — so playbook output, per-host frames and summaries never get
+// shuffled. `running` marks a stage without an end marker as still running.
+function renderConsole(el, text, running) {
   const raw = String(text == null ? '' : text);
   const lines = raw.split('\n').filter(l => !SSH_NOISE.some(re => re.test(l)));
   const hasHosts = lines.some(l => /^=====.*=====\s*$/.test(l));
-  if (!hasHosts) { el.innerHTML = _colorLines(lines); return; }
+  const hasStages = lines.some(l => /^##STAGE##/.test(l));
+  if (!hasHosts && !hasStages) { el.innerHTML = _colorLines(lines); return; }
 
-  // ── 1. tokenize the raw stream into discrete host objects ──
-  const preamble = [];
-  const groups = [];          // [{name, hosts:[…]}]
-  const byName = new Map();   // host name -> host object (for late exit lines)
-  let curGroup = null, curHost = null;
-
+  // ── 1. tokenize ──
+  const sections = [];          // [{title, num, status, items:[text|group]}]
+  const byName = new Map();     // host name -> latest host object (late exit lines)
+  let sec = null, curGroup = null, curHost = null;
+  const newSection = (title, num) => {
+    sec = { title, num, status: null, items: [] };
+    sections.push(sec); curGroup = null; curHost = null;
+  };
+  newSection(null, '');
+  const lastItem = () => sec.items[sec.items.length - 1];
   const groupFor = name => {
-    let g = groups.find(x => x.name === name);
-    if (!g) { g = { name, hosts: [] }; groups.push(g); }
+    const li = lastItem();
+    if (li && li.type === 'group' && li.name === name) return li;
+    const g = { type: 'group', name, hosts: [] };
+    sec.items.push(g);
     return g;
+  };
+  const textItem = () => {
+    const li = lastItem();
+    if (li && li.type === 'text') return li;
+    const t = { type: 'text', lines: [] };
+    sec.items.push(t);
+    return t;
   };
 
   for (const line of lines) {
+    const sm = /^##STAGE##\s*(?:(\d+\/\d+)\s+)?(.*)$/.exec(line);
+    if (sm) { newSection(sm[2].trim(), sm[1] || ''); continue; }
+    const em = /^##STAGE-END##\s*\S+\s+(PASSED|FAILED)/.exec(line);
+    if (em) { sec.status = em[1]; curHost = null; continue; }
+
     const gm = /^##GROUP##\s*(.*)$/.exec(line);
     if (gm) { curGroup = groupFor(gm[1].trim() || 'ungrouped'); curHost = null; continue; }
 
@@ -117,7 +141,9 @@ function renderConsole(el, text) {
     if (hm) {
       const meta = _parseHostHeader(hm[1]);
       curHost = { ...meta, header: hm[1], logs: [], exit_code: null };
-      (curGroup || (curGroup = groupFor('nodes'))).hosts.push(curHost);
+      // keep filling the open group; a text block in between starts a new one
+      if (!curGroup || lastItem() !== curGroup) curGroup = groupFor(curGroup ? curGroup.name : 'nodes');
+      curGroup.hosts.push(curHost);
       byName.set(meta.host, curHost);
       continue;
     }
@@ -135,47 +161,64 @@ function renderConsole(el, text) {
       }
     }
     if (curHost) curHost.logs.push(line);
-    else preamble.push(line);
+    else textItem().lines.push(line);
   }
 
-  // ── 2. one host object → one independent <details> ──
-  let html = preamble.join('\n').trim() ? `<div>${_colorLines(preamble)}</div>` : '';
-  for (const g of groups) {
-    const stats = g.hosts.map(h => h.exit_code === null
-      ? _statusOf(h.header, h.logs.join('\n'))
-      : (h.exit_code === 0 ? (_statusOf(h.header, '') === 'CHANGED' ? 'CHANGED' : 'SUCCESS')
-                           : 'FAILED'));
-    const tally = {};
-    stats.forEach(s => { tally[s] = (tally[s] || 0) + 1; });
-    const summary = Object.keys(tally).map(k =>
-      `<span class="rstat ${_statCls(k)}">${tally[k]} ${k}</span>`).join(' · ');
-    // static header, not a toggle: it must never wrap/mush the host blocks
-    html += `<div class="rgroup"><div class="rghead">[${esc(g.name)}] ` +
-      `<span class="rcount">${g.hosts.length} host${g.hosts.length === 1 ? '' : 's'}` +
-      `</span> ${summary}</div><div class="rbody">`;
-    g.hosts.forEach((h, i) => {
-      const st = stats[i];
-      const exitLine = h.exit_code === null ? ''
-        : `\n<span class="${h.exit_code === 0 ? 'c-ok' : 'c-err'}">[${esc(h.host)} exit ${h.exit_code}]</span>`;
-      html += `<details class="rhost" ${st !== 'SUCCESS' || g.hosts.length === 1 ? 'open' : ''}>` +
-        `<summary>[${esc(g.name)}] 🌐 ${esc(h.host)}` +
-        (h.addr ? ` (${esc(h.addr)})` : '') +
-        (h.label ? ` <span class="rcount">· ${esc(h.label)}</span>` : '') +
-        ` | STATUS: <span class="rstat ${_statCls(st)}">${st}</span></summary>` +
-        `<pre>${_colorLines(h.logs)}${exitLine}</pre></details>`;
-    });
-    html += '</div></div>';
-  }
+  // ── 2. render in order: sections → items; 1 host = 1 <details> ──
+  const renderItems = items => items.map(it => it.type === 'text'
+    ? (it.lines.join('\n').trim() ? `<div class="rtext">${_colorLines(it.lines)}</div>` : '')
+    : _renderGroup(it)).join('');
+  let html = '';
+  sections.forEach((s, i) => {
+    if (s.title === null) { html += renderItems(s.items); return; }
+    const st = s.status || (running ? 'RUNNING' : 'STOPPED');
+    const last = i === sections.length - 1;
+    const cls = st === 'PASSED' ? 'ok' : (st === 'FAILED' ? 'err' : (st === 'RUNNING' ? 'chg' : ''));
+    html += `<details class="rstage" ${st !== 'PASSED' || last ? 'open' : ''}>` +
+      `<summary><span class="rnum">${esc(s.num)}</span> ${esc(s.title)}` +
+      ` <span class="rstat ${cls}">${st}</span></summary>` +
+      `<div class="rbody">${renderItems(s.items)}</div></details>`;
+  });
   el.innerHTML = html;
+}
+
+// one infrastructure group → static header + one <details> per host
+function _renderGroup(g) {
+  const stats = g.hosts.map(h => h.exit_code === null
+    ? _statusOf(h.header, h.logs.join('\n'))
+    : (h.exit_code === 0 ? (_statusOf(h.header, '') === 'CHANGED' ? 'CHANGED' : 'SUCCESS')
+                         : 'FAILED'));
+  const tally = {};
+  stats.forEach(s => { tally[s] = (tally[s] || 0) + 1; });
+  const summary = Object.keys(tally).map(k =>
+    `<span class="rstat ${_statCls(k)}">${tally[k]} ${k}</span>`).join(' · ');
+  // static header, not a toggle: it must never wrap/mush the host blocks
+  let html = `<div class="rgroup"><div class="rghead">[${esc(g.name)}] ` +
+    `<span class="rcount">${g.hosts.length} host${g.hosts.length === 1 ? '' : 's'}` +
+    `</span> ${summary}</div><div class="rbody">`;
+  g.hosts.forEach((h, i) => {
+    const st = stats[i];
+    const exitLine = h.exit_code === null ? ''
+      : `\n<span class="${h.exit_code === 0 ? 'c-ok' : 'c-err'}">[${esc(h.host)} exit ${h.exit_code}]</span>`;
+    html += `<details class="rhost" ${st !== 'SUCCESS' || g.hosts.length === 1 ? 'open' : ''}>` +
+      `<summary>[${esc(g.name)}] 🌐 ${esc(h.host)}` +
+      (h.addr ? ` (${esc(h.addr)})` : '') +
+      (h.label ? ` <span class="rcount">· ${esc(h.label)}</span>` : '') +
+      ` | STATUS: <span class="rstat ${_statCls(st)}">${st}</span></summary>` +
+      `<pre>${_colorLines(h.logs)}${exitLine}</pre></details>`;
+  });
+  return html + '</div></div>';
 }
 
 function _colorLines(lines) {
   return lines.map(line => {
     if (/^=====.*=====\s*$/.test(line)) return '<span class="c-host">' + esc(line) + '</span>';
-    if (/^\[.*\bexit\s+0\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK|SBATCH) PASSED\b/.test(line) || /^MANAGED\b/.test(line))
+    if (/^\[.*\bexit\s+0\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK|SBATCH|AUTO DEPLOY) PASSED\b/.test(line) || /^MANAGED\b/.test(line))
       return '<span class="c-ok">' + esc(line) + '</span>';
-    if (/^\[.*\bexit\s+([1-9]\d*)\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK|SBATCH) FAILED\b/.test(line) || /^FAILED[:\s]/.test(line) || /\b(fatal|error):/i.test(line) || /not a valid controller|Unable to (contact|determine)/i.test(line))
+    if (/^\[.*\bexit\s+([1-9]\d*)\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK|SBATCH|AUTO DEPLOY) FAILED\b/.test(line) || /^FAILED[:\s]/.test(line) || /\b(fatal|error):/i.test(line) || /not a valid controller|Unable to (contact|determine)/i.test(line))
       return '<span class="c-err">' + esc(line) + '</span>';
+    if (/^\s*WARNING\b/.test(line) || /\bwarning:/i.test(line))
+      return '<span class="c-warn">' + esc(line) + '</span>';
     if (/^\[ccp\]/.test(line) || /^\[\d+\/\d+\]/.test(line) || /^\[verify\]/.test(line) || /^\s+(credentials OK|key installed|command execution OK|node renamed)/.test(line))
       return '<span class="c-info">' + esc(line) + '</span>';
     return esc(line);
@@ -189,7 +232,7 @@ function pollJob(jobId, el, statusEl, onDone) {
     if (stop) return;
     try {
       const j = await api('GET', '/api/jobs/' + jobId);
-      renderConsole(el, j.output || '(waiting for output…)');
+      renderConsole(el, j.output || '(waiting for output…)', j.status === 'running');
       el.scrollTop = el.scrollHeight;
       if (statusEl) {
         statusEl.textContent = j.status + (j.exit_code != null ? ' · exit ' + j.exit_code : '');

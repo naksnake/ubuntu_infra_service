@@ -23,8 +23,10 @@ import shlex
 import tempfile
 import threading
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import db
+import slurm
 import topology
 
 JOBS_DIR = os.environ.get('CCP_JOBS_DIR', '/data/ccp/jobs')
@@ -133,6 +135,8 @@ def _run(job_id, kind, spec):
             rc = _run_hostname(job_id, spec, log)
         elif kind == 'slurm_action':
             rc = _run_slurm_action(job_id, spec, log)
+        elif kind == 'slurm_auto':
+            rc = _run_slurm_auto(job_id, spec, log)
         elif kind == 'filedeploy':
             rc = _run_filedeploy(job_id, spec, log)
         else:
@@ -429,6 +433,14 @@ def _run_onboard(job_id, spec, secret, log):
                            (job_id,), one=True)['created_by']
         hw_job = start_job('hwscan', final_name, {'node_id': node_id}, creator)
         log.write(f'[ccp] queued hardware discovery (job {hw_job})\n')
+        # a node that was assigned to a Slurm cluster before it became managed
+        # (Discovery import, re-onboarding) joins the cluster by itself
+        cluster_id = db.query('SELECT cluster_id FROM nodes WHERE id=?',
+                              (node_id,), one=True)['cluster_id']
+        if cluster_id:
+            aj = maybe_auto_deploy(cluster_id, creator, f'{final_name} became managed')
+            if aj:
+                log.write(f'[ccp] cluster auto-deploy started (job {aj})\n')
         return 0
     except Exception as exc:
         # never leave the row stuck in 'onboarding'
@@ -581,6 +593,58 @@ fi
 if command -v ibstat >/dev/null 2>&1; then ibstat -l 2>/dev/null | sed 's/^/ib=/'; fi
 echo CCP_FACTS_END
 '''
+
+# Pre-flight facts for the automatic Slurm pipeline, appended to FACT_SCRIPT:
+# release, installed Slurm, the distro's candidates, and the GPU device files
+# (after an nvidia-smi warm-up that recreates them when the driver is
+# installed — slurmd waits 20 s for each declared file and then exits).
+PREFLIGHT_SCRIPT = FACT_SCRIPT + r'''
+echo CCP_PRE_BEGIN
+if [ -r /etc/os-release ]; then . /etc/os-release; echo "os_id=${ID:-}"; echo "os_version=${VERSION_ID:-}"; fi
+echo "slurm_installed=$(slurmd -V 2>/dev/null)"
+apt-cache madison slurm-wlm 2>/dev/null | awk -F'|' '{gsub(/ /, "", $2); print "slurm_avail="$2}'
+if command -v nvidia-smi >/dev/null 2>&1; then nvidia-smi -L >/dev/null 2>&1; fi
+ls /dev/nvidia[0-9]* 2>/dev/null | sed 's/^/nvidia_dev=/'
+echo "cgroup=$(stat -fc %T /sys/fs/cgroup 2>/dev/null)"
+echo CCP_PRE_END
+'''
+
+
+def parse_preflight(text):
+    """CCP_PRE_BEGIN … CCP_PRE_END key=value lines → dict (lists for the
+    repeatable keys). A missing section yields empty defaults."""
+    raw, inside = {}, False
+    for line in text.splitlines():
+        line = line.strip()
+        if line == 'CCP_PRE_BEGIN':
+            inside = True
+        elif line == 'CCP_PRE_END':
+            inside = False
+        elif inside and '=' in line:
+            k, _, v = line.partition('=')
+            raw.setdefault(k, []).append(v.strip())
+
+    def one(k):
+        return (raw.get(k) or [''])[0]
+    return {'os_id': one('os_id'), 'os_version': one('os_version'),
+            'slurm_installed': one('slurm_installed'),
+            'slurm_avail': [v for v in raw.get('slurm_avail', []) if v],
+            'nvidia_dev': [v for v in raw.get('nvidia_dev', []) if v],
+            'cgroup': one('cgroup')}
+
+
+def _collect_node_facts(node, script=None):
+    """Run a facts script on one node (locally or over the CCP key)."""
+    script = script or FACT_SCRIPT
+    if node['conn'] == 'local':
+        try:
+            p = subprocess.run(['/bin/sh', '-c', script], capture_output=True,
+                               text=True, timeout=ONBOARD_STEP_TIMEOUT)
+            return p.returncode, (p.stdout or '') + (p.stderr or '')
+        except subprocess.TimeoutExpired:
+            return -1, 'timed out'
+    return _key_ssh(node['address'], node['ssh_user'], node['ssh_port'], script)
+
 
 _GPU_PCI_RE = re.compile(r'\b(nvidia|amd|ati|instinct|habana|gaudi)\b', re.I)
 
@@ -1250,6 +1314,254 @@ def _slurm_report(spec, members, log):
 
 
 # ── ansible ──────────────────────────────────────────────────────────────────
+
+# ── automatic Slurm deployment ───────────────────────────────────────────────
+# One job takes a Slurm cluster from "nodes assigned" to "a batch job ran":
+# facts → hostnames → plan (controller, install method) → generate → deploy →
+# validate → sbatch. Stages are framed with ##STAGE## / ##STAGE-END## markers
+# so the console shows a step list; the first failing stage stops the run and
+# its own output (gates, rescues, PASSED/FAILED lines) says why.
+
+AUTO_STAGES = ('facts', 'hostnames', 'plan', 'generate', 'deploy', 'validate', 'sbatch')
+
+
+def _ver_key(v):
+    """Sort key for version strings: numeric runs compare as integers."""
+    return [int(x) if x.isdigit() else x for x in re.split(r'(\d+)', v)]
+
+
+def auto_deploy_running(cluster_id):
+    """Id of a running automatic/deploy job for this cluster, else None."""
+    for j in db.query("SELECT id, spec FROM jobs WHERE status='running' "
+                      "AND kind IN ('slurm_auto', 'slurm_deploy')"):
+        try:
+            if json.loads(j['spec']).get('cluster_id') == cluster_id:
+                return j['id']
+        except ValueError:
+            continue
+    return None
+
+
+def start_auto_deploy(cluster, node_ids, who, reinstall=False, run_tests=True, reason=''):
+    """Queue the automatic pipeline with the cluster's saved settings."""
+    spec = {'cluster_id': cluster['id'], 'node_ids': list(node_ids),
+            'controller_id': cluster['controller_node_id'],
+            'install_from': cluster['install_from'] or 'auto',
+            'version': cluster['slurm_version'] or '',
+            'tarball_url': cluster['tarball_url'] or '',
+            'reinstall': bool(reinstall), 'run_tests': bool(run_tests),
+            'reason': reason, 'advance_to': 'VALIDATE'}
+    return start_job('slurm_auto', cluster['name'], spec, who)
+
+
+def maybe_auto_deploy(cluster_id, who, reason):
+    """Membership changed: re-run the pipeline when the cluster asks for it
+    (kind slurm, auto_deploy on, at least one managed member, nothing already
+    running). Returns the job id or None."""
+    c = db.query('SELECT * FROM clusters WHERE id=?', (cluster_id,), one=True)
+    if not c or c['kind'] != 'slurm' or not c['auto_deploy']:
+        return None
+    members = db.query("SELECT id FROM nodes WHERE cluster_id=? AND "
+                       "(state='managed' OR conn='local') ORDER BY name", (cluster_id,))
+    if not members or auto_deploy_running(cluster_id):
+        return None
+    return start_auto_deploy(c, [m['id'] for m in members], who, reason=reason)
+
+
+def _run_slurm_auto(job_id, spec, log):
+    cid = spec.get('cluster_id')
+    c = db.query('SELECT * FROM clusters WHERE id=?', (cid,), one=True)
+    if not c or c['kind'] != 'slurm':
+        log.write('[ccp] not a Slurm cluster\n')
+        return 2
+    members = _resolve_nodes(spec.get('node_ids', []), log)
+    if not members:
+        log.write('[ccp] no managed members\n')
+        return 2
+    stages = list(AUTO_STAGES if spec.get('run_tests', True) else AUTO_STAGES[:-1])
+    total = len(stages)
+    ids = [m['id'] for m in members]
+    log.write(f'[ccp] automatic Slurm deployment for {c["name"]}: {len(members)} node(s)'
+              f'{" — " + spec["reason"] if spec.get("reason") else ""}\n')
+
+    def stage(name, title):
+        log.write(f'\n##STAGE## {stages.index(name) + 1}/{total} {name} — {title}\n')
+
+    def done(name, ok, hint=''):
+        log.write(f'##STAGE-END## {name} {"PASSED" if ok else "FAILED"}\n')
+        if not ok:
+            log.write(f'\nAUTO DEPLOY FAILED at stage {name}'
+                      f'{": " + hint if hint else ""}\n')
+
+    # 1. facts — fresh hardware + pre-flight from every member, in parallel
+    stage('facts', f'hardware and pre-flight facts from {len(members)} node(s)')
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(
+            lambda m: (m,) + tuple(_collect_node_facts(m, PREFLIGHT_SCRIPT)), members))
+    facts, unreachable = {}, []
+    for m, rc, out in results:
+        log.write(f'===== {m["name"]} ({m["address"]}) : facts =====\n')
+        if 'CCP_FACTS_BEGIN' not in out:
+            log.write((out.rstrip() if out.strip() else '(no output)') + '\n')
+            log.write(f'[{m["name"]} exit {rc if rc else 1}]\n\n')
+            unreachable.append(m['name'])
+            continue
+        hw, pre = parse_facts(out), parse_preflight(out)
+        save_hardware(m['id'], hw)
+        facts[m['id']] = (hw, pre)
+        log.write(f'hostname={hw["os_hostname"] or "?"}  os={hw["os_name"] or "?"}  '
+                  f'cpus={hw["cpu_cores"] or "?"}  mem_mb={hw["mem_mb"] or "?"}  '
+                  f'gpus={hw["gpu_count"]} (device files now: {len(pre["nvidia_dev"])})\n'
+                  f'slurm installed: {pre["slurm_installed"] or "none"}  |  distro offers: '
+                  f'{", ".join(pre["slurm_avail"]) or "none"}  |  cgroup: {pre["cgroup"] or "?"}\n'
+                  f'[{m["name"]} exit 0]\n\n')
+    if unreachable:
+        done('facts', False, f'no facts from {", ".join(unreachable)} — fix SSH/power or '
+             'remove the node from the cluster, then run again')
+        return 1
+    db.execute("UPDATE clusters SET slurm_state='DISCOVER' WHERE id=?", (cid,))
+    done('facts', True)
+
+    # 2. hostnames — the box must answer to its inventory name. Warn-only:
+    #    slurmd is pinned with -N and SlurmctldHost is resolved from facts.
+    stage('hostnames', 'every node answers to its inventory name')
+    for m in members:
+        real = facts[m['id']][0].get('os_hostname') or ''
+        if m['conn'] == 'local' or not real or real == m['name']:
+            log.write(f'  {m["name"]}: ok\n')
+            continue
+        log.write(f'  {m["name"]}: the box calls itself {real!r} — setting the hostname …\n')
+        rc, out = _key_ssh(m['address'], m['ssh_user'], m['ssh_port'],
+                           _hostname_script(m['name']))
+        if rc == 0 and f'CCP_HOSTNAME_OK {m["name"]}' in out:
+            log.write('    hostname set and verified\n')
+        else:
+            tail = ' / '.join(out.strip().splitlines()[-3:])
+            log.write(f'    WARNING: hostname not changed (exit {rc}: {tail}) — continuing; '
+                      'Slurm identity is pinned per node and does not depend on it\n')
+    done('hostnames', True)
+
+    # 3. plan — controller and install method, decided from the facts
+    stage('plan', 'controller and install method')
+    ctl_id = spec.get('controller_id') or c['controller_node_id']
+    controller = next((m for m in members if m['id'] == ctl_id), None)
+    if controller:
+        how = 'kept from the cluster settings'
+    else:
+        no_gpu = [m for m in members if not facts[m['id']][0]['gpu_count']]
+        controller = sorted(no_gpu or members, key=lambda m: m['name'])[0]
+        how = ('auto — a node without GPUs, so accelerators stay free for jobs'
+               if no_gpu else 'auto — first member by name (every node has GPUs)')
+    log.write(f'  controller: {controller["name"]} ({how})\n')
+
+    install_from = spec.get('install_from') or c['install_from'] or 'auto'
+    version = ((spec.get('version') if spec.get('version') is not None
+                else c['slurm_version']) or '').strip()
+    tarball = (spec.get('tarball_url') or c['tarball_url'] or '').strip()
+    avail = {m['id']: facts[m['id']][1]['slurm_avail'] for m in members}
+    inst = {m['id']: facts[m['id']][1]['slurm_installed'] for m in members}
+    common = set(avail[ids[0]])
+    for i in ids[1:]:
+        common &= set(avail[i])
+
+    def from_distro(m):          # is the installed build one the distro offers?
+        v = inst[m['id']].split()[-1] if inst[m['id']] else ''
+        return not v or any(cand.startswith(v) for cand in avail[m['id']])
+    custom = [m['name'] for m in members if not from_distro(m)]
+    for m in members:
+        pre = facts[m['id']][1]
+        log.write(f'  {m["name"]}: {pre["os_id"] or "?"} {pre["os_version"] or "?"}, slurm '
+                  f'{inst[m["id"]] or "not installed"}, distro offers '
+                  f'{", ".join(avail[m["id"]]) or "none"}\n')
+    if install_from == 'auto':
+        if common and not custom:
+            install_from = 'apt'
+            if version and version not in common:
+                log.write(f'  ignoring version {version}: not offered by every node\n')
+                version = ''
+            version = version or sorted(common, key=_ver_key)[-1]
+            log.write(f'  install: distro packages pinned to {version} — the newest '
+                      'version every node can install\n')
+        else:
+            install_from = 'source'
+            if version and not re.fullmatch(r'\d+\.\d+\.\d+', version):
+                log.write(f'  ignoring version {version}: a source build takes an '
+                          'upstream release like 25.11.8\n')
+                version = ''
+            version = version or slurm.SOURCE_DEFAULT_VERSION
+            why = (f'{", ".join(custom)} already run{"s" if len(custom) == 1 else ""} a '
+                   'source-built Slurm, which distro packages must not shadow' if custom
+                   else 'no distro version exists on every node (different Ubuntu '
+                        'releases), so the same release is built everywhere')
+            log.write(f'  install: build slurm {version} from source — {why}\n')
+    else:
+        if install_from == 'source':
+            version = version or slurm.SOURCE_DEFAULT_VERSION
+        log.write(f'  install: {install_from}{" " + version if version else ""} '
+                  '(cluster setting)\n')
+    if tarball:
+        log.write(f'  tarball: {tarball}\n')
+    reinstall = bool(spec.get('reinstall'))
+    if reinstall:
+        log.write('  clean reinstall requested: Slurm/munge config and state are purged first\n')
+    done('plan', True)
+
+    # 4. generate — from the facts just saved; GPUs only where device files exist
+    stage('generate', 'slurm.conf and gres.conf from the fresh facts')
+    marks = ','.join('?' for _ in ids)
+    hw_rows = {r['node_id']: dict(r) for r in db.query(
+        f'SELECT * FROM hardware WHERE node_id IN ({marks})', tuple(ids))}
+    verified = {m['id']: len(facts[m['id']][1]['nvidia_dev']) for m in members}
+    conf, gres, warnings = slurm.generate(c['name'], members, controller, hw_rows,
+                                          verified_gpus=verified)
+    for w in warnings:
+        log.write(f'  WARNING: {w}\n')
+    db.execute('UPDATE clusters SET slurm_conf=?, gres_conf=?, controller_node_id=? '
+               'WHERE id=?', (conf, gres, controller['id'], cid))
+    for line in conf.splitlines():
+        if line.startswith(('SlurmctldHost=', 'NodeName=', 'PartitionName=')):
+            log.write(f'  {line}\n')
+    log.write('  gres.conf:\n' + ''.join(f'    {l}\n' for l in gres.splitlines()
+                                        if not l.startswith('#'))
+              if gres else '  gres.conf: none (no GPU declared)\n')
+    done('generate', True)
+
+    # 5. deploy — the built-in playbook; its gates and rescues explain failures
+    stage('deploy', f'built-in playbook, {install_from}'
+          f'{" " + version if version else ""}{", clean reinstall" if reinstall else ""}')
+    playbook = slurm.deploy_playbook(conf, gres, controller['name'], reinstall=reinstall,
+                                     version=version or None, install_from=install_from,
+                                     tarball_url=tarball or None)
+    dspec = {'node_ids': ids, 'playbook': playbook, 'extra_vars': ''}
+    if install_from == 'source':
+        dspec['timeout'] = 3600
+    rc = _run_ansible(job_id, dspec, log)
+    if rc != 0:
+        done('deploy', False, 'the failed task above says why — a gate names the fix, '
+             'a daemon failure carries its own journal')
+        return rc
+    db.execute("UPDATE clusters SET slurm_state='DEPLOY' WHERE id=?", (cid,))
+    done('deploy', True)
+
+    # 6./7. validate, then a batch job through the real scheduler
+    for name, title, hint in (
+            ('validate', 'sinfo + srun across every node',
+             'nodes did not register or srun failed — run Collect logs'),
+            ('sbatch', 'an AI-training-shaped batch job through the scheduler',
+             'the scheduler is up but the batch job did not complete — see its output above')):
+        if name not in stages:
+            continue
+        stage(name, title)
+        rc = _run_slurm_action(job_id, {'stage': name, 'node_ids': ids, 'cluster_id': cid,
+                                        'controller_id': controller['id']}, log)
+        if rc != 0:
+            done(name, False, hint)
+            return rc
+        done(name, True)
+    log.write(f'\nAUTO DEPLOY PASSED — {c["name"]}: {len(members)} node(s), controller '
+              f'{controller["name"]}, slurm {version or "(distro default)"} via {install_from}\n')
+    return 0
+
 
 def _run_ansible(job_id, spec, log):
     nodes = _resolve_nodes(spec.get('node_ids', []), log)

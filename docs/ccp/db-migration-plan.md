@@ -87,6 +87,21 @@ Note: SQLite `ALTER TABLE ADD COLUMN` cannot add a foreign key that is
 enforced retroactively in older versions; membership integrity is enforced in
 application code (cluster delete clears `nodes.cluster_id`).
 
+## M5 — automatic deployment settings (Clusters redesign)
+
+Additive `ALTER TABLE clusters ADD COLUMN`, applied when `auto_deploy` is
+missing:
+
+| column | type | default | meaning |
+|---|---|---|---|
+| `auto_deploy` | INTEGER | 1 | re-run the pipeline when membership changes / a member finishes onboarding |
+| `install_from` | TEXT | `'auto'` | `auto` (decide from the nodes' facts) / `apt` / `source` |
+| `slurm_version` | TEXT | `''` | apt pin or upstream release, per `install_from` |
+| `tarball_url` | TEXT | `''` | local mirror for the source tarball |
+
+No data migration: existing Slurm clusters get auto-deploy on with automatic
+install selection, which is what the one-click button uses.
+
 ## Deprecations (no DDL)
 
 - `scripts.kind='playbook'`: rows are kept and remain runnable; the API stops

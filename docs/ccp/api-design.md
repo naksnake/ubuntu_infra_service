@@ -69,7 +69,11 @@ All four mutations return `{"job_id": N}`; progress is the normal job log.
 |---|---|---|
 | `POST /api/clusters/<id>/slurm/generate` `{controller_node_id}` | operator | generate + store slurm.conf/gres.conf from `hardware`; returns both texts for preview |
 | `POST /api/clusters/<id>/slurm/deploy` | operator | run the built-in deployment playbook via the Ansible engine → `{job_id}` |
-| `POST /api/clusters/<id>/slurm/action` `{stage}` | operator | run a lifecycle stage: `discover`, `validate`, `benchmark`, `monitor`, `cleanup` → `{job_id}`; advances `slurm_state` on success |
+| `POST /api/clusters/<id>/slurm/action` `{stage}` | operator | run a lifecycle stage: `discover`, `validate`, `sbatch`, `benchmark`, `report`, `monitor`, `diagnose` (collect logs, any state), `cleanup` → `{job_id}`; advances `slurm_state` on success |
+| `POST /api/clusters/<id>/slurm/auto` `{reinstall?, run_tests?}` | operator | **automatic deployment**: one `slurm_auto` job — facts → hostnames → plan → generate → deploy → validate → sbatch — using the cluster's saved settings → `{job_id}`; `409` while one is running |
+| `PATCH /api/clusters/<id>` `{auto_deploy?, install_from?, slurm_version?, tarball_url?, controller_node_id?, description?}` | operator | cluster settings the pipeline reads; `install_from` ∈ auto/apt/source, validated like deploy |
+| `POST /api/clusters/<id>/nodes`, `DELETE /api/clusters/<id>/nodes/<nid>` | operator | now return `{ok, job_id}`: when the cluster is Slurm with `auto_deploy` on, the pipeline is re-run and its job id returned |
+| `GET /api/jobs/<id>/log` | viewer | raw job log as a text attachment |
 
 ## New — Ansible sources
 

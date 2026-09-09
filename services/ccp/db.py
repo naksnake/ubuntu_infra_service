@@ -64,6 +64,12 @@ CREATE TABLE IF NOT EXISTS clusters (
     controller_node_id INTEGER,
     slurm_conf   TEXT NOT NULL DEFAULT '',
     gres_conf    TEXT NOT NULL DEFAULT '',
+    -- automatic deployment (M5): re-run the pipeline when membership changes,
+    -- and how Slurm is installed (auto = decide from the nodes' facts)
+    auto_deploy   INTEGER NOT NULL DEFAULT 1,
+    install_from  TEXT NOT NULL DEFAULT 'auto',   -- auto | apt | source
+    slurm_version TEXT NOT NULL DEFAULT '',
+    tarball_url   TEXT NOT NULL DEFAULT '',
     created_by   TEXT NOT NULL DEFAULT '',
     created_at   INTEGER NOT NULL
 );
@@ -218,6 +224,15 @@ def init_db():
     ncols = [r['name'] for r in conn.execute('PRAGMA table_info(nodes)')]
     if 'cluster_id' not in ncols:
         conn.execute('ALTER TABLE nodes ADD COLUMN cluster_id INTEGER')
+        conn.commit()
+
+    # M5 — automatic Slurm deployment settings on the cluster.
+    ccols = [r['name'] for r in conn.execute('PRAGMA table_info(clusters)')]
+    if 'auto_deploy' not in ccols:
+        conn.execute('ALTER TABLE clusters ADD COLUMN auto_deploy INTEGER NOT NULL DEFAULT 1')
+        conn.execute("ALTER TABLE clusters ADD COLUMN install_from TEXT NOT NULL DEFAULT 'auto'")
+        conn.execute("ALTER TABLE clusters ADD COLUMN slurm_version TEXT NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE clusters ADD COLUMN tarball_url TEXT NOT NULL DEFAULT ''")
         conn.commit()
 
     # A worker restart aborts any in-flight onboarding thread; reset those

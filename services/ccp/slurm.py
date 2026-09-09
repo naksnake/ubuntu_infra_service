@@ -111,12 +111,15 @@ def _node_line(node, hw, gpus=None):
     return ' '.join(parts)
 
 
-def generate(cluster_name, members, controller, hardware_by_node):
+def generate(cluster_name, members, controller, hardware_by_node, verified_gpus=None):
     """Build (slurm_conf, gres_conf, warnings).
 
     members: node rows (managed members, controller included — lab clusters
     typically run slurmd on the controller too). controller: node row.
-    hardware_by_node: {node_id: hardware row or None}."""
+    hardware_by_node: {node_id: hardware row or None}.
+    verified_gpus: optional {node_id: number of /dev/nvidia* files present
+    right now}; a node is never declared with more GPUs than that, because
+    slurmd waits 20 s for each declared device file and then exits."""
     warnings = []
     node_lines, gres_lines = [], []
     any_gpu = False
@@ -134,6 +137,15 @@ def generate(cluster_name, members, controller, hardware_by_node):
                 'device files and the node would never come up. Install the '
                 'driver, rescan the hardware, then regenerate.')
             gpus = 0
+        if (gpus and verified_gpus is not None and n['id'] in verified_gpus
+                and verified_gpus[n['id']] < gpus):
+            present = verified_gpus[n['id']]
+            warnings.append(
+                f'{n["name"]}: {gpus} GPU(s) recorded but only {present} /dev/nvidia* '
+                f'device file(s) exist right now — declaring {present}. The driver is '
+                'probably not loaded since a reboot (nvidia-persistenced keeps the '
+                'files); fix it and run the deployment again to get the GPUs back.')
+            gpus = present
         node_lines.append(_node_line(n, hw, gpus))
         if gpus:
             any_gpu = True

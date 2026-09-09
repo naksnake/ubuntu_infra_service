@@ -53,20 +53,34 @@ same credential-first flow.
   state_detail on failure.
 - The old free-form "Add node" card is demoted to the manual-add flow above.
 
-### Clusters (new)
-Left: cluster list with kind + member counts. Right, per cluster: member
-table (add/remove from managed nodes), **Run on this cluster** shortcuts
-(prefills ClusterShell/Ansible target), and for `kind=slurm` the lifecycle
-strip:
+### Clusters (redesigned: the cluster deploys itself)
+One card per cluster: member table (add/remove from managed nodes), **Run on
+this cluster** shortcuts (prefills ClusterShell/Ansible target), and for
+`kind=slurm`:
 
 ```
 INIT ▸ DISCOVER ▸ DEPLOY ▸ VALIDATE ▸ BENCHMARK ▸ REPORT ▸ MONITOR ▸ CLEANUP
-        [Rescan]   [Preview conf][Deploy]  [Validate]  [Run]           [Teardown]
+[▶ Deploy Slurm automatically]  ☑ auto-deploy when members change
+last run: job #42 · success · slurm_auto · 09 Sep 10:12
+▸ Settings & manual steps
 ```
 
-Each button queues a job and links to its log; the strip highlights
-`slurm_state`. slurm.conf/gres.conf preview is a read-only modal with a
-regenerate button (controller selection dropdown = managed members).
+The primary action is one button. It queues a single `slurm_auto` job that
+scans hardware, fixes hostnames, picks the controller (a node without GPUs is
+preferred) and the install method (distro packages when every node offers the
+same version, otherwise the same upstream release built from source on every
+node), generates the configs, deploys, validates and runs the sbatch test.
+The job page renders it as a numbered step list; the first failing stage
+stops the run and carries its own reason. With *auto-deploy when members
+change* on (the default), adding or removing a managed node, or a node in the
+cluster finishing onboarding, re-runs the pipeline so the change is scheduled.
+
+Everything that used to be a row of buttons lives in the collapsed
+*Settings & manual steps* panel: controller (default auto), install mode,
+version, tarball mirror (saved on the cluster, `PATCH /api/clusters/<id>`),
+clean-reinstall, and the single steps Discover · Generate config · Deploy ·
+Validate · sbatch test · Benchmark · Report · Monitor · Collect logs · Cleanup.
+slurm.conf/gres.conf preview stays a read-only modal.
 
 ### Rack View (new)
 CSS-grid racks generated from `rack`/`sled` columns — no drawing, no config.

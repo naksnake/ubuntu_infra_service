@@ -152,6 +152,7 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
 .console .c-ok{color:#63d67f;font-weight:700}
 .console .c-err{color:#ff9a92;font-weight:700}
 .console .c-info{color:#8b98a9}
+.console .c-warn{color:#e5c15a}
 /* console goes full width and only caps height when it is a live log pane */
 .console{max-width:none}
 
@@ -176,6 +177,25 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
   color:#d7e0ea;line-height:1.5;overflow-x:auto}
 .rstat{font-weight:700;letter-spacing:.03em}
 .rstat.ok{color:#63d67f}.rstat.err{color:#ff9a92}.rstat.chg{color:#e5c15a}
+/* automatic-pipeline stages: one collapsible per stage, in order */
+.rstage{border:1px solid var(--line);border-radius:8px;margin:0 0 10px;background:var(--panel)}
+.rstage > summary{cursor:pointer;padding:8px 12px;font-family:var(--mono);font-size:12px;
+  font-weight:700;color:#8fb7ff;list-style:none;display:flex;gap:8px;align-items:center}
+.rstage > summary::-webkit-details-marker{display:none}
+.rstage > summary::before{content:'▸';color:var(--muted);font-size:10px}
+.rstage[open] > summary::before{content:'▾'}
+.rstage .rnum{color:var(--muted);font-weight:600}
+.rstage > .rbody{padding:10px 12px;border-top:1px solid var(--line)}
+.rtext{white-space:pre-wrap}
+/* Clusters page: the one-click bar and the collapsed advanced panel */
+.autobar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:10px 0 6px}
+.autobar .lastrun{font-size:12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+details.advanced{margin:4px 0 12px}
+details.advanced > summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);
+  list-style:none;padding:4px 0}
+details.advanced > summary::-webkit-details-marker{display:none}
+details.advanced > summary::before{content:'▸ ';color:var(--muted)}
+details.advanced[open] > summary::before{content:'▾ '}
 .rcount{color:var(--muted);font-weight:400}
 
 /* file / target pick lists */
