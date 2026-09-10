@@ -87,6 +87,139 @@ def _finish(job_id, status, exit_code):
                (status, exit_code, int(time.time()), job_id))
 
 
+# ── job history clean-up ─────────────────────────────────────────────────────
+# Job rows are small; the log files are not (a playbook run is easily hundreds
+# of KB). Deleting a job therefore always means row + log file, running jobs
+# are never touched (their thread is still writing), and an optional retention
+# prunes old history by itself so the panel never fills the disk.
+
+JOB_RETENTION_DAYS = int(os.environ.get('CCP_JOB_RETENTION_DAYS', '0'))   # 0 = keep forever
+JOB_RETENTION_KEEP = int(os.environ.get('CCP_JOB_RETENTION_KEEP', '0'))   # newest N always kept
+
+
+def jobs_stats():
+    """Counts per status plus what the job logs occupy on disk."""
+    by = {r['status']: r['c'] for r in
+          db.query('SELECT status, COUNT(*) AS c FROM jobs GROUP BY status')}
+    files = size = 0
+    try:
+        for name in os.listdir(JOBS_DIR):
+            if name.endswith('.log'):
+                try:
+                    size += os.path.getsize(os.path.join(JOBS_DIR, name))
+                    files += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    oldest = db.query('SELECT MIN(created_at) AS t FROM jobs', one=True)['t']
+    return {'total': sum(by.values()), 'running': by.get('running', 0),
+            'success': by.get('success', 0), 'failed': by.get('failed', 0),
+            'log_files': files, 'log_bytes': size, 'oldest_at': oldest,
+            'retention_days': JOB_RETENTION_DAYS, 'retention_keep': JOB_RETENTION_KEEP}
+
+
+def _remove_log(job_id):
+    """Delete one job's log file; returns the bytes freed (0 when absent)."""
+    p = _log_path(job_id)
+    try:
+        size = os.path.getsize(p)
+        os.remove(p)
+        return size
+    except OSError:
+        return 0
+
+
+def delete_job(job_id):
+    """Delete one job: row and log file. Returns False (nothing deleted) while
+    the job is still running — its thread would keep writing into a file
+    nobody can see any more."""
+    job = db.query('SELECT status FROM jobs WHERE id=?', (job_id,), one=True)
+    if job and job['status'] == 'running':
+        return False
+    db.execute('DELETE FROM jobs WHERE id=?', (job_id,))
+    _remove_log(job_id)
+    return True
+
+
+def cleanup_jobs(older_than_days=None, status='finished', kinds=None, keep_last=0,
+                 orphans=True, dry_run=False):
+    """Bulk history clean-up. Running jobs are never touched.
+
+    status: 'finished' (success + failed), 'failed' or 'success'.
+    older_than_days: only jobs that finished (or, if never finished, started)
+      at least that many days ago; None/0 = any age.
+    kinds: restrict to these job kinds. keep_last: the newest N matching jobs
+      survive regardless. orphans: also remove *.log files no job row refers
+      to (left behind by deletes before logs were cleaned up with their rows).
+    dry_run: only report what would be deleted.
+    Returns {'deleted', 'orphans_removed', 'bytes_freed', 'dry_run'}."""
+    clauses, params = ["status != 'running'"], []
+    if status in ('failed', 'success'):
+        clauses.append('status = ?')
+        params.append(status)
+    if older_than_days:
+        clauses.append('COALESCE(finished_at, created_at) < ?')
+        params.append(int(time.time()) - int(older_than_days) * 86400)
+    if kinds:
+        clauses.append(f"kind IN ({','.join('?' for _ in kinds)})")
+        params += list(kinds)
+    rows = db.query(f"SELECT id FROM jobs WHERE {' AND '.join(clauses)} ORDER BY id DESC",
+                    tuple(params))
+    ids = [r['id'] for r in rows][max(0, int(keep_last or 0)):]
+    freed = 0
+    for jid in ids:
+        try:
+            freed += os.path.getsize(_log_path(jid))
+        except OSError:
+            pass
+    orphan_files = []
+    if orphans:
+        known = {r['id'] for r in db.query('SELECT id FROM jobs')}
+        try:
+            for name in os.listdir(JOBS_DIR):
+                stem = name[:-4] if name.endswith('.log') else ''
+                if stem.isdigit() and int(stem) not in known:
+                    p = os.path.join(JOBS_DIR, name)
+                    orphan_files.append(p)
+                    try:
+                        freed += os.path.getsize(p)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    result = {'deleted': len(ids), 'orphans_removed': len(orphan_files),
+              'bytes_freed': freed, 'dry_run': bool(dry_run)}
+    if dry_run:
+        return result
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        db.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?' for _ in chunk)})",
+                   tuple(chunk))
+    for jid in ids:
+        _remove_log(jid)
+    for p in orphan_files:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return result
+
+
+def prune_by_retention():
+    """Automatic clean-up (CCP_JOB_RETENTION_DAYS > 0): finished jobs older
+    than the retention go, the newest CCP_JOB_RETENTION_KEEP stay. Runs when a
+    job starts, so a busy panel prunes itself; never raises."""
+    if JOB_RETENTION_DAYS <= 0:
+        return None
+    try:
+        return cleanup_jobs(older_than_days=JOB_RETENTION_DAYS,
+                            keep_last=JOB_RETENTION_KEEP, orphans=False)
+    except Exception as exc:                       # noqa: BLE001 — never block a job
+        sys.stderr.write(f'[ccp] retention prune failed: {exc}\n')
+        return None
+
+
 # Secrets (onboarding passwords) ride alongside a job in process memory only —
 # spec is persisted to the jobs table, secrets never are. The job thread pops
 # its secret on start; anything left over (thread never started) is dropped
@@ -100,6 +233,7 @@ def start_job(kind, target, spec, created_by, secret=None):
 
     `secret` (e.g. an onboarding password) is kept in memory for the job
     thread and is never serialized into the persisted spec."""
+    prune_by_retention()
     job_id = db.execute(
         'INSERT INTO jobs (kind, target, spec, status, created_by, created_at) '
         'VALUES (?,?,?,?,?,?)',

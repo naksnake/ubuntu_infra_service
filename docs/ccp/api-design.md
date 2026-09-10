@@ -68,6 +68,9 @@ All four mutations return `{"job_id": N}`; progress is the normal job log.
 | Endpoint | Role | Purpose |
 |---|---|---|
 | `GET /api/jobs/<id>/log` | viewer | raw job log as a text attachment (the job page offers Copy log / Download log) |
+| `DELETE /api/jobs/<id>` | admin | delete one job **and its log file**; `409` while it is running |
+| `GET /api/jobs/stats` | viewer | `{total, running, success, failed, log_files, log_bytes, oldest_at, retention_days, retention_keep}` |
+| `POST /api/jobs/cleanup` `{status?, older_than_days?, keep_last?, kinds?, orphans?, dry_run?}` | admin | bulk history clean-up: `status` ∈ finished (default) / failed / success; `older_than_days` 0 = any age; `keep_last` newest N survive; `kinds` list; `orphans` (default true) also removes log files without a job row; `dry_run` only reports → `{deleted, orphans_removed, bytes_freed, dry_run, stats}`. Running jobs are never touched. `CCP_JOB_RETENTION_DAYS` / `CCP_JOB_RETENTION_KEEP` do the same automatically whenever a job starts |
 
 ## Removed — Slurm (2026-09-10)
 

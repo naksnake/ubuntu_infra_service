@@ -324,7 +324,10 @@ def ansible_page():
 @app.route('/jobs')
 def jobs_page():
     return render_template('jobs.html',
-                           jobs=db.query('SELECT * FROM jobs ORDER BY id DESC LIMIT 200'))
+                           jobs=db.query('SELECT * FROM jobs ORDER BY id DESC LIMIT 200'),
+                           stats=executor.jobs_stats(),
+                           kinds=[r['kind'] for r in
+                                  db.query('SELECT DISTINCT kind FROM jobs ORDER BY kind')])
 
 
 @app.route('/jobs/<int:job_id>')
@@ -991,9 +994,53 @@ def api_job_log(job_id):
 @app.route('/api/jobs/<int:job_id>', methods=['DELETE'])
 @require('admin')
 def api_delete_job(job_id):
-    db.execute('DELETE FROM jobs WHERE id=?', (job_id,))
+    """Delete one job and its log file; a running job is refused."""
+    if not executor.delete_job(job_id):
+        return jsonify({'error': 'the job is still running — wait for it to '
+                        'finish (or for the timeout) before deleting it'}), 409
     log_action('job.delete', str(job_id))
     return jsonify({'ok': True})
+
+
+@app.route('/api/jobs/stats')
+def api_jobs_stats():
+    """Counts per status and what the job logs occupy on disk."""
+    return jsonify(executor.jobs_stats())
+
+
+@app.route('/api/jobs/cleanup', methods=['POST'])
+@require('admin')
+def api_jobs_cleanup():
+    """Bulk clean-up of job history and log files. Running jobs are never
+    touched. dry_run=true only reports what would be deleted (the page uses
+    it for the preview and the confirmation)."""
+    d = request.get_json(force=True) or {}
+    status = d.get('status') or 'finished'
+    if status not in ('finished', 'failed', 'success'):
+        return jsonify({'error': 'status must be finished, failed or success'}), 400
+    try:
+        days = int(d.get('older_than_days') or 0)
+        keep = int(d.get('keep_last') or 0)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'older_than_days and keep_last must be whole numbers'}), 400
+    if days < 0 or keep < 0:
+        return jsonify({'error': 'older_than_days and keep_last must be 0 or more'}), 400
+    kinds = d.get('kinds') or None
+    if kinds is not None and (not isinstance(kinds, list) or not all(
+            isinstance(k, str) and re.fullmatch(r'[a-z_]{1,32}', k) for k in kinds)):
+        return jsonify({'error': 'kinds must be a list of job kinds'}), 400
+    dry = bool(d.get('dry_run'))
+    res = executor.cleanup_jobs(older_than_days=days or None, status=status, kinds=kinds,
+                                keep_last=keep, orphans=d.get('orphans', True) is not False,
+                                dry_run=dry)
+    if not dry and (res['deleted'] or res['orphans_removed']):
+        log_action('jobs.cleanup',
+                   f"{res['deleted']} job(s), {res['orphans_removed']} orphan log(s), "
+                   f"{res['bytes_freed']} bytes freed — status={status} "
+                   f"older_than={days}d keep_last={keep}"
+                   + (f" kinds={','.join(kinds)}" if kinds else ''))
+    res['stats'] = executor.jobs_stats()
+    return jsonify(res)
 
 
 # ── scripts API ─────────────────────────────────────────────────────────────

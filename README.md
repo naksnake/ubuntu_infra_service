@@ -540,7 +540,12 @@ management panel for AI/HPC lab clusters (design docs in `docs/ccp/`):
   + audit log).
 - **Job history** — every run (commands, playbooks, onboarding, hardware
   scans, renames, file deployments) is recorded with status, exit code, and full
-  output.
+  output. The Jobs page shows how much disk the logs use and lets an admin
+  **clean up history** (all finished / failed only, older than N days, keep the
+  newest N, one kind, orphan log files) with a preview before anything is
+  deleted; set `CCP_JOB_RETENTION_DAYS` (and optionally
+  `CCP_JOB_RETENTION_KEEP`) in the `ccp` environment to prune old finished
+  jobs automatically. Running jobs are never deleted.
 - **Files** — per-user file storage (kickstart snippets, tarballs, etc.).
 - **Audit log** — every login and state-changing action is recorded (admin-only).
 

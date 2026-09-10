@@ -2,6 +2,43 @@
 {% block heading %}Job History{% endblock %}
 {% block body %}
 <div class="card">
+  <div class="jobs-summary">
+    <span><b>{{ stats.total }}</b> jobs</span>
+    <span class="sep">·</span><span><b>{{ stats.running }}</b> running</span>
+    <span class="sep">·</span><span><b>{{ stats.success }}</b> succeeded</span>
+    <span class="sep">·</span><span><b>{{ stats.failed }}</b> failed</span>
+    <span class="sep">·</span><span>logs: <b>{{ (stats.log_bytes / 1048576) | round(1) }} MB</b> in {{ stats.log_files }} file(s)</span>
+    <span class="sep">·</span>
+    <span title="Set CCP_JOB_RETENTION_DAYS (and optionally CCP_JOB_RETENTION_KEEP) in the ccp environment to prune finished jobs automatically">
+      retention: {% if stats.retention_days %}<b>{{ stats.retention_days }} days</b>{% if stats.retention_keep %}, newest {{ stats.retention_keep }} kept{% endif %}{% else %}off{% endif %}</span>
+  </div>
+  {% if role_ok('admin') %}
+  <details class="cleanup">
+    <summary>Clean up history</summary>
+    <div class="cleanbar">
+      <select id="cl-status">
+        <option value="finished">all finished jobs</option>
+        <option value="failed">failed jobs only</option>
+        <option value="success">succeeded jobs only</option>
+      </select>
+      <label>older than</label>
+      <input id="cl-days" type="number" min="0" value="7" title="0 = any age"> days
+      <label>keep newest</label>
+      <input id="cl-keep" type="number" min="0" value="20" title="the newest N matching jobs always survive">
+      <select id="cl-kind" title="restrict to one job kind">
+        <option value="">any kind</option>
+        {% for k in kinds %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
+      </select>
+      <label class="inlinechk" title="Log files under the jobs directory that no job row refers to"><input type="checkbox" id="cl-orphans" checked> remove orphan log files</label>
+      <button class="btn btn-ghost btn-sm" onclick="cleanupPreview()">Preview</button>
+      <button class="btn btn-danger btn-sm" onclick="cleanupRun()">Delete</button>
+    </div>
+    <div id="cl-preview" class="muted" style="font-size:12px;margin-top:8px">Running jobs are never deleted. Preview shows what would go before anything is removed.</div>
+  </details>
+  {% endif %}
+</div>
+
+<div class="card">
   <table>
     <thead><tr><th>#</th><th>Kind</th><th>Target</th><th>Status</th><th>By</th><th>Started</th><th>Finished</th>{% if role_ok('admin') %}<th></th>{% endif %}</tr></thead>
     <tbody>
@@ -14,10 +51,42 @@
         <td>{{ j.created_by }}</td>
         <td><small>{{ j.created_at | tstime }}</small></td>
         <td><small>{{ j.finished_at | tstime }}</small></td>
-        {% if role_ok('admin') %}<td><button class="btn btn-danger btn-sm" onclick="del('/api/jobs/{{ j.id }}','Delete job {{ j.id }}?')">Delete</button></td>{% endif %}
+        {% if role_ok('admin') %}<td>{% if j.status != 'running' %}<button class="btn btn-danger btn-sm" onclick="del('/api/jobs/{{ j.id }}','Delete job {{ j.id }} and its log?')">Delete</button>{% endif %}</td>{% endif %}
       </tr>
       {% else %}<tr><td colspan="8" class="empty">No jobs yet.</td></tr>{% endfor %}
     </tbody>
   </table>
+  {% if jobs|length == 200 %}<p class="muted" style="font-size:12px;margin:10px 0 0">Showing the newest 200 jobs; older ones are still in the history and are covered by Clean up.</p>{% endif %}
 </div>
 {% endblock %}
+
+{% block scripts %}<script>
+function clv(id){return document.getElementById(id).value;}
+function fmtMB(b){return (b/1048576).toFixed(b<1048576?2:1)+' MB';}
+function clPayload(dry){
+  const k=clv('cl-kind');
+  return {status:clv('cl-status'),older_than_days:parseInt(clv('cl-days'))||0,
+          keep_last:parseInt(clv('cl-keep'))||0,kinds:k?[k]:null,
+          orphans:document.getElementById('cl-orphans').checked,dry_run:dry};
+}
+function describe(r){
+  return r.deleted+' job'+(r.deleted===1?'':'s')+' and '+r.orphans_removed+' orphan log file'+
+    (r.orphans_removed===1?'':'s')+', freeing '+fmtMB(r.bytes_freed);
+}
+async function cleanupPreview(){
+  try{const r=await api('POST','/api/jobs/cleanup',clPayload(true));
+    document.getElementById('cl-preview').textContent=
+      (r.deleted||r.orphans_removed?'Would delete '+describe(r)+'.':'Nothing matches these filters.')+
+      ' Running jobs are never deleted.';}
+  catch(e){toast(e.message,true);}
+}
+async function cleanupRun(){
+  let r;
+  try{r=await api('POST','/api/jobs/cleanup',clPayload(true));}catch(e){toast(e.message,true);return;}
+  if(!r.deleted&&!r.orphans_removed){toast('Nothing matches these filters — no jobs deleted');return;}
+  if(!confirm('Delete '+describe(r)+'?\n\nThis cannot be undone.'))return;
+  try{const d=await api('POST','/api/jobs/cleanup',clPayload(false));
+    toast('Deleted '+describe(d));location.reload();}
+  catch(e){toast(e.message,true);}
+}
+</script>{% endblock %}
