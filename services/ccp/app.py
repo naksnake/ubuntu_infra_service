@@ -220,16 +220,10 @@ def dashboard():
     jobs = db.query('SELECT COUNT(*) AS c FROM jobs')[0]['c']
     running = db.query("SELECT COUNT(*) AS c FROM jobs WHERE status='running'")[0]['c']
     recent = db.query('SELECT * FROM jobs ORDER BY id DESC LIMIT 8')
-    clusters = db.query(
-        'SELECT c.*, '
-        '(SELECT COUNT(*) FROM nodes WHERE cluster_id=c.id) AS members, '
-        "(SELECT COUNT(*) FROM nodes WHERE cluster_id=c.id AND "
-        " (state='managed' OR conn='local')) AS managed "
-        'FROM clusters c ORDER BY c.name')
     return render_template('dashboard.html', lifecycle=lifecycle,
                            new_systems=discovery.new_system_count(),
                            stats={'jobs': jobs, 'running': running},
-                           clusters=clusters, recent=recent)
+                           recent=recent)
 
 
 @app.route('/nodes')
@@ -289,25 +283,10 @@ def discovery_page():
                            leases=discovery.annotate(leases), error=err)
 
 
-@app.route('/clusters')
-def clusters_page():
-    clusters = db.query(
-        'SELECT c.*, '
-        '(SELECT COUNT(*) FROM nodes WHERE cluster_id=c.id) AS members, '
-        "(SELECT COUNT(*) FROM nodes WHERE cluster_id=c.id AND "
-        " (state='managed' OR conn='local')) AS managed "
-        'FROM clusters c ORDER BY c.name')
-    nodes = db.query(
-        'SELECT n.*, h.cpu_cores, h.mem_mb, h.gpu_count, h.gpu_model '
-        'FROM nodes n LEFT JOIN hardware h ON h.node_id = n.id ORDER BY n.name')
-    return render_template('clusters.html', clusters=clusters, nodes=nodes)
-
-
 @app.route('/shell')
 def shell_page():
     return render_template('shell.html',
                            nodes=db.query('SELECT * FROM nodes ORDER BY name'),
-                           clusters=db.query('SELECT * FROM clusters ORDER BY name'),
                            scripts=db.query("SELECT * FROM scripts WHERE kind='shell' ORDER BY name"))
 
 
@@ -315,7 +294,6 @@ def shell_page():
 def ansible_page():
     return render_template('ansible.html',
                            nodes=db.query('SELECT * FROM nodes ORDER BY name'),
-                           clusters=db.query('SELECT * FROM clusters ORDER BY name'),
                            sources=ansible_sources.scan_all(),
                            configured_dirs=ansible_sources.ANSIBLE_DIRS,
                            scripts=db.query("SELECT * FROM scripts WHERE kind='playbook' ORDER BY name"))
@@ -622,89 +600,6 @@ def api_delete_node(node_id):
     return jsonify({'ok': True})
 
 
-# ── clusters API ──────────────────────────────────────────────────────────────
-
-
-
-def _get_cluster(cluster_id):
-    return db.query('SELECT * FROM clusters WHERE id=?', (cluster_id,), one=True)
-
-
-@app.route('/api/clusters')
-def api_list_clusters():
-    rows = db.query(
-        'SELECT c.*, '
-        '(SELECT COUNT(*) FROM nodes WHERE cluster_id=c.id) AS members, '
-        "(SELECT COUNT(*) FROM nodes WHERE cluster_id=c.id AND "
-        " (state='managed' OR conn='local')) AS managed "
-        'FROM clusters c ORDER BY c.name')
-    return jsonify({'clusters': [dict(r) for r in rows]})
-
-
-@app.route('/api/clusters', methods=['POST'])
-@require('operator')
-def api_add_cluster():
-    d = request.get_json(force=True) or {}
-    name = (d.get('name') or '').strip()
-    kind = 'generic'     # clusters are execution targets; kinds retired with the Slurm builder
-    if not NODE_NAME_RE.fullmatch(name):
-        return jsonify({'error': 'cluster name may contain only letters, digits, '
-                        'dot, dash, underscore (max 63 chars)'}), 400
-    try:
-        cid = db.execute(
-            'INSERT INTO clusters (name, kind, description, created_by, created_at) '
-            'VALUES (?,?,?,?,?)',
-            (name, kind, (d.get('description') or '').strip()[:500],
-             session['username'], int(time.time())))
-    except Exception:
-        return jsonify({'error': 'a cluster with that name already exists'}), 409
-    log_action('cluster.add', f'{name} ({kind})')
-    return jsonify({'id': cid}), 201
-
-
-@app.route('/api/clusters/<int:cluster_id>', methods=['DELETE'])
-@require('operator')
-def api_delete_cluster(cluster_id):
-    c = _get_cluster(cluster_id)
-    if not c:
-        return jsonify({'error': 'not found'}), 404
-    db.execute('UPDATE nodes SET cluster_id=NULL WHERE cluster_id=?', (cluster_id,))
-    db.execute('DELETE FROM clusters WHERE id=?', (cluster_id,))
-    log_action('cluster.delete', c['name'])
-    return jsonify({'ok': True})
-
-
-@app.route('/api/clusters/<int:cluster_id>/nodes', methods=['POST'])
-@require('operator')
-def api_cluster_assign(cluster_id):
-    """Assign nodes to a cluster (moving them out of any previous one — a node
-    belongs to at most one cluster)."""
-    c = _get_cluster(cluster_id)
-    if not c:
-        return jsonify({'error': 'not found'}), 404
-    d = request.get_json(force=True) or {}
-    ids = [int(x) for x in (d.get('node_ids') or []) if str(x).isdigit()]
-    if not ids:
-        return jsonify({'error': 'select at least one node'}), 400
-    marks = ','.join('?' for _ in ids)
-    db.execute(f'UPDATE nodes SET cluster_id=? WHERE id IN ({marks})',
-               (cluster_id, *ids))
-    log_action('cluster.assign', f'{c["name"]}: nodes {ids}')
-    return jsonify({'ok': True})
-
-
-@app.route('/api/clusters/<int:cluster_id>/nodes/<int:node_id>', methods=['DELETE'])
-@require('operator')
-def api_cluster_unassign(cluster_id, node_id):
-    c = _get_cluster(cluster_id)
-    if not c:
-        return jsonify({'error': 'not found'}), 404
-    db.execute('UPDATE nodes SET cluster_id=NULL WHERE id=? AND cluster_id=?',
-               (node_id, cluster_id))
-    log_action('cluster.unassign', f'{c["name"]}: node {node_id}')
-    return jsonify({'ok': True})
-
-
 # ── discovery API ─────────────────────────────────────────────────────────────
 
 @app.route('/api/discovery')
@@ -798,17 +693,13 @@ def api_discovery_import():
 def api_deploy_targets():
     """Groups with their member nodes, for the two-level target selector.
     Only managed (or local) nodes can receive a deployment."""
-    rows = db.query(
-        'SELECT n.*, c.name AS cluster_name FROM nodes n '
-        'LEFT JOIN clusters c ON c.id = n.cluster_id ORDER BY n.name')
+    rows = db.query('SELECT * FROM nodes ORDER BY name')
     groups = {}
     for r in rows:
         node = {'id': r['id'], 'name': r['name'], 'address': r['address'],
                 'state': r['state'], 'conn': r['conn'],
                 'eligible': bool(executor.node_eligible(r))}
         names = [g.strip() for g in (r['groups'] or '').split(',') if g.strip()]
-        if r['cluster_name']:
-            names.append(f'cluster:{r["cluster_name"]}')
         for g in (names or ['ungrouped']):
             groups.setdefault(g, []).append(node)
     return jsonify({'groups': [{'name': g, 'nodes': n}
@@ -852,11 +743,8 @@ def api_deploy_files():
     ids = [int(x) for x in (d.get('node_ids') or []) if str(x).isdigit()]
     wanted_groups = [str(g).strip() for g in (d.get('groups') or []) if str(g).strip()]
     if wanted_groups:
-        for r in db.query('SELECT n.id, n.groups, c.name AS cluster_name '
-                          'FROM nodes n LEFT JOIN clusters c ON c.id = n.cluster_id'):
+        for r in db.query('SELECT id, groups FROM nodes'):
             names = [g.strip() for g in (r['groups'] or '').split(',') if g.strip()]
-            if r['cluster_name']:
-                names.append(f'cluster:{r["cluster_name"]}')
             if not names:
                 names = ['ungrouped']
             if any(g in wanted_groups for g in names):
@@ -879,7 +767,7 @@ def api_deploy_files():
 # ── job launch API ────────────────────────────────────────────────────────────
 
 def _selected_nodes(d):
-    """Expand node_ids + group + cluster_id into eligible targets, enforcing
+    """Expand node_ids + group into eligible targets, enforcing
     the lifecycle gate: only managed ssh nodes (or local nodes) run jobs.
     Returns (ids, names, excluded) where excluded lists 'name (state)' strings
     for selected-but-ineligible nodes so the error can name them."""
@@ -889,10 +777,6 @@ def _selected_nodes(d):
         for r in db.query('SELECT id, groups FROM nodes'):
             if group in [g.strip() for g in (r['groups'] or '').split(',') if g.strip()]:
                 ids.append(r['id'])
-    cluster_id = d.get('cluster_id')
-    if cluster_id and str(cluster_id).isdigit():
-        ids += [r['id'] for r in db.query(
-            'SELECT id FROM nodes WHERE cluster_id=?', (int(cluster_id),))]
     ids = sorted(set(ids))
     if not ids:
         return [], [], []
@@ -1011,34 +895,13 @@ def api_jobs_stats():
 @app.route('/api/jobs/cleanup', methods=['POST'])
 @require('admin')
 def api_jobs_cleanup():
-    """Bulk clean-up of job history and log files. Running jobs are never
-    touched. dry_run=true only reports what would be deleted (the page uses
-    it for the preview and the confirmation)."""
-    d = request.get_json(force=True) or {}
-    status = d.get('status') or 'finished'
-    if status not in ('finished', 'failed', 'success'):
-        return jsonify({'error': 'status must be finished, failed or success'}), 400
-    try:
-        days = int(d.get('older_than_days') or 0)
-        keep = int(d.get('keep_last') or 0)
-    except (TypeError, ValueError):
-        return jsonify({'error': 'older_than_days and keep_last must be whole numbers'}), 400
-    if days < 0 or keep < 0:
-        return jsonify({'error': 'older_than_days and keep_last must be 0 or more'}), 400
-    kinds = d.get('kinds') or None
-    if kinds is not None and (not isinstance(kinds, list) or not all(
-            isinstance(k, str) and re.fullmatch(r'[a-z_]{1,32}', k) for k in kinds)):
-        return jsonify({'error': 'kinds must be a list of job kinds'}), 400
-    dry = bool(d.get('dry_run'))
-    res = executor.cleanup_jobs(older_than_days=days or None, status=status, kinds=kinds,
-                                keep_last=keep, orphans=d.get('orphans', True) is not False,
-                                dry_run=dry)
-    if not dry and (res['deleted'] or res['orphans_removed']):
-        log_action('jobs.cleanup',
-                   f"{res['deleted']} job(s), {res['orphans_removed']} orphan log(s), "
-                   f"{res['bytes_freed']} bytes freed — status={status} "
-                   f"older_than={days}d keep_last={keep}"
-                   + (f" kinds={','.join(kinds)}" if kinds else ''))
+    """Clear the whole job history: every finished job with its log file, plus
+    orphan log files. Running jobs are kept (their thread is still writing).
+    Returns the counts and fresh stats."""
+    res = executor.clear_history()
+    if res['deleted'] or res['orphans_removed']:
+        log_action('jobs.cleanup', f"{res['deleted']} job(s), {res['orphans_removed']} "
+                   f"orphan log(s), {res['bytes_freed']} bytes freed")
     res['stats'] = executor.jobs_stats()
     return jsonify(res)
 

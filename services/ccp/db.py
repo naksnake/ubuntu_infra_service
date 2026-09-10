@@ -47,20 +47,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     -- name doesn't follow the scheme. Never entered manually.
     rack         INTEGER,
     sled         INTEGER,
-    role         TEXT NOT NULL DEFAULT '',
-    cluster_id   INTEGER                       -- membership; app-enforced FK
-);
-
--- First-class clusters: a named group of nodes used as an execution target by
--- ClusterShell, Ansible and file deployment. (Databases created before the
--- Slurm builder was removed also carry unused slurm_* columns — harmless.)
-CREATE TABLE IF NOT EXISTS clusters (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    name         TEXT NOT NULL UNIQUE,
-    kind         TEXT NOT NULL DEFAULT 'generic',
-    description  TEXT NOT NULL DEFAULT '',
-    created_by   TEXT NOT NULL DEFAULT '',
-    created_at   INTEGER NOT NULL
+    role         TEXT NOT NULL DEFAULT ''
+    -- databases created before 2026-09-10 also carry cluster_id and a
+    -- clusters table (the Clusters feature was removed); both are ignored
 );
 
 CREATE TABLE IF NOT EXISTS scripts (
@@ -208,18 +197,9 @@ def init_db():
         import topology                # local import: topology imports db
         topology.backfill(conn)
 
-    # M4 — cluster membership (the clusters table itself is CREATE IF NOT
-    # EXISTS above; only the nodes column needs an in-place ALTER).
-    ncols = [r['name'] for r in conn.execute('PRAGMA table_info(nodes)')]
-    if 'cluster_id' not in ncols:
-        conn.execute('ALTER TABLE nodes ADD COLUMN cluster_id INTEGER')
-        conn.commit()
-
-    # M6 — the Slurm builder was removed: every cluster is a plain execution
-    # target again. Leftover slurm_* columns from M4/M5 stay (SQLite cannot
-    # drop them cheaply) and are ignored.
-    conn.execute("UPDATE clusters SET kind='generic' WHERE kind='slurm'")
-    conn.commit()
+    # M4–M6 (clusters, Slurm settings) are retired: the Clusters feature was
+    # removed on 2026-09-10. Existing databases keep nodes.cluster_id and the
+    # clusters table (SQLite cannot drop them cheaply); nothing reads them.
 
     # A worker restart aborts any in-flight onboarding thread; reset those
     # rows to a retryable state (mirrors the running-jobs reaper below).

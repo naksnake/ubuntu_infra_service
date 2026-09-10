@@ -11,7 +11,7 @@ project charter: P0 first.
 | 2 | **DHCP discovery** | `discovery.py` lease parser; ro mount of `data/dnsmasq.leases` into ccp (compose); Discovery page + `GET /api/discovery`, `POST /api/discovery/import` (bulk import & onboard); dashboard callout | P0 |
 | 3 | **Hardware discovery** | M2 migration; fact script + parser; `hwscan` job kind, auto-chained after onboarding; node detail drawer showing facts | P0 |
 | 4 | **Hostname topology + rename + Rack View** | M3 migration; `topology.py` parser + backfill; `hostname` job kind (`hostnamectl` + `/etc/hostname` + `/etc/hosts`, `sudo -n` fallback); Rack View page | P0 |
-| 5 | **Cluster objects** | M4 migration; clusters CRUD + membership; `cluster_id` targeting in run APIs and the shared node selector; Clusters page; dashboard cluster cards | P1 |
+| 5 | ~~Cluster objects~~ | removed 2026-09-10 with the Slurm builder; `nodes.groups` remains the grouping/targeting mechanism | — |
 | 6 | **Ansible filesystem sources** | `CCP_ANSIBLE_DIRS` env + compose mount example; source scanner + containment checks; `playbook_path` in run API; Ansible page redesign; deprecate playbook-kind script writes | P1 |
 | 7 | ~~Slurm builder~~ | removed 2026-09-10 at the operator's request after repeated lab deployment failures (last commit with it: `f381985`) | — |
 | 8 | ~~Slurm lifecycle~~ | removed together with the builder; the generic pieces it produced (per-host output framing, staged console rendering, job-log download, readable Ansible results) stay | — |

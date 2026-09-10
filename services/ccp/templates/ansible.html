@@ -73,7 +73,7 @@ async function run(){
     if(!payload.playbook.trim()){toast('Pick a playbook or write one',true);return;}
   }
   payload.extra_vars=document.getElementById('ev').value.trim();
-  if(!payload.node_ids.length&&!payload.group&&!payload.cluster_id){toast('Select nodes, a group or a cluster',true);return;}
+  if(!payload.node_ids.length&&!payload.group){toast('Select nodes or a group',true);return;}
   const btn=document.getElementById('run-btn'),con=document.getElementById('console');
   btn.disabled=true;con.textContent='Launching ansible-playbook…';
   try{

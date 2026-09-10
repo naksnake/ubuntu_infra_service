@@ -16,12 +16,3 @@
 </div>
 <label>…or target a group</label>
 <input class="group-input" placeholder="e.g. gpu (leave blank to use the checkboxes above)">
-{% if clusters %}
-<label>…or target a cluster</label>
-<select class="cluster-input">
-  <option value="">— none —</option>
-  {% for c in clusters %}
-  <option value="{{ c.id }}" {{ 'selected' if request.args.get('cluster') == c.id|string }}>{{ c.name }} ({{ c.kind }})</option>
-  {% endfor %}
-</select>
-{% endif %}

@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS hardware (
 
 One row per node (PRIMARY KEY = node_id); a rescan replaces the row.
 `raw_json` keeps everything the summary columns don't model, for future
-cluster generation without another schema change.
+use without another schema change.
 
 ## M3 — topology (Phase 4)
 
@@ -63,43 +63,19 @@ ALTER TABLE nodes ADD COLUMN role TEXT NOT NULL DEFAULT '';
 Backfill: parse every existing `nodes.name` once with `topology.parse()`.
 Columns are recomputed whenever `name` changes (add/onboard/hostname job).
 
-## M4 — clusters (Phase 5)
+## M4–M6 — retired (clusters, Slurm settings)
 
-```sql
-CREATE TABLE IF NOT EXISTS clusters (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    name         TEXT NOT NULL UNIQUE,
-    kind         TEXT NOT NULL DEFAULT 'generic',
-    description  TEXT NOT NULL DEFAULT '',
-    created_by   TEXT NOT NULL DEFAULT '',
-    created_at   INTEGER NOT NULL
-);
-
-ALTER TABLE nodes ADD COLUMN cluster_id INTEGER REFERENCES nodes(id); -- see note
-```
-
-Note: SQLite `ALTER TABLE ADD COLUMN` cannot add a foreign key that is
-enforced retroactively in older versions; membership integrity is enforced in
-application code (cluster delete clears `nodes.cluster_id`).
-
-## M5 — retired
-
-M5 added the Slurm automatic-deployment settings (`auto_deploy`,
-`install_from`, `slurm_version`, `tarball_url`); with the Slurm builder
-removed it is no longer applied. Databases that received M4's
-`slurm_state`/`controller_node_id`/`slurm_conf`/`gres_conf` or M5's columns
-keep them — SQLite cannot drop columns cheaply and nothing reads them.
-
-## M6 — Slurm builder removed (2026-09-10)
-
-No DDL. At startup `UPDATE clusters SET kind='generic' WHERE kind='slurm'`,
-so every existing cluster is a plain execution target again.
+M4 added the `clusters` table and `nodes.cluster_id`; M5 the Slurm
+auto-deployment settings; M6 normalised cluster kinds. The Clusters feature
+(and the Slurm builder before it) were removed on 2026-09-10, so none of them
+is applied any more. Databases that received them keep the table and columns —
+SQLite cannot drop them cheaply and nothing reads them.
 
 ## Deprecations (no DDL)
 
 - `scripts.kind='playbook'`: rows are kept and remain runnable; the API stops
   accepting new/updated playbook-kind scripts once filesystem sources land.
-- `nodes.groups` stays as ad-hoc tagging alongside clusters.
+- `nodes.groups` is the grouping mechanism (comma-separated tags).
 
 ## Data-safety rules
 

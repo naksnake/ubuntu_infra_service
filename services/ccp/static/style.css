@@ -171,21 +171,10 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
 .rstage .rnum{color:var(--muted);font-weight:600}
 .rstage > .rbody{padding:10px 12px;border-top:1px solid var(--line)}
 .rtext{white-space:pre-wrap}
-/* Jobs page: history summary + clean-up controls */
+/* Jobs page: history summary + the one clear-all button */
 .jobs-summary{display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:13px;color:var(--muted)}
 .jobs-summary b{color:var(--ink)}
 .jobs-summary .sep{color:var(--line)}
-details.cleanup{margin-top:10px}
-details.cleanup > summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);
-  list-style:none;padding:4px 0}
-details.cleanup > summary::-webkit-details-marker{display:none}
-details.cleanup > summary::before{content:'▸ ';color:var(--muted)}
-details.cleanup[open] > summary::before{content:'▾ '}
-.cleanbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding:10px;
-  border:1px solid var(--line);border-radius:8px;background:var(--panel2);font-size:12px}
-.cleanbar label{margin:0;font-size:12px}
-.cleanbar select,.cleanbar input[type=number]{width:auto;font-size:12px;padding:5px 8px}
-.cleanbar input[type=number]{width:72px}
 .rcount{color:var(--muted);font-weight:400}
 
 /* file / target pick lists */

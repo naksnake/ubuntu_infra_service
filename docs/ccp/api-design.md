@@ -26,8 +26,6 @@ required for `conn='ssh'`), `409` duplicate name/address.
 
 ### `POST /api/run/shell`, `POST /api/run/ansible` (operator)
 
-- Accept `cluster_id` as a third targeting option next to `node_ids` and
-  `group`.
 - Silently exclude non-`managed` SSH nodes; `400` if nothing eligible
   remains, with the offending states named.
 - `POST /api/run/ansible` accepts either inline `playbook` (unchanged) or
@@ -42,7 +40,7 @@ required for `conn='ssh'`), `409` duplicate name/address.
 | `POST /api/nodes/<id>/verify` | operator | key-only execution check; promotes `unverified`→`managed` (legacy rows) |
 | `POST /api/nodes/<id>/hwscan` | operator | queue a hardware rescan job |
 | `POST /api/nodes/<id>/hostname` `{hostname}` | operator | hostname job: `hostnamectl set-hostname` + `/etc/hostname` + `/etc/hosts`; on success updates name + rack/sled/role |
-| `GET  /api/nodes` | viewer | full inventory JSON: state, topology, hardware summary, cluster |
+| `GET  /api/nodes` | viewer | full inventory JSON: state, topology, hardware summary |
 
 All four mutations return `{"job_id": N}`; progress is the normal job log.
 
@@ -53,15 +51,11 @@ All four mutations return `{"job_id": N}`; progress is the normal job log.
 | `GET /api/discovery` | viewer | parsed DHCP leases: `[{ip, mac, hostname, expires, expired, node_id|null}]` — `node_id` set when MAC or IP already matches inventory |
 | `POST /api/discovery/import` | operator | `{"systems":[{"ip","mac","hostname"}], "username","password", "onboard":true}` → creates nodes (state `discovered`) and, when `onboard` and credentials given, queues one onboarding job per node. Returns per-system `{node_id, job_id}` |
 
-## New — clusters
+## Removed — clusters (2026-09-10)
 
-| Endpoint | Role | Purpose |
-|---|---|---|
-| `GET  /api/clusters` | viewer | clusters with member/managed counts |
-| `POST /api/clusters` `{name, description}` | operator | create (a `kind` in the body is accepted and ignored — every cluster is an execution target) |
-| `DELETE /api/clusters/<id>` | operator | delete; members' `cluster_id` cleared |
-| `POST /api/clusters/<id>/nodes` `{node_ids:[…]}` | operator | assign members (moves them from any previous cluster) |
-| `DELETE /api/clusters/<id>/nodes/<node_id>` | operator | unassign |
+`/api/clusters*` (list, create, delete, assign, unassign) and the `cluster_id`
+targeting option were removed with the Clusters feature; targets are
+`node_ids` and `group`.
 
 ## Jobs
 
@@ -70,7 +64,7 @@ All four mutations return `{"job_id": N}`; progress is the normal job log.
 | `GET /api/jobs/<id>/log` | viewer | raw job log as a text attachment (the job page offers Copy log / Download log) |
 | `DELETE /api/jobs/<id>` | admin | delete one job **and its log file**; `409` while it is running |
 | `GET /api/jobs/stats` | viewer | `{total, running, success, failed, log_files, log_bytes, oldest_at, retention_days, retention_keep}` |
-| `POST /api/jobs/cleanup` `{status?, older_than_days?, keep_last?, kinds?, orphans?, dry_run?}` | admin | bulk history clean-up: `status` ∈ finished (default) / failed / success; `older_than_days` 0 = any age; `keep_last` newest N survive; `kinds` list; `orphans` (default true) also removes log files without a job row; `dry_run` only reports → `{deleted, orphans_removed, bytes_freed, dry_run, stats}`. Running jobs are never touched. `CCP_JOB_RETENTION_DAYS` / `CCP_JOB_RETENTION_KEEP` do the same automatically whenever a job starts |
+| `POST /api/jobs/cleanup` | admin | **clear all history**: every finished job with its log file, plus orphan log files → `{deleted, orphans_removed, bytes_freed, stats}`. Running jobs are kept. `CCP_JOB_RETENTION_DAYS` does the same for jobs older than N days automatically whenever a job starts |
 
 ## Removed — Slurm (2026-09-10)
 

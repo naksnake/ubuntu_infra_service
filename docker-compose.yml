@@ -241,10 +241,9 @@ services:
       # hard per-job wall-clock cap (seconds) so a hung command/playbook can't
       # pin a worker thread forever
       - CCP_JOB_TIMEOUT=${CCP_JOB_TIMEOUT:-900}
-      # job-history retention: prune finished jobs (and their logs) older than
-      # N days whenever a job starts; 0 keeps everything. KEEP = newest N kept.
+      # job-history retention: clear finished jobs (and their logs) older than
+      # N days whenever a job starts; 0 keeps everything
       - CCP_JOB_RETENTION_DAYS=${CCP_JOB_RETENTION_DAYS:-0}
-      - CCP_JOB_RETENTION_KEEP=${CCP_JOB_RETENTION_KEEP:-0}
     healthcheck:
       # in-container port is fixed at 8060; /healthz needs no login
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/healthz')\""]

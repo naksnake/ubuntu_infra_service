@@ -4,7 +4,7 @@ Status: **Accepted** · Author: CCP maintainers · Date: 2026-09-08
 
 > **Amendment 2026-09-10:** the Slurm builder and lifecycle (Phases 6–7)
 > were removed at the operator's request after repeated deployment failures
-> in the reference lab; clusters remain as execution targets. Last commit
+> in the reference lab, and the Clusters feature with it. Last commit
 > with the feature: `f381985`. A new Slurm design will come as a new request.
 
 ## Summary
@@ -118,15 +118,14 @@ These capabilities are preserved as-is and reused by every new feature:
 | Area | Today | Target |
 |------|-------|--------|
 | Node onboarding | bare INSERT | lifecycle: Discover → Credential Validation → SSH Bootstrap → **Managed** (see §4) |
-| Node schema | name/address/conn/ssh | + `state`, `state_detail`, `mac`, `rack`/`sled`/`role` (derived), `cluster_id`, `onboarded_at` |
+| Node schema | name/address/conn/ssh | + `state`, `state_detail`, `mac`, `rack`/`sled`/`role` (derived), `onboarded_at` |
 | Inventory source | manual form | **DHCP lease discovery first**; manual add becomes the fallback |
 | Topology | free-text `groups` CSV | hostname-driven: `rack0_sled1_gpu` → rack 0, sled 1, role `gpu`; groups kept for ad-hoc tagging |
 | Hostname | not managed | one-click rename: `hostnamectl set-hostname` + `/etc/hostname` + `/etc/hosts`, inventory refreshed immediately |
 | Hardware | not modeled | `hardware` table (CPU/mem/storage/net/GPU/OS + raw JSON), auto-collected after onboarding |
-| Clusters | none | first-class `clusters` table; a cluster is an execution target |
 | Ansible sources | textarea / in-DB scripts | local filesystem paths (`CCP_ANSIBLE_DIRS`), scanned for playbooks/roles/inventories; development stays external |
 | Navigation | flat 7 items | Dashboard · Discovery · Nodes · Clusters · Rack View · ClusterShell · Ansible · Jobs · Files · Deploy files · Admin |
-| Dashboard | 4 counters | lifecycle funnel (discovered/onboarding/managed/failed), cluster health, recent jobs |
+| Dashboard | 4 counters | lifecycle funnel (discovered/onboarding/managed/failed), recent jobs |
 
 ## 4. Node lifecycle (the P0 fix)
 
@@ -169,7 +168,7 @@ gate is enforced at selection time and re-checked in the executor.
 ## 6. Migration impact
 
 - **Schema**: additive only — `ALTER TABLE nodes ADD COLUMN …`, two new
-  tables (`hardware`, `clusters`). Applied automatically by `init_db()` on
+  table (`hardware`). Applied automatically by `init_db()` on
   first start after upgrade, same pattern as the existing `quota_mb`
   migration. SQLite file is never rewritten; rollback = run the previous
   image (old code ignores new columns/tables).
@@ -193,7 +192,7 @@ gate is enforced at selection time and re-checked in the executor.
 
 Small iterative commits, one phase per commit (see
 `implementation-plan.md`): docs → node lifecycle (P0) → DHCP discovery →
-hardware discovery → hostname topology + rack view → clusters → Ansible
+hardware discovery → hostname topology + rack view → Ansible
 filesystem sources → file deployment. (Slurm builder/lifecycle: removed, see
 amendment.) Each commit leaves the
 panel deployable and the test suite green.

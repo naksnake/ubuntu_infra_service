@@ -28,7 +28,7 @@ Companion to [RFC-0001](RFC-0001-lifecycle-platform.md).
 │  auth / RBAC / CSRF / audit          pages + JSON API                 │
 │        │                                   │                          │
 │  ┌─────┴─────────┐   ┌────────────────────┴──────────────────┐        │
-│  │ discovery.py  │   │ lifecycle / topology / cluster / files │        │
+│  │ discovery.py  │   │ lifecycle / topology / files           │        │
 │  │ lease parser  │   │ (app.py routes + helpers)              │        │
 │  └─────┬─────────┘   └───────────────┬────────────────────────┘        │
 │        │                             │ start_job(kind, spec, secret)   │
@@ -42,7 +42,7 @@ Companion to [RFC-0001](RFC-0001-lifecycle-platform.md).
 │        │                             │ ansible-playbook                │
 │  ┌─────▼─────────────────────────────▼─────┐                           │
 │  │ SQLite /data/ccp/ccp.db  (WAL)          │                           │
-│  │ users nodes hardware clusters scripts   │                           │
+│  │ users nodes hardware scripts            │                           │
 │  │ jobs files audit                        │                           │
 │  └─────────────────────────────────────────┘                           │
 └───────────────────────────────────────────────────────────────────────┘
@@ -89,9 +89,8 @@ orphan-reaping already handles this) — the operator retries.
 ## Targeting gate
 
 `_selected_nodes` (shell/ansible launch) and `_resolve_nodes` (executor)
-both filter to `state='managed' OR conn='local'`. A cluster id is a third
-selector next to node ids and group names; it expands to the cluster's
-managed members.
+both filter to `state='managed' OR conn='local'`. Targets are node ids or a
+group name (`nodes.groups`), expanded to eligible members.
 
 ## Hardware discovery
 
@@ -112,12 +111,14 @@ job applies `hostnamectl set-hostname` (falling back to `/etc/hostname` +
 not root; on success it updates `nodes.name` + topology columns in the same
 transaction, so the inventory reflects the change immediately.
 
-## Clusters
+## Removed: Clusters (2026-09-10)
 
-`clusters` is a first-class table; `nodes.cluster_id` is the membership edge
-(a node belongs to at most one cluster). A cluster is an execution target:
-the ClusterShell, Ansible and Deploy-files pages accept a cluster and expand
-it to its managed members. `kind` is always `generic` now (see below).
+The first-class `clusters` table, membership (`nodes.cluster_id`), the
+Clusters page, the cluster selector on the ClusterShell/Ansible/Deploy-files
+pages and the dashboard cluster cards were removed at the operator's request
+together with the Slurm builder. Grouping is done with `nodes.groups` (comma
+separated tags) as before. Existing databases keep the unused table and
+column; nothing reads them.
 
 ## Removed: Slurm builder and lifecycle (2026-09-10)
 
@@ -130,8 +131,7 @@ complete feature, with its tests, is `f381985`; everything generic that the
 work produced stays: per-host output framing and the ordered multi-stage
 console renderer, the job-log copy/download, readable YAML Ansible results,
 GPU-device awareness in hardware facts, and the hostname/`/etc/hosts` fixes.
-Databases created before the removal keep their unused `slurm_*` columns;
-clusters of kind `slurm` are normalised to `generic` at startup (M6).
+Databases created before the removal keep their unused `slurm_*` columns.
 
 ## Ansible sources
 

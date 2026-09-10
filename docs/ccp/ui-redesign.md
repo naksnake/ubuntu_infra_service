@@ -11,7 +11,6 @@ workflow, not technology.
 Dashboard
 Discovery        ← new: DHCP leases → import → onboard
 Nodes            ← redesigned: lifecycle-centric inventory
-Clusters         ← new
 Rack View        ← new: auto-generated from hostname topology
 ClusterShell
 Ansible          ← redesigned: filesystem sources + inline fallback
@@ -30,7 +29,6 @@ Replace the four counters with the operator's actual questions:
 - **Lifecycle funnel**: discovered / onboarding / managed / failed /
   unverified counts, each linking to the filtered Nodes page.
 - New-on-the-network callout ("3 leases not in inventory → Discovery").
-- Cluster cards: name, members managed/total.
 - Recent jobs (unchanged).
 
 ### Discovery (new)
@@ -43,7 +41,7 @@ same credential-first flow.
 
 ### Nodes (redesigned)
 - Columns: state badge (color-coded), name, address, MAC, rack/sled/role,
-  cluster, hardware one-liner (from `hardware`), last job.
+  hardware one-liner (from `hardware`), last job.
 - Row actions by state: `failed`/`discovered`/`unverified` → **Onboard**
   (credentials modal) / **Verify**; `managed` → **Rename** (one-click
   hostname modal), **Rescan HW**, **Delete**.
@@ -52,10 +50,8 @@ same credential-first flow.
 - The old free-form "Add node" card is demoted to the manual-add flow above.
 
 ### Clusters
-One card per cluster: member table (add/remove from managed nodes) and
-**Run on this cluster** shortcuts that prefill the ClusterShell, Ansible and
-Deploy-files targets. Nothing else: the Slurm lifecycle strip, one-click
-deployment and settings panel were removed on 2026-09-10 (see RFC amendment).
+Removed on 2026-09-10 together with the Slurm builder (see RFC amendment);
+groups (`nodes.groups`) are the targeting mechanism.
 
 ### Rack View (new)
 CSS-grid racks generated from `rack`/`sled` columns — no drawing, no config.
@@ -64,9 +60,8 @@ without topology fall into an "unracked" tray. Clicking a cell opens the node
 detail drawer.
 
 ### ClusterShell / Ansible
-- Shared target selector gains a **Cluster** dropdown next to node
-  checkboxes and group input; non-managed nodes are unselectable (greyed with
-  their state).
+- Shared target selector: node checkboxes and a group input; non-managed
+  nodes are unselectable (greyed with their state).
 - Ansible page: primary flow = pick source dir → pick playbook (scanned) →
   extra vars → run. Inline playbook textarea moves under "Ad-hoc playbook"
   (kept for one-offs, still not an editor — nothing is saved).
@@ -78,7 +73,7 @@ read-only with "run" and a deprecation note pointing at Ansible sources.
 ## Visual language
 
 Existing stylesheet extended with a state palette used identically on
-Nodes, Rack View, Dashboard and Clusters:
+Nodes, Rack View and Dashboard:
 
 | state | color |
 |---|---|

@@ -46,7 +46,7 @@ run commands/playbooks across your nodes, and `http://192.168.100.1:8090/`
 | TFTP | `lab_tftp` | Delivers bootloader files to PXE clients |
 | File server | `lab_webfs` | HTTP share for ISO images, kernels, initrds |
 | iPXE Manager | `lab_ipxe_manager` | Web UI: upload boot files, edit the PXE boot menu, manage autoinstall profiles |
-| Cluster Control Panel | `lab_ccp` | Web UI: node lifecycle management for AI/HPC labs — DHCP discovery → credential-validated onboarding → hardware discovery → clusters → file deployment, plus ClusterShell/Ansible execution, login/RBAC, job history and audit log |
+| Cluster Control Panel | `lab_ccp` | Web UI: node lifecycle management for AI/HPC labs — DHCP discovery → credential-validated onboarding → hardware discovery → file deployment, plus ClusterShell/Ansible execution, login/RBAC, job history and audit log |
 | NAT | systemd `lab-nat` | Lets lab clients reach the internet via the host |
 | Monitor | `lab_monitor` | Web dashboard: service health, DHCP lease lookup, file upload to the share |
 | Docker API proxy | `lab_docker_proxy` | Read-only Docker API for the monitor (the raw socket is never mounted into a web-facing container) |
@@ -369,7 +369,7 @@ http://192.168.100.1:8060/
 Log in with `CCP_ADMIN_USER` / `CCP_ADMIN_PASSWORD` from your `.env`. From here you can
 import machines discovered from DHCP leases, onboard them with a username+password
 (CCP validates access and installs its SSH key before a node counts as managed),
-run ClusterShell commands and Ansible playbooks across nodes and clusters, deploy
+run ClusterShell commands and Ansible playbooks across nodes and groups, deploy
 files to them, and review job history and the audit log.
 See [Cluster Control Panel](#cluster-control-panel-node-lifecycle) below.
 
@@ -525,8 +525,6 @@ management panel for AI/HPC lab clusters (design docs in `docs/ccp/`):
   draws itself from them. One-click rename runs `hostnamectl set-hostname`
   (+ `/etc/hostname`, `/etc/hosts`) on the node and refreshes the inventory
   immediately.
-- **Clusters** — first-class groups of managed nodes that act as execution
-  targets for ClusterShell, Ansible and file deployment.
 - **Deploy files** — push staged files to groups or individual nodes with one
   click (Ansible copy or `clush --copy`), with per-host results.
 - **ClusterShell** — run a shell command across selected nodes/groups/clusters
@@ -536,16 +534,14 @@ management panel for AI/HPC lab clusters (design docs in `docs/ccp/`):
   `roles/`, `group_vars/`, `host_vars/` honored); an inventory is generated
   from the selected targets automatically. Ad-hoc inline playbooks still work.
 - **Login + RBAC** — three roles: `viewer` (read-only), `operator` (run jobs,
-  manage nodes/clusters/scripts/files), `admin` (everything + user management
+  manage nodes/scripts/files), `admin` (everything + user management
   + audit log).
 - **Job history** — every run (commands, playbooks, onboarding, hardware
   scans, renames, file deployments) is recorded with status, exit code, and full
-  output. The Jobs page shows how much disk the logs use and lets an admin
-  **clean up history** (all finished / failed only, older than N days, keep the
-  newest N, one kind, orphan log files) with a preview before anything is
-  deleted; set `CCP_JOB_RETENTION_DAYS` (and optionally
-  `CCP_JOB_RETENTION_KEEP`) in the `ccp` environment to prune old finished
-  jobs automatically. Running jobs are never deleted.
+  output. The Jobs page shows how much disk the logs use; an admin clears the
+  whole history (every finished job and log file) with one button, and
+  `CCP_JOB_RETENTION_DAYS` in the `ccp` environment clears finished jobs older
+  than N days automatically. Running jobs are never deleted.
 - **Files** — per-user file storage (kickstart snippets, tarballs, etc.).
 - **Audit log** — every login and state-changing action is recorded (admin-only).
 

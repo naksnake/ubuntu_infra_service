@@ -89,12 +89,11 @@ def _finish(job_id, status, exit_code):
 
 # ── job history clean-up ─────────────────────────────────────────────────────
 # Job rows are small; the log files are not (a playbook run is easily hundreds
-# of KB). Deleting a job therefore always means row + log file, running jobs
-# are never touched (their thread is still writing), and an optional retention
-# prunes old history by itself so the panel never fills the disk.
+# of KB). Deleting a job therefore always means row + log file. Running jobs
+# are never deleted — their thread is still writing — and an optional retention
+# clears old history by itself so the panel never fills the disk.
 
 JOB_RETENTION_DAYS = int(os.environ.get('CCP_JOB_RETENTION_DAYS', '0'))   # 0 = keep forever
-JOB_RETENTION_KEEP = int(os.environ.get('CCP_JOB_RETENTION_KEEP', '0'))   # newest N always kept
 
 
 def jobs_stats():
@@ -112,11 +111,10 @@ def jobs_stats():
                     pass
     except OSError:
         pass
-    oldest = db.query('SELECT MIN(created_at) AS t FROM jobs', one=True)['t']
     return {'total': sum(by.values()), 'running': by.get('running', 0),
             'success': by.get('success', 0), 'failed': by.get('failed', 0),
-            'log_files': files, 'log_bytes': size, 'oldest_at': oldest,
-            'retention_days': JOB_RETENTION_DAYS, 'retention_keep': JOB_RETENTION_KEEP}
+            'log_files': files, 'log_bytes': size,
+            'retention_days': JOB_RETENTION_DAYS}
 
 
 def _remove_log(job_id):
@@ -130,6 +128,15 @@ def _remove_log(job_id):
         return 0
 
 
+def _delete_jobs(ids):
+    """Rows and log files for the given job ids; returns the bytes freed."""
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        db.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?' for _ in chunk)})",
+                   tuple(chunk))
+    return sum(_remove_log(jid) for jid in ids)
+
+
 def delete_job(job_id):
     """Delete one job: row and log file. Returns False (nothing deleted) while
     the job is still running — its thread would keep writing into a file
@@ -137,84 +144,46 @@ def delete_job(job_id):
     job = db.query('SELECT status FROM jobs WHERE id=?', (job_id,), one=True)
     if job and job['status'] == 'running':
         return False
-    db.execute('DELETE FROM jobs WHERE id=?', (job_id,))
-    _remove_log(job_id)
+    _delete_jobs([job_id])
     return True
 
 
-def cleanup_jobs(older_than_days=None, status='finished', kinds=None, keep_last=0,
-                 orphans=True, dry_run=False):
-    """Bulk history clean-up. Running jobs are never touched.
-
-    status: 'finished' (success + failed), 'failed' or 'success'.
-    older_than_days: only jobs that finished (or, if never finished, started)
-      at least that many days ago; None/0 = any age.
-    kinds: restrict to these job kinds. keep_last: the newest N matching jobs
-      survive regardless. orphans: also remove *.log files no job row refers
-      to (left behind by deletes before logs were cleaned up with their rows).
-    dry_run: only report what would be deleted.
-    Returns {'deleted', 'orphans_removed', 'bytes_freed', 'dry_run'}."""
-    clauses, params = ["status != 'running'"], []
-    if status in ('failed', 'success'):
-        clauses.append('status = ?')
-        params.append(status)
-    if older_than_days:
-        clauses.append('COALESCE(finished_at, created_at) < ?')
-        params.append(int(time.time()) - int(older_than_days) * 86400)
-    if kinds:
-        clauses.append(f"kind IN ({','.join('?' for _ in kinds)})")
-        params += list(kinds)
-    rows = db.query(f"SELECT id FROM jobs WHERE {' AND '.join(clauses)} ORDER BY id DESC",
-                    tuple(params))
-    ids = [r['id'] for r in rows][max(0, int(keep_last or 0)):]
-    freed = 0
-    for jid in ids:
-        try:
-            freed += os.path.getsize(_log_path(jid))
-        except OSError:
-            pass
-    orphan_files = []
-    if orphans:
-        known = {r['id'] for r in db.query('SELECT id FROM jobs')}
-        try:
-            for name in os.listdir(JOBS_DIR):
-                stem = name[:-4] if name.endswith('.log') else ''
-                if stem.isdigit() and int(stem) not in known:
-                    p = os.path.join(JOBS_DIR, name)
-                    orphan_files.append(p)
-                    try:
-                        freed += os.path.getsize(p)
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-    result = {'deleted': len(ids), 'orphans_removed': len(orphan_files),
-              'bytes_freed': freed, 'dry_run': bool(dry_run)}
-    if dry_run:
-        return result
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        db.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?' for _ in chunk)})",
-                   tuple(chunk))
-    for jid in ids:
-        _remove_log(jid)
-    for p in orphan_files:
-        try:
-            os.remove(p)
-        except OSError:
-            pass
-    return result
+def clear_history():
+    """Delete every finished job with its log file, plus any *.log in the jobs
+    directory that no job row refers to. Running jobs are kept.
+    Returns {'deleted', 'orphans_removed', 'bytes_freed'}."""
+    ids = [r['id'] for r in db.query("SELECT id FROM jobs WHERE status != 'running'")]
+    freed = _delete_jobs(ids)
+    known = {r['id'] for r in db.query('SELECT id FROM jobs')}
+    orphans = 0
+    try:
+        for name in os.listdir(JOBS_DIR):
+            stem = name[:-4] if name.endswith('.log') else ''
+            if stem.isdigit() and int(stem) not in known:
+                p = os.path.join(JOBS_DIR, name)
+                try:
+                    freed += os.path.getsize(p)
+                    os.remove(p)
+                    orphans += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return {'deleted': len(ids), 'orphans_removed': orphans, 'bytes_freed': freed}
 
 
 def prune_by_retention():
     """Automatic clean-up (CCP_JOB_RETENTION_DAYS > 0): finished jobs older
-    than the retention go, the newest CCP_JOB_RETENTION_KEEP stay. Runs when a
-    job starts, so a busy panel prunes itself; never raises."""
+    than the retention are deleted with their logs whenever a job starts, so a
+    busy panel prunes itself. Never raises."""
     if JOB_RETENTION_DAYS <= 0:
         return None
     try:
-        return cleanup_jobs(older_than_days=JOB_RETENTION_DAYS,
-                            keep_last=JOB_RETENTION_KEEP, orphans=False)
+        cutoff = int(time.time()) - JOB_RETENTION_DAYS * 86400
+        ids = [r['id'] for r in db.query(
+            "SELECT id FROM jobs WHERE status != 'running' "
+            "AND COALESCE(finished_at, created_at) < ?", (cutoff,))]
+        return {'deleted': len(ids), 'bytes_freed': _delete_jobs(ids)} if ids else None
     except Exception as exc:                       # noqa: BLE001 — never block a job
         sys.stderr.write(f'[ccp] retention prune failed: {exc}\n')
         return None

@@ -43,9 +43,8 @@ lifecycle logic is tested by stubbing them.
   updates `nodes.name` + rack/sled/role immediately; failure leaves name
   untouched.
 
-### Phase 5 — clusters (`test_clusters.py`)
-- CRUD + membership move semantics; delete clears membership.
-- `cluster_id` targeting expands to managed members only.
+### Phase 5 — clusters
+Removed with the Clusters feature (2026-09-10); `test_clusters.py` deleted.
 
 ### Phase 6 — slurm
 Removed with the Slurm builder (2026-09-10); `test_slurm*.py` were deleted in
@@ -67,7 +66,7 @@ the same commit.
    without reload tricks.
 7. ClusterShell + Ansible run against a cluster target; non-managed node is
    not selectable.
-8. Deploy files to a cluster target: every member receives the file, the
+8. Deploy files to a group target: every member receives the file, the
    job log shows one collapsible per host.
 9. Job history/audit shows every step with the acting user; no password
    anywhere in `/data/ccp`.
@@ -77,8 +76,8 @@ the same commit.
 ```bash
 cd services/ccp
 for t in test_userfiles test_lifecycle test_discovery test_hardware \
-         test_topology test_clusters test_ansible_sources \
-         test_filedeploy; do python3 $t.py || exit 1; done
+         test_topology test_ansible_sources test_filedeploy \
+         test_jobs_cleanup; do python3 $t.py || exit 1; done
 ```
 
 (Tests require only Flask; executor SSH calls are stubbed.)

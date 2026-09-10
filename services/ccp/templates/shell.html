@@ -30,7 +30,7 @@ async function run(){
   const payload=selectedNodePayload();
   payload.command=document.getElementById('cmd').value.trim();
   if(!payload.command){toast('Enter a command',true);return;}
-  if(!payload.node_ids.length&&!payload.group&&!payload.cluster_id){toast('Select nodes, a group or a cluster',true);return;}
+  if(!payload.node_ids.length&&!payload.group){toast('Select nodes or a group',true);return;}
   const btn=document.getElementById('run-btn'),con=document.getElementById('console');
   btn.disabled=true;con.textContent='Launching…';
   try{
