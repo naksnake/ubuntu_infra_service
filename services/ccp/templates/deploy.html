@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}Deploy files{% endblock %}
+{% block heading %}Deploy files{% endblock %}
+{% block body %}
+{% if not role_ok('operator') %}
+<div class="warnbox">You have viewer access — deploying files requires the operator role.</div>
+{% endif %}
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Staging assets ({{ staged|length }})</h2>
+    <p class="muted">Files in your <a href="{{ url_for('files_page') }}">file space</a>.
+      Upload there, select here.</p>
+    <div class="picklist">
+      {% for f in staged %}
+      <label>
+        <input type="checkbox" class="file-cb" value="{{ f.path }}">
+        <span class="mono">{{ f.path }}</span>
+        <span class="rcount">{{ f.size | filesizeformat }}</span>
+      </label>
+      {% else %}
+      <div class="empty">No staged files — upload some on the
+        <a href="{{ url_for('files_page') }}">Files</a> page first.</div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Targets</h2>
+    <p class="muted">Tick a group to take all of its managed nodes, or expand it and
+      pick individual nodes — the two mix freely.</p>
+    <div class="picklist" id="targets">Loading…</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Deploy</h2>
+  <div class="row">
+    <div><label>Destination path on the target nodes</label>
+      <input id="d-dest" placeholder="/opt/assets"></div>
+    <div><label>Method</label>
+      <select id="d-method">
+        <option value="clush">ClusterShell (clush --copy) — raw parallel delivery</option>
+        <option value="ansible">Ansible (copy module) — idempotent, reports changed</option>
+      </select></div>
+  </div>
+  <div style="margin-top:14px">
+    <button class="btn" id="d-btn" onclick="deployFiles()"
+      {{ 'disabled' if not role_ok('operator') }}>⇪ Deploy selected files to selected targets</button>
+    <span id="d-sel" class="muted" style="margin-left:10px"></span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Results <span id="job-status" class="badge" style="float:right"></span></h2>
+  <div id="console" class="console">Select files and targets, then deploy.</div>
+</div>
+{% endblock %}
+
+{% block scripts %}<script>
+let TARGETS = [];
+
+function renderTargets() {
+  const el = document.getElementById('targets');
+  if (!TARGETS.length) { el.innerHTML = '<div class="empty">No nodes yet.</div>'; return; }
+  el.innerHTML = TARGETS.map((g, gi) => {
+    const usable = g.nodes.filter(n => n.eligible).length;
+    const rows = g.nodes.map((n, ni) => `
+      <label class="${n.eligible ? '' : 'ineligible'}"
+        title="${n.eligible ? '' : 'only managed nodes can receive files'}">
+        <input type="checkbox" class="node-cb" data-group="${esc(g.name)}"
+          value="${n.id}" ${n.eligible ? '' : 'disabled'}>
+        <span class="mono">${esc(n.name)}</span>
+        <span class="rcount">${esc(n.address)}</span>
+        ${n.eligible ? '' : `<span class="badge ns-${esc(n.state)}">${esc(n.state)}</span>`}
+      </label>`).join('');
+    return `<details class="rgroup" ${TARGETS.length <= 3 ? 'open' : ''}>
+      <summary>
+        <input type="checkbox" class="group-cb" value="${esc(g.name)}"
+          onclick="event.stopPropagation()" onchange="syncGroup(this,${gi})">
+        [${esc(g.name)}]
+        <span class="rcount">${usable}/${g.nodes.length} managed</span>
+      </summary>
+      <div class="rbody" data-gi="${gi}">${rows}</div>
+    </details>`;
+  }).join('');
+  el.querySelectorAll('input').forEach(i => i.addEventListener('change', updateCount));
+  updateCount();
+}
+
+// ticking a group selects every managed node in it (and untick clears them)
+function syncGroup(cb, gi) {
+  document.querySelectorAll(`.rbody[data-gi="${gi}"] .node-cb:not([disabled])`)
+    .forEach(n => { n.checked = cb.checked; });
+  updateCount();
+}
+
+function selection() {
+  const files = [...document.querySelectorAll('.file-cb:checked')].map(c => c.value);
+  const node_ids = [...document.querySelectorAll('#targets .node-cb:checked')].map(c => c.value);
+  // a group is only sent when its box is ticked AND none of its nodes were
+  // individually unticked — otherwise the explicit node list is authoritative
+  const groups = [...document.querySelectorAll('.group-cb:checked')]
+    .map(c => c.value)
+    .filter(g => ![...document.querySelectorAll(`#targets .node-cb[data-group="${g}"]`)]
+      .some(n => !n.disabled && !n.checked));
+  return { files, node_ids, groups };
+}
+
+function updateCount() {
+  const s = selection();
+  document.getElementById('d-sel').textContent =
+    `${s.files.length} file(s) → ${s.node_ids.length} node(s)` +
+    (s.groups.length ? ` (groups: ${s.groups.join(', ')})` : '');
+}
+
+async function deployFiles() {
+  const s = selection();
+  const dest = document.getElementById('d-dest').value.trim();
+  if (!s.files.length) { toast('Select at least one staged file', true); return; }
+  if (!s.node_ids.length) { toast('Select at least one target node or group', true); return; }
+  if (!dest) { toast('Enter the destination path', true); return; }
+  const btn = document.getElementById('d-btn'), con = document.getElementById('console');
+  btn.disabled = true; con.textContent = 'Starting deployment…';
+  try {
+    const d = await api('POST', '/api/deploy/files', {
+      files: s.files, node_ids: s.node_ids, groups: s.groups,
+      dest, method: document.getElementById('d-method').value });
+    if (d.excluded && d.excluded.length) toast('Skipped: ' + d.excluded.join(', '), true);
+    pollJob(d.job_id, con, document.getElementById('job-status'),
+            () => { btn.disabled = false; });
+  } catch (e) { con.textContent = 'Error: ' + e.message; btn.disabled = false; toast(e.message, true); }
+}
+
+document.querySelectorAll('.file-cb').forEach(c => c.addEventListener('change', updateCount));
+api('GET', '/api/deploy/targets').then(d => { TARGETS = d.groups; renderTargets(); })
+  .catch(e => { document.getElementById('targets').textContent = e.message; });
+</script>{% endblock %}

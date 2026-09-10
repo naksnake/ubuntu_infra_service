@@ -13,12 +13,15 @@
     <div class="brand"><span class="logo">◈</span><div><b>Cluster Control</b><small>Panel</small></div></div>
     <nav>
       <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.path=='/' }}">▚ Dashboard</a>
+      <a href="{{ url_for('discovery_page') }}" class="{{ 'active' if request.path=='/discovery' }}">◉ Discovery</a>
       <a href="{{ url_for('nodes_page') }}" class="{{ 'active' if request.path=='/nodes' }}">▤ Nodes</a>
+      <a href="{{ url_for('rack_page') }}" class="{{ 'active' if request.path=='/rack' }}">▦ Rack View</a>
       <a href="{{ url_for('shell_page') }}" class="{{ 'active' if request.path=='/shell' }}">❯_ ClusterShell</a>
       <a href="{{ url_for('ansible_page') }}" class="{{ 'active' if request.path=='/ansible' }}">▶ Ansible</a>
       <a href="{{ url_for('scripts_page') }}" class="{{ 'active' if request.path=='/scripts' }}">❏ Scripts</a>
       <a href="{{ url_for('jobs_page') }}" class="{{ 'active' if request.path.startswith('/jobs') }}">≣ Jobs</a>
       <a href="{{ url_for('files_page') }}" class="{{ 'active' if request.path=='/files' }}">⬆ Files</a>
+      <a href="{{ url_for('deploy_page') }}" class="{{ 'active' if request.path=='/deploy' }}">⇪ Deploy files</a>
       {% if role_ok('admin') %}
       <div class="nav-sep">Admin</div>
       <a href="{{ url_for('users_page') }}" class="{{ 'active' if request.path=='/users' }}">☺ Users</a>
@@ -40,6 +43,11 @@
       {% if messages %}<div class="flash">{{ messages[0] }}</div>{% endif %}
     {% endwith %}
     <div id="toast" class="toast"></div>
+    <dialog id="detail-dlg" class="dlg dlg-wide">
+      <h2 id="dt-name"></h2>
+      <div id="dt-body" class="muted">Loading…</div>
+      <div style="margin-top:14px"><button class="btn btn-ghost" onclick="document.getElementById('detail-dlg').close()">Close</button></div>
+    </dialog>
     {% block body %}{% endblock %}
   </main>
 </div>

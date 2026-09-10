@@ -2,6 +2,22 @@
 {% block heading %}Job History{% endblock %}
 {% block body %}
 <div class="card">
+  <div class="jobs-summary">
+    <span><b>{{ stats.total }}</b> jobs</span>
+    <span class="sep">·</span><span><b>{{ stats.running }}</b> running</span>
+    <span class="sep">·</span><span><b>{{ stats.success }}</b> succeeded</span>
+    <span class="sep">·</span><span><b>{{ stats.failed }}</b> failed</span>
+    <span class="sep">·</span><span>logs: <b>{{ (stats.log_bytes / 1048576) | round(1) }} MB</b> in {{ stats.log_files }} file(s)</span>
+    {% if stats.retention_days %}<span class="sep">·</span><span title="CCP_JOB_RETENTION_DAYS in the ccp environment">finished jobs older than {{ stats.retention_days }} days are cleared automatically</span>{% endif %}
+    {% if role_ok('admin') %}
+    <button class="btn btn-danger btn-sm" style="margin-left:auto" onclick="clearHistory()"
+      {{ 'disabled' if (stats.total - stats.running) == 0 and stats.log_files == 0 }}
+      title="Delete every finished job and every log file. Running jobs are kept.">Clear all history</button>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
   <table>
     <thead><tr><th>#</th><th>Kind</th><th>Target</th><th>Status</th><th>By</th><th>Started</th><th>Finished</th>{% if role_ok('admin') %}<th></th>{% endif %}</tr></thead>
     <tbody>
@@ -14,10 +30,25 @@
         <td>{{ j.created_by }}</td>
         <td><small>{{ j.created_at | tstime }}</small></td>
         <td><small>{{ j.finished_at | tstime }}</small></td>
-        {% if role_ok('admin') %}<td><button class="btn btn-danger btn-sm" onclick="del('/api/jobs/{{ j.id }}','Delete job {{ j.id }}?')">Delete</button></td>{% endif %}
+        {% if role_ok('admin') %}<td>{% if j.status != 'running' %}<button class="btn btn-danger btn-sm" onclick="del('/api/jobs/{{ j.id }}','Delete job {{ j.id }} and its log?')">Delete</button>{% endif %}</td>{% endif %}
       </tr>
       {% else %}<tr><td colspan="8" class="empty">No jobs yet.</td></tr>{% endfor %}
     </tbody>
   </table>
+  {% if jobs|length == 200 %}<p class="muted" style="font-size:12px;margin:10px 0 0">Showing the newest 200 jobs; older ones are still in the history and are covered by Clear all history.</p>{% endif %}
 </div>
 {% endblock %}
+
+{% block scripts %}<script>
+async function clearHistory(){
+  let s;
+  try{s=await api('GET','/api/jobs/stats');}catch(e){toast(e.message,true);return;}
+  const n=s.total-s.running;
+  if(!confirm('Delete all '+n+' finished job'+(n===1?'':'s')+' and every log file ('+
+    (s.log_bytes/1048576).toFixed(1)+' MB)?\n\nRunning jobs are kept. This cannot be undone.'))return;
+  try{const d=await api('POST','/api/jobs/cleanup',{});
+    toast('Deleted '+d.deleted+' job'+(d.deleted===1?'':'s')+', freed '+(d.bytes_freed/1048576).toFixed(1)+' MB');
+    location.reload();}
+  catch(e){toast(e.message,true);}
+}
+</script>{% endblock %}

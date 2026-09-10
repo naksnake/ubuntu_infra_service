@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Rack View{% endblock %}
+{% block heading %}Rack View{% endblock %}
+{% block body %}
+<p class="muted">Generated automatically from hostnames (<span class="mono">rack0_sled1_gpu</span> →
+rack 0, sled 1, role gpu). Rename nodes on the <a href="{{ url_for('nodes_page') }}">Nodes</a>
+page to place them.</p>
+
+{% if racks %}
+<div class="rackrow">
+  {% for rack, sleds in racks.items() %}
+  <div class="rack">
+    <div class="rack-title">Rack {{ rack }}</div>
+    {% for n in sleds %}
+    <div class="sled ns-bg-{{ n.state }}" onclick="showDetail({{ n.id }})"
+         title="{{ n.name }} · {{ n.state }}{% if n.state_detail %} — {{ n.state_detail }}{% endif %}">
+      <div class="sled-head">
+        <span class="sled-no">{{ n.sled }}</span>
+        <b>{{ n.name }}</b>
+        {% if n.role %}<span class="pill">{{ n.role }}</span>{% endif %}
+      </div>
+      <div class="sled-sub mono">
+        {{ n.address }}
+        {% if n.cpu_cores %} · {{ n.cpu_cores }}c · {{ ((n.mem_mb or 0)/1024)|round(0)|int }}G{% endif %}
+        {% if n.gpu_count %} · {{ n.gpu_count }}× GPU{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="card"><div class="empty">No rack-addressed nodes yet — rename nodes to the
+<span class="mono">rack&lt;N&gt;_sled&lt;M&gt;_&lt;role&gt;</span> scheme and they appear here automatically.</div></div>
+{% endif %}
+
+{% if unracked %}
+<div class="card">
+  <h2>Unracked ({{ unracked|length }})</h2>
+  <p class="muted">Names don't follow the rack scheme — they still work everywhere else.</p>
+  <div class="unracked">
+    {% for n in unracked %}
+    <span class="sled sled-mini ns-bg-{{ n.state }}" onclick="showDetail({{ n.id }})">
+      {{ n.name }}{% if n.role %} <span class="pill">{{ n.role }}</span>{% endif %}</span>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

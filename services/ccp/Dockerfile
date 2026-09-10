@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY db.py executor.py app.py ./
+COPY db.py executor.py app.py ansible_sources.py discovery.py topology.py ./
 COPY templates/ templates/
 COPY static/ static/
 

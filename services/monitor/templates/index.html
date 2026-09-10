@@ -23,7 +23,13 @@
        and the folder <button> below is labelable and comes first — without
        the explicit binding every card click would open the FOLDER picker,
        which can't select plain files at all #}
-    <label class="link-card upload-card" id="uploadCard" for="uploadInput" title="Upload files or a whole folder to the file server share (stored in the monitor's own space)">
+    {# NOT a <label for=…>: an <input type=file> that is BOTH the label's
+       for-target AND nested inside it makes Firefox fire the click twice, so
+       the file dialog opens and is instantly dismissed — the user can never
+       pick a file. We open the plain-file picker explicitly in JS instead
+       (same pattern as the iPXE Manager), so a card click never reaches the
+       folder picker. #}
+    <div class="link-card upload-card" id="uploadCard" title="Upload files or a whole folder to the file server share (stored in the monitor's own space)">
       <span class="link-icon">&#128228;</span>
       <span class="link-label">Upload to file server</span>
       <span class="link-url" id="uploadStatus">ISO / kernel / initrd — click or drop</span>
@@ -31,7 +37,7 @@
       <div class="upload-progress" id="uploadProgress"><div id="uploadFill"></div></div>
       <input type="file" id="uploadInput" multiple hidden>
       <input type="file" id="uploadFolderInput" webkitdirectory hidden>
-    </label>
+    </div>
     {% endif %}
   </div>
 </section>
@@ -262,6 +268,14 @@
       return out;
     }
 
+    // open the plain-file picker on a card click (the card is a plain <div>,
+    // not a <label for=…>, to dodge Firefox's double-click-the-input bug).
+    // A click on the folder button is left to its own handler below.
+    upCard.addEventListener('click', e => {
+      if (e.target.closest('#uploadFolderBtn')) return;
+      pickerOpen = true;
+      upInput.click();
+    });
     // freeze the auto-refresh while a picker dialog is up: a reload behind
     // it would orphan the dialog and the chosen files would go nowhere
     upInput.addEventListener('click', () => { pickerOpen = true; });

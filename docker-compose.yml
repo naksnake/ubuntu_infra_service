@@ -215,6 +215,10 @@ services:
       # files and the SSH key — no single-file mounts (which Docker would
       # auto-create as directories on a bare `docker compose up`)
       - ./data/ccp:/data/ccp:rw
+      # dnsmasq lease database (written by lab_dhcp) — read-only source for
+      # the Discovery page; deploy.sh pre-creates the file so this mount
+      # never auto-creates a directory
+      - ./data/dnsmasq.leases:/data/dnsmasq.leases:ro
     environment:
       - CCP_SECRET_KEY=${CCP_SECRET_KEY}
       - CCP_ADMIN_USER=${CCP_ADMIN_USER:-admin}
@@ -227,11 +231,22 @@ services:
       # overrides per user
       - CCP_USER_QUOTA_MB=${CCP_USER_QUOTA_MB:-10240}
       - CCP_SSH_KEY=/data/ccp/ssh/id_ccp
+      - CCP_LEASES_FILE=/data/dnsmasq.leases
+      # colon-separated playbook source dirs scanned by the Ansible page.
+      # The default lives inside the /data/ccp mount (host: ./data/ccp/ansible).
+      # To use external checkouts, add more ro mounts and list them here, e.g.
+      #   - /root/rex/ansible_db:/sources/ansible_db:ro
+      #   - CCP_ANSIBLE_DIRS=/data/ccp/ansible:/sources/ansible_db
+      - CCP_ANSIBLE_DIRS=${CCP_ANSIBLE_DIRS:-/data/ccp/ansible}
       # hard per-job wall-clock cap (seconds) so a hung command/playbook can't
       # pin a worker thread forever
       - CCP_JOB_TIMEOUT=${CCP_JOB_TIMEOUT:-900}
+      # job-history retention: clear finished jobs (and their logs) older than
+      # N days whenever a job starts; 0 keeps everything
+      - CCP_JOB_RETENTION_DAYS=${CCP_JOB_RETENTION_DAYS:-0}
     healthcheck:
-      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/')\""]
+      # in-container port is fixed at 8060; /healthz needs no login
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/healthz')\""]
       interval: 30s
       timeout: 5s
       retries: 3
