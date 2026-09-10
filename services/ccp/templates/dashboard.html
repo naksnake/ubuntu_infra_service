@@ -28,7 +28,7 @@ lab network {{ 'are' if new_systems != 1 else 'is' }} not in the inventory yet â
   {% for c in clusters %}
   <a class="stat" href="{{ url_for('clusters_page') }}">
     <div class="n" style="font-size:18px">{{ c.name }}
-      {% if c.kind == 'slurm' %}<span class="badge sl-{{ c.slurm_state|lower }}">{{ c.slurm_state }}</span>{% endif %}</div>
+      </div>
     <div class="l">{{ c.kind }} Â· {{ c.managed }}/{{ c.members }} managed</div></a>
   {% endfor %}
 </div>

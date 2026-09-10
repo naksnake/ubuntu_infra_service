@@ -63,19 +63,14 @@ ALTER TABLE nodes ADD COLUMN role TEXT NOT NULL DEFAULT '';
 Backfill: parse every existing `nodes.name` once with `topology.parse()`.
 Columns are recomputed whenever `name` changes (add/onboard/hostname job).
 
-## M4 — clusters (Phase 5/6/7)
+## M4 — clusters (Phase 5)
 
 ```sql
 CREATE TABLE IF NOT EXISTS clusters (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT NOT NULL UNIQUE,
-    kind         TEXT NOT NULL DEFAULT 'generic',   -- generic | slurm
+    kind         TEXT NOT NULL DEFAULT 'generic',
     description  TEXT NOT NULL DEFAULT '',
-    slurm_state  TEXT NOT NULL DEFAULT 'INIT',
-        -- INIT | DISCOVER | DEPLOY | VALIDATE | BENCHMARK | REPORT | MONITOR | CLEANUP
-    controller_node_id INTEGER REFERENCES nodes(id) ON DELETE SET NULL,
-    slurm_conf   TEXT NOT NULL DEFAULT '',
-    gres_conf    TEXT NOT NULL DEFAULT '',
     created_by   TEXT NOT NULL DEFAULT '',
     created_at   INTEGER NOT NULL
 );
@@ -87,20 +82,18 @@ Note: SQLite `ALTER TABLE ADD COLUMN` cannot add a foreign key that is
 enforced retroactively in older versions; membership integrity is enforced in
 application code (cluster delete clears `nodes.cluster_id`).
 
-## M5 — automatic deployment settings (Clusters redesign)
+## M5 — retired
 
-Additive `ALTER TABLE clusters ADD COLUMN`, applied when `auto_deploy` is
-missing:
+M5 added the Slurm automatic-deployment settings (`auto_deploy`,
+`install_from`, `slurm_version`, `tarball_url`); with the Slurm builder
+removed it is no longer applied. Databases that received M4's
+`slurm_state`/`controller_node_id`/`slurm_conf`/`gres_conf` or M5's columns
+keep them — SQLite cannot drop columns cheaply and nothing reads them.
 
-| column | type | default | meaning |
-|---|---|---|---|
-| `auto_deploy` | INTEGER | 1 | re-run the pipeline when membership changes / a member finishes onboarding |
-| `install_from` | TEXT | `'auto'` | `auto` (decide from the nodes' facts) / `apt` / `source` |
-| `slurm_version` | TEXT | `''` | apt pin or upstream release, per `install_from` |
-| `tarball_url` | TEXT | `''` | local mirror for the source tarball |
+## M6 — Slurm builder removed (2026-09-10)
 
-No data migration: existing Slurm clusters get auto-deploy on with automatic
-install selection, which is what the one-click button uses.
+No DDL. At startup `UPDATE clusters SET kind='generic' WHERE kind='slurm'`,
+so every existing cluster is a plain execution target again.
 
 ## Deprecations (no DDL)
 

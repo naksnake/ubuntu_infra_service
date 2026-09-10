@@ -115,7 +115,7 @@ print('== rename that does not take must NOT update the inventory ==')
 # the box accepts the command but keeps its old hostname (systemd refusing an
 # underscore, hostnamed unavailable, cloud-init, static-vs-transient). CCP must
 # never record a name the machine does not answer to — that mismatch is what
-# breaks Slurm's identity checks.
+# leaves the rack view describing a name the machine does not answer to.
 before = node(nid)['name']
 executor._key_ssh = lambda a, u, p, cmd: (
     43, 'CCP_HOSTNAME_ACTUAL gpu-node\nCCP_ERR: hostname is still \'gpu-node\' '

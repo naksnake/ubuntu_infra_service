@@ -47,13 +47,9 @@ lifecycle logic is tested by stubbing them.
 - CRUD + membership move semantics; delete clears membership.
 - `cluster_id` targeting expands to managed members only.
 
-### Phase 6 — slurm (`test_slurm.py`)
-- slurm.conf generation from hardware fixtures: CPUs/RealMemory/Sockets/
-  ThreadsPerCore/Gres lines; controller line; partition line; nodes without
-  hardware fall back to safe defaults.
-- gres.conf only for gpu_count > 0.
-- Lifecycle transitions: stage action on wrong state → 400; success advances
-  `slurm_state`.
+### Phase 6 — slurm
+Removed with the Slurm builder (2026-09-10); `test_slurm*.py` were deleted in
+the same commit.
 
 ## Regression
 - `test_userfiles.py` (existing 64 checks) must stay green every phase.
@@ -71,9 +67,8 @@ lifecycle logic is tested by stubbing them.
    without reload tricks.
 7. ClusterShell + Ansible run against a cluster target; non-managed node is
    not selectable.
-8. Slurm cluster on ≥2 nodes: generate (preview sane), deploy, `sinfo` all
-   nodes idle, `srun -N2 hostname` returns both hostnames (node-to-node, not
-   loopback), cleanup removes services.
+8. Deploy files to a cluster target: every member receives the file, the
+   job log shows one collapsible per host.
 9. Job history/audit shows every step with the acting user; no password
    anywhere in `/data/ccp`.
 
@@ -82,8 +77,8 @@ lifecycle logic is tested by stubbing them.
 ```bash
 cd services/ccp
 for t in test_userfiles test_lifecycle test_discovery test_hardware \
-         test_topology test_clusters test_ansible_sources test_slurm \
-         test_slurm_lifecycle; do python3 $t.py || exit 1; done
+         test_topology test_clusters test_ansible_sources \
+         test_filedeploy; do python3 $t.py || exit 1; done
 ```
 
 (Tests require only Flask; executor SSH calls are stubbed.)

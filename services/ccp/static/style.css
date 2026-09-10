@@ -115,25 +115,9 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
 .ns-bg-discovered,.ns-bg-unverified{border-left-color:#d29922}
 .ns-bg-failed{border-left-color:#f85149}
 
-.slurmbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0;
-  padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2)}
-.slurmbar select{width:auto;min-width:160px}
 .inlinechk{display:flex;align-items:center;gap:6px;margin:0;font-size:12px;
   color:var(--muted);cursor:pointer}
 .inlinechk input{width:auto;margin:0}
-.slurmbar .inlinechk{white-space:nowrap}
-.slurmbar .verpin{width:auto;max-width:190px;font-size:12px;padding:5px 8px}
-.lifecycle{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin:10px 0 2px}
-.lifecycle .stage{font-size:10px;font-weight:700;letter-spacing:.05em;color:var(--muted);
-  padding:2px 8px;border:1px solid var(--line);border-radius:999px}
-.lifecycle .stage.cur{color:#8fb7ff;border-color:var(--accent);background:rgba(76,141,255,.12)}
-.stage-sep{color:var(--line);font-size:10px}
-
-/* slurm lifecycle states */
-.sl-init{background:rgba(139,152,169,.15);color:#b6c1cf}
-.sl-discover,.sl-deploy,.sl-validate,.sl-benchmark{background:rgba(76,141,255,.16);color:#8fb7ff}
-.sl-report,.sl-monitor{background:rgba(46,160,67,.16);color:#63d67f}
-.sl-cleanup{background:rgba(210,153,34,.16);color:#e5c15a}
 
 .pill{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:6px;
   padding:1px 7px;font-size:11px;color:var(--muted);margin:1px 2px;font-family:var(--mono)}
@@ -177,7 +161,7 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
   color:#d7e0ea;line-height:1.5;overflow-x:auto}
 .rstat{font-weight:700;letter-spacing:.03em}
 .rstat.ok{color:#63d67f}.rstat.err{color:#ff9a92}.rstat.chg{color:#e5c15a}
-/* automatic-pipeline stages: one collapsible per stage, in order */
+/* multi-step job output: one collapsible per ##STAGE## section, in order */
 .rstage{border:1px solid var(--line);border-radius:8px;margin:0 0 10px;background:var(--panel)}
 .rstage > summary{cursor:pointer;padding:8px 12px;font-family:var(--mono);font-size:12px;
   font-weight:700;color:#8fb7ff;list-style:none;display:flex;gap:8px;align-items:center}
@@ -187,15 +171,6 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
 .rstage .rnum{color:var(--muted);font-weight:600}
 .rstage > .rbody{padding:10px 12px;border-top:1px solid var(--line)}
 .rtext{white-space:pre-wrap}
-/* Clusters page: the one-click bar and the collapsed advanced panel */
-.autobar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:10px 0 6px}
-.autobar .lastrun{font-size:12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-details.advanced{margin:4px 0 12px}
-details.advanced > summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);
-  list-style:none;padding:4px 0}
-details.advanced > summary::-webkit-details-marker{display:none}
-details.advanced > summary::before{content:'▸ ';color:var(--muted)}
-details.advanced[open] > summary::before{content:'▾ '}
 .rcount{color:var(--muted);font-weight:400}
 
 /* file / target pick lists */

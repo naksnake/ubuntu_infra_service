@@ -2,6 +2,11 @@
 
 Status: **Accepted** · Author: CCP maintainers · Date: 2026-09-08
 
+> **Amendment 2026-09-10:** the Slurm builder and lifecycle (Phases 6–7)
+> were removed at the operator's request after repeated deployment failures
+> in the reference lab; clusters remain as execution targets. Last commit
+> with the feature: `f381985`. A new Slurm design will come as a new request.
+
 ## Summary
 
 Transform the Cluster Control Panel (`lab_ccp`) from a node list with a
@@ -99,12 +104,12 @@ These capabilities are preserved as-is and reused by every new feature:
   = admin).
 - **Audit logging** — unchanged; every new action calls `log_action`.
 - **Job history** — unchanged mechanism; new job kinds (`onboard`, `hwscan`,
-  `hostname`, `slurm`) reuse the same table, log files, timeout watchdog and
+  `hostname`, `filedeploy`) reuse the same table, log files, timeout watchdog and
   the Jobs UI.
 - **ClusterShell execution** — unchanged engine; gains a lifecycle gate
   (only `managed` nodes are eligible targets).
 - **Ansible execution** — unchanged engine; gains local-filesystem playbook
-  sources and becomes the delivery vehicle for Slurm deployment.
+  sources.
 - **Per-user Files**, SQLite/WAL, single-worker + job-thread process model,
   input allowlists, additive in-place migration style.
 
@@ -118,9 +123,9 @@ These capabilities are preserved as-is and reused by every new feature:
 | Topology | free-text `groups` CSV | hostname-driven: `rack0_sled1_gpu` → rack 0, sled 1, role `gpu`; groups kept for ad-hoc tagging |
 | Hostname | not managed | one-click rename: `hostnamectl set-hostname` + `/etc/hostname` + `/etc/hosts`, inventory refreshed immediately |
 | Hardware | not modeled | `hardware` table (CPU/mem/storage/net/GPU/OS + raw JSON), auto-collected after onboarding |
-| Clusters | none | first-class `clusters` table; a cluster is an execution target and the unit of Slurm lifecycle |
+| Clusters | none | first-class `clusters` table; a cluster is an execution target |
 | Ansible sources | textarea / in-DB scripts | local filesystem paths (`CCP_ANSIBLE_DIRS`), scanned for playbooks/roles/inventories; development stays external |
-| Navigation | flat 7 items | Dashboard · Discovery · Nodes · Clusters · Rack View · ClusterShell · Ansible · Slurm · Jobs · Files · Admin |
+| Navigation | flat 7 items | Dashboard · Discovery · Nodes · Clusters · Rack View · ClusterShell · Ansible · Jobs · Files · Deploy files · Admin |
 | Dashboard | 4 counters | lifecycle funnel (discovered/onboarding/managed/failed), cluster health, recent jobs |
 
 ## 4. Node lifecycle (the P0 fix)
@@ -189,5 +194,6 @@ gate is enforced at selection time and re-checked in the executor.
 Small iterative commits, one phase per commit (see
 `implementation-plan.md`): docs → node lifecycle (P0) → DHCP discovery →
 hardware discovery → hostname topology + rack view → clusters → Ansible
-filesystem sources → Slurm builder → Slurm lifecycle. Each commit leaves the
+filesystem sources → file deployment. (Slurm builder/lifecycle: removed, see
+amendment.) Each commit leaves the
 panel deployable and the test suite green.

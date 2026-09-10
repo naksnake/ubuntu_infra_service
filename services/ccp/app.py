@@ -33,7 +33,6 @@ import ansible_sources
 import db
 import discovery
 import executor
-import slurm
 import topology
 
 app = Flask(__name__)
@@ -301,16 +300,7 @@ def clusters_page():
     nodes = db.query(
         'SELECT n.*, h.cpu_cores, h.mem_mb, h.gpu_count, h.gpu_model '
         'FROM nodes n LEFT JOIN hardware h ON h.node_id = n.id ORDER BY n.name')
-    # the latest Slurm job per cluster, so the page shows what happened last
-    last_jobs = {}
-    for c in clusters:
-        j = db.query("SELECT id, kind, status, created_at FROM jobs WHERE target=? AND "
-                     "kind IN ('slurm_auto','slurm_deploy','slurm_action') "
-                     'ORDER BY id DESC LIMIT 1', (c['name'],), one=True)
-        if j:
-            last_jobs[c['id']] = j
-    return render_template('clusters.html', clusters=clusters, nodes=nodes,
-                           last_jobs=last_jobs)
+    return render_template('clusters.html', clusters=clusters, nodes=nodes)
 
 
 @app.route('/shell')
@@ -482,8 +472,8 @@ def api_add_node():
         if len(password) > 256:
             return jsonify({'error': 'password too long'}), 400
     auto_name = not fields['name']
-    # default on: the node's own hostname should match its inventory name, or
-    # the Slurm config generated later will not match the machine
+    # default on: the node's own hostname should match its inventory name, so
+    # the rack view and the machine describe the same box
     set_hostname = d.get('set_hostname', True) is not False
     name = fields['name'] or _placeholder_name(fields['address'])
     state = 'managed' if conn == 'local' else 'onboarding'
@@ -631,7 +621,6 @@ def api_delete_node(node_id):
 
 # ── clusters API ──────────────────────────────────────────────────────────────
 
-CLUSTER_KINDS = ('generic', 'slurm')
 
 
 def _get_cluster(cluster_id):
@@ -654,7 +643,7 @@ def api_list_clusters():
 def api_add_cluster():
     d = request.get_json(force=True) or {}
     name = (d.get('name') or '').strip()
-    kind = d.get('kind') if d.get('kind') in CLUSTER_KINDS else 'generic'
+    kind = 'generic'     # clusters are execution targets; kinds retired with the Slurm builder
     if not NODE_NAME_RE.fullmatch(name):
         return jsonify({'error': 'cluster name may contain only letters, digits, '
                         'dot, dash, underscore (max 63 chars)'}), 400
@@ -682,79 +671,11 @@ def api_delete_cluster(cluster_id):
     return jsonify({'ok': True})
 
 
-INSTALL_FROMS = ('auto', 'apt', 'source')
-_APT_VER_RE = re.compile(r'[A-Za-z0-9.+:~_-]{1,64}')
-_SRC_VER_RE = re.compile(r'\d+\.\d+\.\d+')
-_URL_RE = re.compile(r'https?://[A-Za-z0-9._~:/?#\[\]@!$&\'()*+,;=%-]{1,500}')
-
-
-def _slurm_install_error(install_from, version, tarball_url):
-    """Validate the Slurm install settings; returns an error string or None."""
-    if install_from not in INSTALL_FROMS:
-        return 'install_from must be auto, apt or source'
-    if version:
-        if install_from == 'source' and not _SRC_VER_RE.fullmatch(version):
-            return 'for a source build give the upstream release, e.g. 25.11.8'
-        if install_from != 'source' and not _APT_VER_RE.fullmatch(version):
-            return 'version must be an apt version string, e.g. 23.11.4-1.2ubuntu5'
-    if tarball_url and not _URL_RE.fullmatch(tarball_url):
-        return 'tarball URL must be an http(s) URL'
-    return None
-
-
-@app.route('/api/clusters/<int:cluster_id>', methods=['PATCH'])
-@require('operator')
-def api_update_cluster(cluster_id):
-    """Cluster settings: description, the auto-deploy toggle, how Slurm is
-    installed (auto|apt|source, version, tarball mirror) and the controller.
-    The automatic pipeline reads these, so they are saved once and reused."""
-    c = _get_cluster(cluster_id)
-    if not c:
-        return jsonify({'error': 'not found'}), 404
-    d = request.get_json(force=True) or {}
-    sets, vals = [], []
-    if 'description' in d:
-        sets.append('description=?')
-        vals.append((d.get('description') or '').strip()[:500])
-    if 'auto_deploy' in d:
-        sets.append('auto_deploy=?')
-        vals.append(1 if d.get('auto_deploy') in (True, 1, '1', 'true', 'on') else 0)
-    if any(k in d for k in ('install_from', 'slurm_version', 'tarball_url')):
-        install_from = d.get('install_from', c['install_from'] or 'auto')
-        version = ((d.get('slurm_version') if 'slurm_version' in d
-                    else c['slurm_version']) or '').strip()
-        tarball = ((d.get('tarball_url') if 'tarball_url' in d
-                    else c['tarball_url']) or '').strip()
-        err = _slurm_install_error(install_from, version, tarball)
-        if err:
-            return jsonify({'error': err}), 400
-        sets += ['install_from=?', 'slurm_version=?', 'tarball_url=?']
-        vals += [install_from, version, tarball]
-    if 'controller_node_id' in d:
-        ctl = d.get('controller_node_id')
-        if ctl in (None, '', 0, '0'):
-            sets.append('controller_node_id=NULL')
-        elif str(ctl).isdigit() and db.query(
-                'SELECT id FROM nodes WHERE id=? AND cluster_id=?',
-                (int(ctl), cluster_id), one=True):
-            sets.append('controller_node_id=?')
-            vals.append(int(ctl))
-        else:
-            return jsonify({'error': 'controller must be a member of the cluster'}), 400
-    if not sets:
-        return jsonify({'error': 'nothing to update'}), 400
-    db.execute(f'UPDATE clusters SET {", ".join(sets)} WHERE id=?', (*vals, cluster_id))
-    log_action('cluster.update', f'{c["name"]}: {", ".join(sorted(d))}')
-    return jsonify(dict(_get_cluster(cluster_id)))
-
-
 @app.route('/api/clusters/<int:cluster_id>/nodes', methods=['POST'])
 @require('operator')
 def api_cluster_assign(cluster_id):
     """Assign nodes to a cluster (moving them out of any previous one — a node
-    belongs to at most one cluster, matching how Slurm owns its nodes). A Slurm
-    cluster with auto-deploy on re-runs its pipeline so the new members are
-    scheduled; the started job id is returned."""
+    belongs to at most one cluster)."""
     c = _get_cluster(cluster_id)
     if not c:
         return jsonify({'error': 'not found'}), 404
@@ -766,8 +687,7 @@ def api_cluster_assign(cluster_id):
     db.execute(f'UPDATE nodes SET cluster_id=? WHERE id IN ({marks})',
                (cluster_id, *ids))
     log_action('cluster.assign', f'{c["name"]}: nodes {ids}')
-    job_id = executor.maybe_auto_deploy(cluster_id, session['username'], 'members added')
-    return jsonify({'ok': True, 'job_id': job_id})
+    return jsonify({'ok': True})
 
 
 @app.route('/api/clusters/<int:cluster_id>/nodes/<int:node_id>', methods=['DELETE'])
@@ -778,220 +698,8 @@ def api_cluster_unassign(cluster_id, node_id):
         return jsonify({'error': 'not found'}), 404
     db.execute('UPDATE nodes SET cluster_id=NULL WHERE id=? AND cluster_id=?',
                (node_id, cluster_id))
-    if c['controller_node_id'] == node_id:
-        db.execute('UPDATE clusters SET controller_node_id=NULL WHERE id=?',
-                   (cluster_id,))
     log_action('cluster.unassign', f'{c["name"]}: node {node_id}')
-    job_id = executor.maybe_auto_deploy(cluster_id, session['username'], 'members removed')
-    return jsonify({'ok': True, 'job_id': job_id})
-
-
-# ── slurm API ─────────────────────────────────────────────────────────────────
-
-def _slurm_cluster_or_error(cluster_id):
-    """Common checks for slurm endpoints. Returns (cluster, members, error).
-    members = managed members (local or managed ssh) of the cluster."""
-    c = _get_cluster(cluster_id)
-    if not c:
-        return None, None, (jsonify({'error': 'not found'}), 404)
-    if c['kind'] != 'slurm':
-        return None, None, (jsonify({'error': 'not a Slurm cluster — set kind '
-                                     'to slurm when creating it'}), 400)
-    members = db.query(
-        "SELECT * FROM nodes WHERE cluster_id=? AND (state='managed' OR "
-        "conn='local') ORDER BY name", (cluster_id,))
-    if not members:
-        return None, None, (jsonify({'error': 'the cluster has no managed '
-                                     'members yet'}), 400)
-    return c, members, None
-
-
-@app.route('/api/clusters/<int:cluster_id>/slurm/generate', methods=['POST'])
-@require('operator')
-def api_slurm_generate(cluster_id):
-    """Generate slurm.conf + gres.conf from discovered hardware and store them
-    on the cluster for preview/deploy."""
-    c, members, err = _slurm_cluster_or_error(cluster_id)
-    if err:
-        return err
-    d = request.get_json(force=True) or {}
-    controller_id = d.get('controller_node_id') or c['controller_node_id']
-    controller = next((m for m in members if m['id'] == controller_id), None)
-    if not controller:
-        return jsonify({'error': 'pick a controller that is a managed member '
-                        'of the cluster'}), 400
-    marks = ','.join('?' for _ in members)
-    hw = {r['node_id']: dict(r) for r in db.query(
-        f'SELECT * FROM hardware WHERE node_id IN ({marks})',
-        tuple(m['id'] for m in members))}
-    conf, gres, warnings = slurm.generate(c['name'], members, controller, hw)
-    db.execute('UPDATE clusters SET slurm_conf=?, gres_conf=?, '
-               'controller_node_id=? WHERE id=?',
-               (conf, gres, controller['id'], cluster_id))
-    log_action('slurm.generate', c['name'])
-    return jsonify({'slurm_conf': conf, 'gres_conf': gres, 'warnings': warnings})
-
-
-@app.route('/api/clusters/<int:cluster_id>/slurm/deploy', methods=['POST'])
-@require('operator')
-def api_slurm_deploy(cluster_id):
-    """Deploy Slurm with the built-in playbook (munge key distribution,
-    slurm-wlm install, generated configs, services) through the existing
-    Ansible engine. Advances the lifecycle to DEPLOY on success."""
-    c, members, err = _slurm_cluster_or_error(cluster_id)
-    if err:
-        return err
-    if not c['slurm_conf']:
-        return jsonify({'error': 'generate slurm.conf first (preview it, then '
-                        'deploy)'}), 400
-    controller = next((m for m in members
-                       if m['id'] == c['controller_node_id']), None)
-    if not controller:
-        return jsonify({'error': 'the stored controller is no longer a managed '
-                        'member — regenerate the configuration'}), 400
-    d = request.get_json(silent=True) or {}
-    reinstall = bool(d.get('reinstall'))
-    version = (d.get('version') or '').strip()
-    install_from = 'source' if d.get('install_from') == 'source' else 'apt'
-    tarball_url = (d.get('tarball_url') or '').strip()
-    if install_from == 'source':
-        if version and not re.fullmatch(r'\d+\.\d+\.\d+', version):
-            return jsonify({'error': 'for a source build give the upstream '
-                            'release, e.g. 25.11.8'}), 400
-        if tarball_url and not re.fullmatch(
-                r'https?://[A-Za-z0-9._~:/?#\[\]@!$&\'()*+,;=%-]{1,500}', tarball_url):
-            return jsonify({'error': 'tarball URL must be an http(s) URL'}), 400
-    elif version and not re.fullmatch(r'[A-Za-z0-9.+:~_-]{1,64}', version):
-        return jsonify({'error': 'version must be an apt version string, e.g. '
-                        '23.11.4-1.2ubuntu5'}), 400
-    playbook = slurm.deploy_playbook(c['slurm_conf'], c['gres_conf'],
-                                     controller['name'],
-                                     reinstall=reinstall, version=version or None,
-                                     install_from=install_from,
-                                     tarball_url=tarball_url or None)
-    spec = {'node_ids': [m['id'] for m in members], 'playbook': playbook,
-            'extra_vars': '', 'cluster_id': cluster_id, 'advance_to': 'DEPLOY'}
-    if install_from == 'source':
-        spec['timeout'] = 3600      # compiling on every node takes minutes
-    job_id = executor.start_job('slurm_deploy', c['name'], spec, session['username'])
-    log_action('slurm.deploy', f'{c["name"]} job {job_id}'
-               + (' (clean reinstall)' if reinstall else '')
-               + (f' from source {version or slurm.SOURCE_DEFAULT_VERSION}'
-                  if install_from == 'source' else '')
-               + (f' pinned {version}' if version and install_from == 'apt' else ''))
-    return jsonify({'job_id': job_id}), 202
-
-
-@app.route('/api/clusters/<int:cluster_id>/slurm/auto', methods=['POST'])
-@require('operator')
-def api_slurm_auto(cluster_id):
-    """One click: facts → hostnames → plan → generate → deploy → validate →
-    sbatch, as a single job driven by the cluster's saved settings."""
-    c, members, err = _slurm_cluster_or_error(cluster_id)
-    if err:
-        return err
-    running = executor.auto_deploy_running(cluster_id)
-    if running:
-        return jsonify({'error': f'a deployment is already running for this cluster '
-                        f'(job {running})', 'job_id': running}), 409
-    d = request.get_json(silent=True) or {}
-    reinstall = bool(d.get('reinstall'))
-    run_tests = d.get('run_tests', True) not in (False, 0, '0', 'false')
-    job_id = executor.start_auto_deploy(
-        c, [m['id'] for m in members], session['username'], reinstall=reinstall,
-        run_tests=run_tests, reason='started from the Clusters page')
-    log_action('slurm.auto', f'{c["name"]} job {job_id}'
-               + (' (clean reinstall)' if reinstall else ''))
-    return jsonify({'job_id': job_id}), 202
-
-
-SLURM_DEPLOYED_STATES = ('DEPLOY', 'VALIDATE', 'BENCHMARK', 'REPORT', 'MONITOR')
-
-
-@app.route('/api/clusters/<int:cluster_id>/slurm/action', methods=['POST'])
-@require('operator')
-def api_slurm_action(cluster_id):
-    """Run a lifecycle stage. Stages map to jobs on the existing engine:
-    discover → hardware rescans of every member; validate/benchmark/monitor →
-    real commands on the controller (srun across all nodes, node-to-node ping
-    and iperf3 — never loopback); report → local aggregation; cleanup → the
-    teardown playbook. Success advances clusters.slurm_state."""
-    c, members, err = _slurm_cluster_or_error(cluster_id)
-    if err:
-        return err
-    d = request.get_json(force=True) or {}
-    stage = (d.get('stage') or '').strip().lower()
-    ids = [m['id'] for m in members]
-    who = session['username']
-
-    if stage == 'discover':
-        job_ids = [executor.start_job('hwscan', m['name'], {'node_id': m['id']}, who)
-                   for m in members]
-        db.execute("UPDATE clusters SET slurm_state='DISCOVER' WHERE id=?",
-                   (cluster_id,))
-        log_action('slurm.discover', f'{c["name"]} jobs {job_ids}')
-        return jsonify({'job_ids': job_ids}), 202
-
-    if stage in ('validate', 'benchmark', 'monitor', 'sbatch'):
-        if c['slurm_state'] not in SLURM_DEPLOYED_STATES:
-            return jsonify({'error': f'{stage} needs a deployed cluster — run '
-                            'Deploy first'}), 400
-        controller = next((m for m in members
-                           if m['id'] == c['controller_node_id']), None)
-        if not controller:
-            return jsonify({'error': 'the controller is no longer a managed '
-                            'member — regenerate and redeploy'}), 400
-        job_id = executor.start_job(
-            'slurm_action', c['name'],
-            {'stage': stage, 'cluster_id': cluster_id, 'node_ids': ids,
-             'controller_id': controller['id'],
-             # the batch test is the functional validation of the scheduler
-             'advance_to': 'VALIDATE' if stage == 'sbatch' else stage.upper()},
-            who)
-        log_action(f'slurm.{stage}', f'{c["name"]} job {job_id}')
-        return jsonify({'job_id': job_id}), 202
-
-    if stage == 'report':
-        job_id = executor.start_job(
-            'slurm_action', c['name'],
-            {'stage': 'report', 'cluster_id': cluster_id, 'node_ids': ids,
-             'advance_to': 'REPORT' if c['slurm_state'] in SLURM_DEPLOYED_STATES
-             else None},
-            who)
-        log_action('slurm.report', f'{c["name"]} job {job_id}')
-        return jsonify({'job_id': job_id}), 202
-
-    if stage == 'diagnose':
-        # Always allowed and never changes state: this is how an operator
-        # (or whoever they ask for help) sees why a deploy failed — journals,
-        # unit files, configs and a foreground run of slurmd from every
-        # member, in one job log they can copy or download.
-        controller = next((m for m in members
-                           if m['id'] == c['controller_node_id']), None)
-        job_id = executor.start_job(
-            'slurm_action', c['name'],
-            {'stage': 'diagnose', 'cluster_id': cluster_id, 'node_ids': ids,
-             'controller_id': controller['id'] if controller else None,
-             'advance_to': None},
-            who)
-        log_action('slurm.diagnose', f'{c["name"]} job {job_id}')
-        return jsonify({'job_id': job_id}), 202
-
-    if stage == 'cleanup':
-        # Always allowed: a deploy that failed part-way can leave slurmd
-        # enabled with no config (which loops on configless DNS SRV lookups),
-        # and that can happen while the cluster still reads INIT. Cleanup is
-        # the recovery path, so never refuse it.
-        job_id = executor.start_job(
-            'slurm_deploy', c['name'],
-            {'node_ids': ids, 'playbook': slurm.cleanup_playbook(),
-             'extra_vars': '', 'cluster_id': cluster_id, 'advance_to': 'CLEANUP'},
-            who)
-        log_action('slurm.cleanup', f'{c["name"]} job {job_id}')
-        return jsonify({'job_id': job_id}), 202
-
-    return jsonify({'error': 'stage must be one of: discover, validate, sbatch, '
-                    'benchmark, report, monitor, diagnose, cleanup'}), 400
+    return jsonify({'ok': True})
 
 
 # ── discovery API ─────────────────────────────────────────────────────────────

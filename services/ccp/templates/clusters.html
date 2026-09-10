@@ -7,91 +7,19 @@
   <h2>Create cluster</h2>
   <div class="row">
     <div><label>Name</label><input id="c-name" placeholder="ai-training"></div>
-    <div><label>Kind</label>
-      <select id="c-kind"><option value="generic">Generic</option><option value="slurm">Slurm</option></select></div>
-    <div><label>Description</label><input id="c-desc" placeholder="H100 training cluster"></div>
+    <div><label>Description</label><input id="c-desc" placeholder="H100 training nodes"></div>
   </div>
   <div style="margin-top:14px"><button class="btn" onclick="addCluster()">Create</button></div>
-  <p class="muted" style="margin:10px 0 0;font-size:12px">A Slurm cluster deploys itself: add managed nodes and
-    CCP scans them, fixes hostnames, picks a controller and an install method, generates the configs,
-    deploys, validates and runs a batch job — one click, or automatically whenever members change.</p>
+  <p class="muted" style="margin:10px 0 0;font-size:12px">A cluster groups managed nodes into one target:
+    pick it on the ClusterShell, Ansible and Deploy files pages instead of selecting nodes one by one.</p>
 </div>
 {% endif %}
 
 {% for c in clusters %}
-{% set lj = last_jobs.get(c.id) %}
 <div class="card">
   <h2>{{ c.name }}
-    <span class="pill">{{ c.kind }}</span>
-    {% if c.kind == 'slurm' %}<span class="badge sl-{{ c.slurm_state|lower }}">{{ c.slurm_state }}</span>{% endif %}
     <small class="muted">{{ c.managed }}/{{ c.members }} managed</small></h2>
   {% if c.description %}<p class="muted">{{ c.description }}</p>{% endif %}
-
-  {% if c.kind == 'slurm' %}
-  <div class="lifecycle">
-    {% for st in ('INIT','DISCOVER','DEPLOY','VALIDATE','BENCHMARK','REPORT','MONITOR','CLEANUP') %}
-    <span class="stage {{ 'cur' if c.slurm_state == st }}">{{ st }}</span>{% if not loop.last %}<span class="stage-sep">▸</span>{% endif %}
-    {% endfor %}
-  </div>
-
-  <div class="autobar">
-    {% if role_ok('operator') %}
-    <button class="btn btn-ok" onclick="slurmAuto({{ c.id }},'{{ c.name }}')" {{ 'disabled' if c.managed == 0 }}
-      title="One job: scan hardware, fix hostnames, pick the controller and install method, generate the configs, deploy, validate, run the sbatch test">▶ Deploy Slurm automatically</button>
-    <label class="inlinechk" title="Whenever a managed node joins or leaves this cluster (or a member finishes onboarding), run the automatic deployment again so the change is scheduled">
-      <input type="checkbox" id="auto-{{ c.id }}" {{ 'checked' if c.auto_deploy }} onchange="saveSettings({{ c.id }},true)"> auto-deploy when members change</label>
-    {% endif %}
-    <span class="lastrun muted">
-      {% if lj %}last run: <a href="/jobs/{{ lj.id }}">job #{{ lj.id }}</a>
-        <span class="badge st-{{ lj.status }}">{{ lj.status }}</span>
-        <span class="mono">{{ lj.kind }}</span> · {{ lj.created_at | tstime }}
-      {% elif c.managed == 0 %}add managed nodes below — the cluster deploys when they arrive
-      {% else %}not deployed yet{% endif %}
-    </span>
-  </div>
-
-  {% if role_ok('operator') %}
-  <details class="advanced">
-    <summary>Settings &amp; manual steps</summary>
-    <div class="slurmbar">
-      <label style="margin:0">Controller</label>
-      <select id="ctl-{{ c.id }}" title="Leave on auto: a node without GPUs is preferred so accelerators stay free for jobs">
-        <option value="">auto</option>
-        {% for n in nodes if n.cluster_id == c.id and (n.state == 'managed' or n.conn == 'local') %}
-        <option value="{{ n.id }}" {{ 'selected' if c.controller_node_id == n.id }}>{{ n.name }}</option>
-        {% endfor %}
-      </select>
-      <select id="inst-{{ c.id }}" class="verpin" title="auto: distro packages when every node offers the same version, otherwise the same upstream release is built from source on every node (different Ubuntu releases can never share a package)">
-        <option value="auto" {{ 'selected' if c.install_from == 'auto' }}>install: auto</option>
-        <option value="apt" {{ 'selected' if c.install_from == 'apt' }}>install: distro packages</option>
-        <option value="source" {{ 'selected' if c.install_from == 'source' }}>install: build from source</option>
-      </select>
-      <input id="ver-{{ c.id }}" class="verpin" placeholder="version (optional)" value="{{ c.slurm_version }}"
-        title="Distro packages: exact apt version present in every node's sources, e.g. 23.11.4-1.2ubuntu5. Source build: upstream release, default 25.11.8.">
-      <input id="tar-{{ c.id }}" class="verpin" placeholder="tarball URL (optional)" value="{{ c.tarball_url }}"
-        title="Serve slurm-<version>.tar.bz2 from a local mirror (e.g. the webfs share) when nodes have no internet">
-      <button class="btn btn-sm" onclick="saveSettings({{ c.id }})">Save settings</button>
-    </div>
-    <div class="slurmbar">
-      <label class="inlinechk" title="Purge the installed Slurm/munge packages, config and state on every node before installing again">
-        <input type="checkbox" id="reinst-{{ c.id }}"> clean reinstall</label>
-      <span class="muted" style="font-size:12px">Single steps:</span>
-      <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'discover')" title="Rescan hardware on every member">Discover</button>
-      <button class="btn btn-sm btn-ghost" onclick="slurmGenerate({{ c.id }})" title="Build slurm.conf + gres.conf from discovered hardware and preview them">Generate config</button>
-      <button class="btn btn-sm btn-ghost" onclick="slurmDeploy({{ c.id }},'{{ c.name }}')" {{ 'disabled' if not c.slurm_conf }}
-        title="Run only the deployment playbook with the generated configs">Deploy</button>
-      <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'validate')" title="sinfo + srun across every node on the controller">Validate</button>
-      <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'sbatch')" title="Submit a batch job shaped like an AI training run and show its output">sbatch test</button>
-      <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'benchmark')" title="Timed srun dispatch, node-to-node ping and iperf3 (never loopback)">Benchmark</button>
-      <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'report')" title="Aggregate membership, capacity and lifecycle history">Report</button>
-      <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'monitor')" title="sinfo / squeue snapshot from the controller">Monitor</button>
-      <button class="btn btn-sm btn-ghost" onclick="slurmAction({{ c.id }},'diagnose')"
-        title="Gather slurmd/slurmctld/munge status, journals, unit files, configs and a foreground run of slurmd from every node into one job log. Works in any state, changes nothing.">Collect logs</button>
-      <button class="btn btn-sm btn-danger" onclick="slurmCleanup({{ c.id }},'{{ c.name }}')" title="Stop and disable slurmd/slurmctld and remove the generated configs">Cleanup</button>
-    </div>
-  </details>
-  {% endif %}
-  {% endif %}
 
   <table>
     <thead><tr><th>State</th><th>Node</th><th>Address</th><th>Hardware</th><th>Role</th>{% if role_ok('operator') %}<th></th>{% endif %}</tr></thead>
@@ -99,8 +27,7 @@
       {% for n in nodes if n.cluster_id == c.id %}
       <tr>
         <td><span class="badge ns-{{ n.state }}">{{ n.state }}</span></td>
-        <td><a href="#" onclick="showDetail({{ n.id }});return false"><b>{{ n.name }}</b></a>
-            {% if c.controller_node_id == n.id %}<span class="pill">controller</span>{% endif %}</td>
+        <td><a href="#" onclick="showDetail({{ n.id }});return false"><b>{{ n.name }}</b></a></td>
         <td class="mono">{{ n.address }}</td>
         <td class="mono">{% if n.cpu_cores %}{{ n.cpu_cores }}c · {{ ((n.mem_mb or 0)/1024)|round(0)|int }}G{% if n.gpu_count %} · {{ n.gpu_count }}× GPU{% endif %}{% else %}—{% endif %}</td>
         <td>{{ n.role or '—' }}</td>
@@ -125,6 +52,7 @@
     {% endif %}
     <a class="btn btn-ghost btn-sm" href="/shell?cluster={{ c.id }}">Run command on cluster</a>
     <a class="btn btn-ghost btn-sm" href="/ansible?cluster={{ c.id }}">Run playbook on cluster</a>
+    <a class="btn btn-ghost btn-sm" href="/deploy">Deploy files</a>
     {% if role_ok('operator') %}
     <button class="btn btn-danger btn-sm" style="margin-left:auto"
       onclick="del('/api/clusters/{{ c.id }}','Delete cluster {{ c.name }}? Nodes are kept, only the grouping is removed.')">Delete cluster</button>
@@ -133,101 +61,14 @@
 </div>
 {% else %}
 <div class="card"><div class="empty">No clusters yet{% if role_ok('operator') %} — create one above{% endif %}.
-Clusters group managed nodes into execution targets (and, for kind Slurm, into a schedulable cluster that deploys itself).</div></div>
+Clusters group managed nodes into execution targets for ClusterShell, Ansible and file deployment.</div></div>
 {% endfor %}
-
-<dialog id="conf-dlg" class="dlg dlg-wide">
-  <h2>Generated configuration</h2>
-  <div id="conf-warnings"></div>
-  <label>slurm.conf</label>
-  <pre id="conf-slurm" class="console" style="max-height:260px"></pre>
-  <label>gres.conf</label>
-  <pre id="conf-gres" class="console" style="max-height:140px"></pre>
-  <div style="margin-top:14px">
-    <button class="btn btn-ghost" onclick="document.getElementById('conf-dlg').close()">Close</button>
-  </div>
-</dialog>
-
 {% endblock %}
 
 {% block scripts %}<script>
 function v(id){return document.getElementById(id).value;}
-function settingsOf(cid){
-  const ctl=document.getElementById('ctl-'+cid)?.value||'';
-  return {controller_node_id:ctl?parseInt(ctl):null,
-          install_from:document.getElementById('inst-'+cid)?.value||'auto',
-          slurm_version:(document.getElementById('ver-'+cid)?.value||'').trim(),
-          tarball_url:(document.getElementById('tar-'+cid)?.value||'').trim(),
-          auto_deploy:document.getElementById('auto-'+cid)?.checked||false};
-}
-async function saveSettings(cid,toggleOnly){
-  const s=settingsOf(cid);
-  const p=toggleOnly?{auto_deploy:s.auto_deploy}:s;
-  try{await api('PATCH','/api/clusters/'+cid,p);
-    toast(toggleOnly?('Auto-deploy '+(s.auto_deploy?'on':'off')):'Settings saved');}
-  catch(e){toast(e.message,true);}
-}
-async function slurmAuto(cid,name){
-  const s=settingsOf(cid);
-  const reinstall=document.getElementById('reinst-'+cid)?.checked||false;
-  const how=s.install_from==='auto'?'distro packages when every node offers the same version, otherwise a source build of the same release everywhere'
-    :(s.install_from==='source'?'build slurm '+(s.slurm_version||'25.11.8')+' from source on every node':'distro packages'+(s.slurm_version?' pinned to '+s.slurm_version:''));
-  let msg='Deploy Slurm on all managed members of '+name+' automatically?\n\n'+
-    'CCP will scan the hardware, fix hostnames, pick the controller'+(s.controller_node_id?'':' (a node without GPUs is preferred)')+
-    ', install Slurm ('+how+'), generate the configs, deploy, validate, and run a batch job.';
-  if(reinstall)msg+='\n\nClean reinstall is ticked: existing Slurm/munge config and state are PURGED first.';
-  if(!confirm(msg))return;
-  try{
-    // settings shown in the Advanced panel are what the run uses — save first
-    if(document.getElementById('inst-'+cid))await api('PATCH','/api/clusters/'+cid,s);
-    const d=await api('POST','/api/clusters/'+cid+'/slurm/auto',{reinstall});
-    toast('Automatic deployment started (job '+d.job_id+')');
-    location.href='/jobs/'+d.job_id;
-  }catch(e){toast(e.message,true);}
-}
-async function slurmGenerate(cid){
-  const ctl=document.getElementById('ctl-'+cid).value;
-  try{
-    const d=await api('POST','/api/clusters/'+cid+'/slurm/generate',
-      ctl?{controller_node_id:parseInt(ctl)}:{});
-    document.getElementById('conf-warnings').innerHTML=(d.warnings||[]).map(w=>
-      '<div class="warnbox">'+esc(w)+'</div>').join('');
-    document.getElementById('conf-slurm').textContent=d.slurm_conf;
-    document.getElementById('conf-gres').textContent=d.gres_conf||'(no GPUs — gres.conf not needed)';
-    document.getElementById('conf-dlg').showModal();
-  }catch(e){toast(e.message,true);}
-}
-async function slurmDeploy(cid,name){
-  const reinstall=document.getElementById('reinst-'+cid)?.checked||false;
-  const version=(document.getElementById('ver-'+cid)?.value||'').trim();
-  let install_from=document.getElementById('inst-'+cid)?.value||'apt';
-  const tarball_url=(document.getElementById('tar-'+cid)?.value||'').trim();
-  if(install_from==='auto'){toast('The single Deploy step needs an explicit install mode — pick distro packages or source build, or use "Deploy Slurm automatically"',true);return;}
-  let msg='Run only the deployment playbook on all managed members of '+name+'?';
-  if(install_from==='source')msg+='\n\nBuilds slurm '+(version||'25.11.8')+' from source on every node (several minutes per node).';
-  if(reinstall)msg+='\n\nClean reinstall is ticked: existing Slurm/munge config and state are PURGED first.';
-  if(!confirm(msg))return;
-  try{
-    const d=await api('POST','/api/clusters/'+cid+'/slurm/deploy',
-      {reinstall,version,install_from,tarball_url});
-    toast('Deployment started (job '+d.job_id+')');
-    location.href='/jobs/'+d.job_id;
-  }catch(e){toast(e.message,true);}
-}
-async function slurmAction(cid,stage){
-  try{
-    const d=await api('POST','/api/clusters/'+cid+'/slurm/action',{stage});
-    if(d.job_ids){toast('Hardware rescan queued for '+d.job_ids.length+' node(s)');location.reload();}
-    else{toast(stage+' started (job '+d.job_id+')');location.href='/jobs/'+d.job_id;}
-  }catch(e){toast(e.message,true);}
-}
-async function slurmCleanup(cid,name){
-  if(!confirm('Tear down Slurm on all managed members of '+name+'? Services are '+
-    'stopped and the generated configs removed (packages stay installed).'))return;
-  return slurmAction(cid,'cleanup');
-}
 async function addCluster(){
-  const p={name:v('c-name'),kind:v('c-kind'),description:v('c-desc')};
+  const p={name:v('c-name'),description:v('c-desc')};
   if(!p.name){toast('Name is required',true);return;}
   try{await api('POST','/api/clusters',p);toast('Cluster created');location.reload();}
   catch(e){toast(e.message,true);}
@@ -236,15 +77,12 @@ async function assign(cid){
   const sel=document.getElementById('add-'+cid);
   const ids=[...sel.selectedOptions].map(o=>o.value);
   if(!ids.length){toast('Select nodes to add',true);return;}
-  try{const d=await api('POST','/api/clusters/'+cid+'/nodes',{node_ids:ids});
-    if(d.job_id){toast('Nodes assigned — automatic deployment started (job '+d.job_id+')');location.href='/jobs/'+d.job_id;}
-    else{toast('Nodes assigned');location.reload();}}
+  try{await api('POST','/api/clusters/'+cid+'/nodes',{node_ids:ids});
+    toast('Nodes assigned');location.reload();}
   catch(e){toast(e.message,true);}
 }
 async function unassign(cid,nid){
-  try{const d=await api('DELETE','/api/clusters/'+cid+'/nodes/'+nid);
-    if(d.job_id){toast('Node removed — automatic deployment started (job '+d.job_id+')');location.href='/jobs/'+d.job_id;}
-    else location.reload();}
+  try{await api('DELETE','/api/clusters/'+cid+'/nodes/'+nid);location.reload();}
   catch(e){toast(e.message,true);}
 }
 </script>{% endblock %}

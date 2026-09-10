@@ -235,7 +235,7 @@ check('M1 columns added in place',
 conn.close()
 
 
-print('== set the node hostname during onboarding (Slurm needs the match) ==')
+print('== set the node hostname during onboarding (inventory and machine must agree) ==')
 HOSTS = {'192.168.100.60': 'ubuntu'}          # a fresh node with a default name
 def _pw(*a, **kw): return (0, '')
 def _key(addr, u, p, cmd):

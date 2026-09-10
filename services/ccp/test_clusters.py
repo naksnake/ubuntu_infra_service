@@ -63,7 +63,8 @@ r = admin.post('/api/clusters', headers=ah, json={'name': 'ai-train'})
 check('duplicate name → 409', r.status_code == 409)
 r = admin.get('/api/clusters')
 c = r.get_json()['clusters'][0]
-check('list shows kind + INIT state', c['kind'] == 'slurm' and c['slurm_state'] == 'INIT', c)
+check('every cluster is a plain execution target (a requested kind is ignored)',
+      c['kind'] == 'generic' and c['description'] == 'H100s', c)
 
 print('== membership ==')
 n1, n2, n3 = mk('rack0_sled1_gpu'), mk('rack0_sled2_gpu'), mk('pending', state='discovered')

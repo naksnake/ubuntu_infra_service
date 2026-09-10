@@ -15,8 +15,6 @@ Clusters         ← new
 Rack View        ← new: auto-generated from hostname topology
 ClusterShell
 Ansible          ← redesigned: filesystem sources + inline fallback
-Slurm            ← new (per-cluster lifecycle lives on the cluster page;
-                    this entry lists Slurm clusters + states)
 Jobs
 Scripts          ← shell snippets only; playbook editing deprecated
 Files
@@ -32,7 +30,7 @@ Replace the four counters with the operator's actual questions:
 - **Lifecycle funnel**: discovered / onboarding / managed / failed /
   unverified counts, each linking to the filtered Nodes page.
 - New-on-the-network callout ("3 leases not in inventory → Discovery").
-- Cluster cards: name, kind, members managed/total, Slurm state.
+- Cluster cards: name, members managed/total.
 - Recent jobs (unchanged).
 
 ### Discovery (new)
@@ -53,34 +51,11 @@ same credential-first flow.
   state_detail on failure.
 - The old free-form "Add node" card is demoted to the manual-add flow above.
 
-### Clusters (redesigned: the cluster deploys itself)
-One card per cluster: member table (add/remove from managed nodes), **Run on
-this cluster** shortcuts (prefills ClusterShell/Ansible target), and for
-`kind=slurm`:
-
-```
-INIT ▸ DISCOVER ▸ DEPLOY ▸ VALIDATE ▸ BENCHMARK ▸ REPORT ▸ MONITOR ▸ CLEANUP
-[▶ Deploy Slurm automatically]  ☑ auto-deploy when members change
-last run: job #42 · success · slurm_auto · 09 Sep 10:12
-▸ Settings & manual steps
-```
-
-The primary action is one button. It queues a single `slurm_auto` job that
-scans hardware, fixes hostnames, picks the controller (a node without GPUs is
-preferred) and the install method (distro packages when every node offers the
-same version, otherwise the same upstream release built from source on every
-node), generates the configs, deploys, validates and runs the sbatch test.
-The job page renders it as a numbered step list; the first failing stage
-stops the run and carries its own reason. With *auto-deploy when members
-change* on (the default), adding or removing a managed node, or a node in the
-cluster finishing onboarding, re-runs the pipeline so the change is scheduled.
-
-Everything that used to be a row of buttons lives in the collapsed
-*Settings & manual steps* panel: controller (default auto), install mode,
-version, tarball mirror (saved on the cluster, `PATCH /api/clusters/<id>`),
-clean-reinstall, and the single steps Discover · Generate config · Deploy ·
-Validate · sbatch test · Benchmark · Report · Monitor · Collect logs · Cleanup.
-slurm.conf/gres.conf preview stays a read-only modal.
+### Clusters
+One card per cluster: member table (add/remove from managed nodes) and
+**Run on this cluster** shortcuts that prefill the ClusterShell, Ansible and
+Deploy-files targets. Nothing else: the Slurm lifecycle strip, one-click
+deployment and settings panel were removed on 2026-09-10 (see RFC amendment).
 
 ### Rack View (new)
 CSS-grid racks generated from `rack`/`sled` columns — no drawing, no config.

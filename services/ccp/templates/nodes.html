@@ -18,7 +18,7 @@
     <div><label>SSH port</label><input id="n-port" type="number" value="22"></div>
     <div><label>Groups (comma-separated)</label><input id="n-groups" placeholder="gpu,lab"></div>
   </div>
-  <label class="inlinechk" style="margin-top:10px" title="Runs hostnamectl set-hostname on the node so its hostname matches the name above — required for Slurm to identify it later">
+  <label class="inlinechk" style="margin-top:10px" title="Runs hostnamectl set-hostname on the node so its hostname matches the name above — inventory, rack view and the machine then agree">
     <input type="checkbox" id="n-sethost" checked> Set this hostname on the node</label>
   <div style="margin-top:14px">
     <button class="btn" onclick="onboardNew()">Validate &amp; onboard</button>

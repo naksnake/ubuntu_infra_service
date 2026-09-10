@@ -46,7 +46,7 @@ run commands/playbooks across your nodes, and `http://192.168.100.1:8090/`
 | TFTP | `lab_tftp` | Delivers bootloader files to PXE clients |
 | File server | `lab_webfs` | HTTP share for ISO images, kernels, initrds |
 | iPXE Manager | `lab_ipxe_manager` | Web UI: upload boot files, edit the PXE boot menu, manage autoinstall profiles |
-| Cluster Control Panel | `lab_ccp` | Web UI: node lifecycle management for AI/HPC labs — DHCP discovery → credential-validated onboarding → hardware discovery → clusters → Slurm builder + lifecycle, plus ClusterShell/Ansible execution, login/RBAC, job history and audit log |
+| Cluster Control Panel | `lab_ccp` | Web UI: node lifecycle management for AI/HPC labs — DHCP discovery → credential-validated onboarding → hardware discovery → clusters → file deployment, plus ClusterShell/Ansible execution, login/RBAC, job history and audit log |
 | NAT | systemd `lab-nat` | Lets lab clients reach the internet via the host |
 | Monitor | `lab_monitor` | Web dashboard: service health, DHCP lease lookup, file upload to the share |
 | Docker API proxy | `lab_docker_proxy` | Read-only Docker API for the monitor (the raw socket is never mounted into a web-facing container) |
@@ -369,9 +369,9 @@ http://192.168.100.1:8060/
 Log in with `CCP_ADMIN_USER` / `CCP_ADMIN_PASSWORD` from your `.env`. From here you can
 import machines discovered from DHCP leases, onboard them with a username+password
 (CCP validates access and installs its SSH key before a node counts as managed),
-run ClusterShell commands and Ansible playbooks across nodes and clusters, build
-Slurm clusters from discovered hardware, and review job history and the audit log.
-See [Cluster Control Panel](#cluster-control-panel-node-lifecycle--slurm) below.
+run ClusterShell commands and Ansible playbooks across nodes and clusters, deploy
+files to them, and review job history and the audit log.
+See [Cluster Control Panel](#cluster-control-panel-node-lifecycle) below.
 
 If it isn't up yet, check its logs:
 ```bash
@@ -498,7 +498,7 @@ The **iPXE Preview** tab always shows the exact script clients receive.
 
 ---
 
-## Cluster Control Panel (node lifecycle + Slurm)
+## Cluster Control Panel (node lifecycle)
 
 Open the Control Panel:
 ```
@@ -519,20 +519,16 @@ management panel for AI/HPC lab clusters (design docs in `docs/ccp/`):
   run jobs.
 - **Hardware discovery** — CPU, memory, disks, NICs, GPUs (nvidia-smi/lspci),
   OS and InfiniBand facts are collected automatically after onboarding and on
-  demand, and drive the inventory, rack view and Slurm builder.
+  demand, and drive the inventory and rack view.
 - **Hostname-driven topology** — names like `rack0_sled1_gpu` parse into
   rack/sled/role automatically (no rack database), and the **Rack View** page
   draws itself from them. One-click rename runs `hostnamectl set-hostname`
   (+ `/etc/hostname`, `/etc/hosts`) on the node and refreshes the inventory
   immediately.
 - **Clusters** — first-class groups of managed nodes that act as execution
-  targets for ClusterShell/Ansible.
-- **Slurm builder + lifecycle** — generate `slurm.conf`/`gres.conf` from the
-  discovered hardware, deploy with a built-in playbook (munge key
-  distribution, Ubuntu/Debian `slurm-wlm`, services), then walk the guided
-  lifecycle: DISCOVER → DEPLOY → VALIDATE (`srun` across all nodes) →
-  BENCHMARK (node-to-node ping + iperf3, never loopback) → REPORT → MONITOR →
-  CLEANUP.
+  targets for ClusterShell, Ansible and file deployment.
+- **Deploy files** — push staged files to groups or individual nodes with one
+  click (Ansible copy or `clush --copy`), with per-host results.
 - **ClusterShell** — run a shell command across selected nodes/groups/clusters
   in parallel and see per-node output live.
 - **Ansible** — playbooks are developed *outside* CCP and consumed from local
@@ -543,7 +539,7 @@ management panel for AI/HPC lab clusters (design docs in `docs/ccp/`):
   manage nodes/clusters/scripts/files), `admin` (everything + user management
   + audit log).
 - **Job history** — every run (commands, playbooks, onboarding, hardware
-  scans, renames, Slurm stages) is recorded with status, exit code, and full
+  scans, renames, file deployments) is recorded with status, exit code, and full
   output.
 - **Files** — per-user file storage (kickstart snippets, tarballs, etc.).
 - **Audit log** — every login and state-changing action is recorded (admin-only).

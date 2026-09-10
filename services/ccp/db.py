@@ -51,25 +51,14 @@ CREATE TABLE IF NOT EXISTS nodes (
     cluster_id   INTEGER                       -- membership; app-enforced FK
 );
 
--- First-class clusters: a cluster is an execution target and (kind='slurm')
--- the unit of the Slurm lifecycle. Generated configs are stored here so they
--- can be previewed/redeployed; slurm_state tracks the guided workflow.
+-- First-class clusters: a named group of nodes used as an execution target by
+-- ClusterShell, Ansible and file deployment. (Databases created before the
+-- Slurm builder was removed also carry unused slurm_* columns — harmless.)
 CREATE TABLE IF NOT EXISTS clusters (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT NOT NULL UNIQUE,
-    kind         TEXT NOT NULL DEFAULT 'generic',  -- generic | slurm
+    kind         TEXT NOT NULL DEFAULT 'generic',
     description  TEXT NOT NULL DEFAULT '',
-    slurm_state  TEXT NOT NULL DEFAULT 'INIT',
-        -- INIT | DISCOVER | DEPLOY | VALIDATE | BENCHMARK | REPORT | MONITOR | CLEANUP
-    controller_node_id INTEGER,
-    slurm_conf   TEXT NOT NULL DEFAULT '',
-    gres_conf    TEXT NOT NULL DEFAULT '',
-    -- automatic deployment (M5): re-run the pipeline when membership changes,
-    -- and how Slurm is installed (auto = decide from the nodes' facts)
-    auto_deploy   INTEGER NOT NULL DEFAULT 1,
-    install_from  TEXT NOT NULL DEFAULT 'auto',   -- auto | apt | source
-    slurm_version TEXT NOT NULL DEFAULT '',
-    tarball_url   TEXT NOT NULL DEFAULT '',
     created_by   TEXT NOT NULL DEFAULT '',
     created_at   INTEGER NOT NULL
 );
@@ -111,13 +100,13 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_files_owner ON files(owner_id);
 
 -- One row per node, replaced on rescan. Summary columns feed the inventory,
--- rack view and the Slurm builder; raw_json keeps the full fact payload so
+-- rack view and the node detail view; raw_json keeps the full fact payload so
 -- future features need no schema change.
 CREATE TABLE IF NOT EXISTS hardware (
     node_id     INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
     cpu_model   TEXT NOT NULL DEFAULT '',
     cpu_sockets INTEGER,
-    cpu_cores   INTEGER,                     -- total logical CPUs (Slurm CPUs=)
+    cpu_cores   INTEGER,                     -- total logical CPUs
     threads_per_core INTEGER,
     mem_mb      INTEGER,
     disks       TEXT NOT NULL DEFAULT '',    -- e.g. 'nvme0n1 1.9TB, sda 480GB'
@@ -226,14 +215,11 @@ def init_db():
         conn.execute('ALTER TABLE nodes ADD COLUMN cluster_id INTEGER')
         conn.commit()
 
-    # M5 — automatic Slurm deployment settings on the cluster.
-    ccols = [r['name'] for r in conn.execute('PRAGMA table_info(clusters)')]
-    if 'auto_deploy' not in ccols:
-        conn.execute('ALTER TABLE clusters ADD COLUMN auto_deploy INTEGER NOT NULL DEFAULT 1')
-        conn.execute("ALTER TABLE clusters ADD COLUMN install_from TEXT NOT NULL DEFAULT 'auto'")
-        conn.execute("ALTER TABLE clusters ADD COLUMN slurm_version TEXT NOT NULL DEFAULT ''")
-        conn.execute("ALTER TABLE clusters ADD COLUMN tarball_url TEXT NOT NULL DEFAULT ''")
-        conn.commit()
+    # M6 — the Slurm builder was removed: every cluster is a plain execution
+    # target again. Leftover slurm_* columns from M4/M5 stay (SQLite cannot
+    # drop them cheaply) and are ignored.
+    conn.execute("UPDATE clusters SET kind='generic' WHERE kind='slurm'")
+    conn.commit()
 
     # A worker restart aborts any in-flight onboarding thread; reset those
     # rows to a retryable state (mirrors the running-jobs reaper below).

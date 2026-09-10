@@ -53,7 +53,7 @@ function selectedNodePayload(root) {
 // <details> containing one host <details> each, summarised as
 //   [group] 🌐 host (ip) | STATUS: SUCCESS
 // Host blocks are delimited by '===== host (addr) … =====' headers (emitted by
-// ClusterShell, the Slurm stages and file deploys); '##GROUP## name' lines mark
+// ClusterShell and file deploys); '##GROUP## name' lines mark
 // which infrastructure group the following hosts belong to. Logs without any
 // host header (onboarding, hardware scans) fall back to line colouring.
 
@@ -62,7 +62,7 @@ function _statusOf(header, body) {
   if (m) return m[1];
   const exit = /^\[.*\bexit\s+(\d+)\]\s*$/m.exec(body);
   if (exit) return exit[1] === '0' ? 'SUCCESS' : 'FAILED';
-  if (/\b(fatal|error):|FAILED\b|not a valid controller|Unable to (contact|determine)/i.test(body))
+  if (/\b(fatal|error):|FAILED\b/i.test(body))
     return 'FAILED';
   if (/\bCHANGED\b/.test(body)) return 'CHANGED';
   return body.trim() ? 'SUCCESS' : 'UNKNOWN';
@@ -92,7 +92,7 @@ const SSH_NOISE = [
 ];
 
 // The stream is tokenized into an ORDERED list of sections (one per
-// '##STAGE## k/N name' marker of the automatic pipeline, plus the untitled
+// '##STAGE## k/N name' marker a multi-step job may emit, plus the untitled
 // lead-in), each holding text blocks and host groups in the order they were
 // written — so playbook output, per-host frames and summaries never get
 // shuffled. `running` marks a stage without an end marker as still running.
@@ -213,9 +213,9 @@ function _renderGroup(g) {
 function _colorLines(lines) {
   return lines.map(line => {
     if (/^=====.*=====\s*$/.test(line)) return '<span class="c-host">' + esc(line) + '</span>';
-    if (/^\[.*\bexit\s+0\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK|SBATCH|AUTO DEPLOY) PASSED\b/.test(line) || /^MANAGED\b/.test(line))
+    if (/^\[.*\bexit\s+0\]\s*$/.test(line) || /^[A-Z ]+ PASSED\b/.test(line) || /^MANAGED\b/.test(line))
       return '<span class="c-ok">' + esc(line) + '</span>';
-    if (/^\[.*\bexit\s+([1-9]\d*)\]\s*$/.test(line) || /^(VALIDATE|BENCHMARK|SBATCH|AUTO DEPLOY) FAILED\b/.test(line) || /^FAILED[:\s]/.test(line) || /\b(fatal|error):/i.test(line) || /not a valid controller|Unable to (contact|determine)/i.test(line))
+    if (/^\[.*\bexit\s+([1-9]\d*)\]\s*$/.test(line) || /^[A-Z ]+ FAILED\b/.test(line) || /^FAILED[:\s]/.test(line) || /\b(fatal|error):/i.test(line))
       return '<span class="c-err">' + esc(line) + '</span>';
     if (/^\s*WARNING\b/.test(line) || /\bwarning:/i.test(line))
       return '<span class="c-warn">' + esc(line) + '</span>';

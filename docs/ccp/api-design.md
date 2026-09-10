@@ -58,22 +58,22 @@ All four mutations return `{"job_id": N}`; progress is the normal job log.
 | Endpoint | Role | Purpose |
 |---|---|---|
 | `GET  /api/clusters` | viewer | clusters with member/managed counts |
-| `POST /api/clusters` `{name, kind, description}` | operator | create |
+| `POST /api/clusters` `{name, description}` | operator | create (a `kind` in the body is accepted and ignored — every cluster is an execution target) |
 | `DELETE /api/clusters/<id>` | operator | delete; members' `cluster_id` cleared |
 | `POST /api/clusters/<id>/nodes` `{node_ids:[…]}` | operator | assign members (moves them from any previous cluster) |
 | `DELETE /api/clusters/<id>/nodes/<node_id>` | operator | unassign |
 
-## New — Slurm
+## Jobs
 
 | Endpoint | Role | Purpose |
 |---|---|---|
-| `POST /api/clusters/<id>/slurm/generate` `{controller_node_id}` | operator | generate + store slurm.conf/gres.conf from `hardware`; returns both texts for preview |
-| `POST /api/clusters/<id>/slurm/deploy` | operator | run the built-in deployment playbook via the Ansible engine → `{job_id}` |
-| `POST /api/clusters/<id>/slurm/action` `{stage}` | operator | run a lifecycle stage: `discover`, `validate`, `sbatch`, `benchmark`, `report`, `monitor`, `diagnose` (collect logs, any state), `cleanup` → `{job_id}`; advances `slurm_state` on success |
-| `POST /api/clusters/<id>/slurm/auto` `{reinstall?, run_tests?}` | operator | **automatic deployment**: one `slurm_auto` job — facts → hostnames → plan → generate → deploy → validate → sbatch — using the cluster's saved settings → `{job_id}`; `409` while one is running |
-| `PATCH /api/clusters/<id>` `{auto_deploy?, install_from?, slurm_version?, tarball_url?, controller_node_id?, description?}` | operator | cluster settings the pipeline reads; `install_from` ∈ auto/apt/source, validated like deploy |
-| `POST /api/clusters/<id>/nodes`, `DELETE /api/clusters/<id>/nodes/<nid>` | operator | now return `{ok, job_id}`: when the cluster is Slurm with `auto_deploy` on, the pipeline is re-run and its job id returned |
-| `GET /api/jobs/<id>/log` | viewer | raw job log as a text attachment |
+| `GET /api/jobs/<id>/log` | viewer | raw job log as a text attachment (the job page offers Copy log / Download log) |
+
+## Removed — Slurm (2026-09-10)
+
+`/api/clusters/<id>/slurm/*` (generate, deploy, action, auto) and
+`PATCH /api/clusters/<id>` were removed together with the Slurm builder;
+membership endpoints return `{ok}` again. Last commit with them: `f381985`.
 
 ## New — Ansible sources
 
@@ -88,5 +88,5 @@ under it (same layered defense as the files API).
 ## Job kinds
 
 `jobs.kind` values after the redesign: `shell`, `ansible`, `onboard`,
-`hwscan`, `hostname`, `slurm_deploy`, `slurm_action`. The generic job
+`hwscan`, `hostname`, `filedeploy`. The generic job
 endpoints (`GET/DELETE /api/jobs/<id>`) are unchanged and cover all kinds.
