@@ -1,7 +1,15 @@
 FROM python:3.12-slim
 
 # pycdlib reads uploaded ISOs so the kernel/initrd can be extracted for UEFI boot
-RUN pip install --no-cache-dir flask==3.0.3 gunicorn==22.0.0 PyYAML==6.0.2 pycdlib==1.14.0
+# Flaky or slow link to PyPI: retries + a long timeout ride out stalls.
+# Set PIP_MIRROR in .env (e.g. a regional or in-house mirror) to install from
+# there; PIP_MIRROR_HOST additionally trusts a plain-http mirror host.
+ARG PIP_MIRROR=
+ARG PIP_MIRROR_HOST=
+RUN pip install --no-cache-dir --retries 10 --timeout 120 \
+      ${PIP_MIRROR:+--index-url "$PIP_MIRROR"} \
+      ${PIP_MIRROR_HOST:+--trusted-host "$PIP_MIRROR_HOST"} \
+      flask==3.0.3 gunicorn==22.0.0 PyYAML==6.0.2 pycdlib==1.14.0
 
 WORKDIR /app
 COPY app.py .
