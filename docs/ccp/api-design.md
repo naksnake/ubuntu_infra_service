@@ -51,6 +51,19 @@ All four mutations return `{"job_id": N}`; progress is the normal job log.
 | `GET /api/discovery` | viewer | parsed DHCP leases: `[{ip, mac, hostname, expires, expired, node_id|null}]` — `node_id` set when MAC or IP already matches inventory |
 | `POST /api/discovery/import` | operator | `{"systems":[{"ip","mac","hostname"}], "username","password", "onboard":true}` → creates nodes (state `discovered`) and, when `onboard` and credentials given, queues one onboarding job per node. Returns per-system `{node_id, job_id}` |
 
+## New — rack layout files
+
+| Endpoint | Role | Purpose |
+|---|---|---|
+| `GET /api/rack/layout` | viewer | `{rows, meta}`; `?format=xlsx\|json\|yaml` downloads the layout (re-importable) |
+| `GET /api/rack/layout/template?format=xlsx\|json\|yaml` | viewer | example file to fill in |
+| `POST /api/rack/layout` | operator | multipart `file` (.xlsx/.xlsm/.csv/.json/.yaml/.yml, ≤5 MB, ≤5000 rows), `mode=replace\|merge`, `dry_run=1` to preview. Returns `{rows (with matched node, moves_from, rename), errors, warnings, summary, placed}`; any invalid row → 400, nothing stored |
+| `DELETE /api/rack/layout` | operator | remove the layout; nodes fall back to hostname topology |
+
+Topology precedence: layout row by MAC > by hostname > by IP > hostname parsing
+(`nodes.topo_source` = `layout` \| `hostname` \| `''`). Discovery import names
+a machine after its layout row's hostname when one is planned.
+
 ## Removed — clusters (2026-09-10)
 
 `/api/clusters*` (list, create, delete, assign, unassign) and the `cluster_id`

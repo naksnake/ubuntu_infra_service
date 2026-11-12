@@ -8,9 +8,17 @@ RUN apt-get update && \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Flaky or slow link to PyPI: retries + a long timeout ride out stalls.
+# Set PIP_MIRROR in .env (e.g. a regional or in-house mirror) to install from
+# there; PIP_MIRROR_HOST additionally trusts a plain-http mirror host.
+ARG PIP_MIRROR=
+ARG PIP_MIRROR_HOST=
+RUN pip install --no-cache-dir --retries 10 --timeout 120 \
+      ${PIP_MIRROR:+--index-url "$PIP_MIRROR"} \
+      ${PIP_MIRROR_HOST:+--trusted-host "$PIP_MIRROR_HOST"} \
+      -r requirements.txt
 
-COPY db.py executor.py app.py ansible_sources.py discovery.py topology.py ./
+COPY db.py executor.py app.py ansible_sources.py discovery.py topology.py rack_layout.py ./
 COPY templates/ templates/
 COPY static/ static/
 

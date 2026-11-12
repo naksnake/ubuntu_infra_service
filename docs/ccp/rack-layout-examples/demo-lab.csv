@@ -1,0 +1,21 @@
+hostname,mac,ip,rack,sled,role,notes
+rack0-sled1-gpu,02:CC:00:00:01:01,192.168.100.21,0,1,gpu,8x H100 HGX
+rack0-sled2-gpu,02:CC:00:00:02:01,192.168.100.22,0,2,gpu,8x H100 HGX
+rack0-sled3-gpu,02:CC:00:00:03:01,192.168.100.23,0,3,gpu,8x H100 HGX
+rack0-sled4-gpu,02:CC:00:00:04:01,192.168.100.24,0,4,gpu,8x H100 HGX
+rack0-sled5-gpu,02:CC:00:00:05:01,,0,5,gpu,8x H100 HGX
+rack0-sled6-gpu,02:CC:00:00:06:01,,0,6,gpu,8x H100 HGX
+rack0-sled7-gpu,02:CC:00:00:07:01,,0,7,gpu,8x H100 HGX
+rack0-sled8-gpu,02:CC:00:00:08:01,,0,8,gpu,8x H100 HGX
+rack1-sled1-gpu,02:CC:00:01:01:01,192.168.100.29,1,1,gpu,8x H200 HGX
+rack1-sled2-gpu,02:CC:00:01:02:01,192.168.100.30,1,2,gpu,8x H200 HGX
+rack1-sled3-gpu,02:CC:00:01:03:01,192.168.100.31,1,3,gpu,8x H200 HGX
+rack1-sled4-gpu,02:CC:00:01:04:01,192.168.100.32,1,4,gpu,8x H200 HGX
+rack1-sled5-gpu,02:CC:00:01:05:01,,1,5,gpu,8x H200 HGX
+rack1-sled6-gpu,02:CC:00:01:06:01,,1,6,gpu,8x H200 HGX
+rack1-sled7-gpu,02:CC:00:01:07:01,,1,7,gpu,8x H200 HGX
+rack1-sled8-gpu,02:CC:00:01:08:01,,1,8,gpu,8x H200 HGX
+rack2-sled1-cpu,02:CC:00:02:01:01,192.168.100.37,2,1,cpu,login / slurmctld
+rack2-sled2-cpu,02:CC:00:02:02:01,192.168.100.38,2,2,cpu,compute
+,02:CC:00:02:03:01,192.168.100.39,2,3,storage,NFS home
+,02:CC:00:02:04:01,192.168.100.40,2,4,storage,scratch

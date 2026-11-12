@@ -12,6 +12,7 @@ import os
 import time
 
 import db
+import rack_layout
 
 LEASES_FILE = os.environ.get('CCP_LEASES_FILE', '/data/dnsmasq.leases')
 
@@ -60,15 +61,21 @@ def parse_leases(path=None):
 
 def annotate(leases):
     """Attach inventory status to each lease: node_id/node_name/node_state when
-    a node already matches by MAC (preferred — IPs churn) or by address."""
+    a node already matches by MAC (preferred — IPs churn) or by address, and
+    the planned rack position / hostname when a rack layout row matches."""
     nodes = db.query('SELECT id, name, address, mac, state FROM nodes')
     by_mac = {n['mac'].upper(): n for n in nodes if n['mac']}
     by_addr = {n['address']: n for n in nodes}
+    idx = rack_layout.index()
     for lease in leases:
         n = by_mac.get(lease['mac']) or by_addr.get(lease['ip'])
         lease['node_id'] = n['id'] if n else None
         lease['node_name'] = n['name'] if n else ''
         lease['node_state'] = n['state'] if n else ''
+        row = rack_layout.match(idx, lease['hostname'], lease['mac'], lease['ip'])
+        lease['planned'] = ({'hostname': row['hostname'], 'rack': row['rack'],
+                             'sled': row['sled'], 'role': row['role']}
+                            if row else None)
     return leases
 
 

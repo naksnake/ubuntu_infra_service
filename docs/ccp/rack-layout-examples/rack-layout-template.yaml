@@ -1,0 +1,11 @@
+# CCP rack layout. Each machine is identified by mac (preferred), hostname or ip.
+# hostname, when given, is the name CCP gives the machine on Discovery import.
+# Columns: hostname, mac, ip, rack (required), sled, role, notes
+racks:
+  - rack: 0
+    nodes:
+      - {sled: 1, hostname: rack0-sled1-gpu, mac: "00:1A:2B:3C:4D:01", ip: 192.168.100.21, role: gpu, notes: HGX node}
+      - {sled: 2, hostname: rack0-sled2-gpu, mac: "00:1A:2B:3C:4D:02", role: gpu}
+  - rack: 1
+    nodes:
+      - {sled: 1, mac: "00:1A:2B:3C:4D:11", role: cpu, notes: placed by MAC only}

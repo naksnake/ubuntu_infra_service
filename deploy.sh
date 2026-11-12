@@ -294,6 +294,13 @@ MONITOR_SESSION_MINUTES=${MONITOR_SESSION_MINUTES:-30}
 MONITOR_VIEWER_USER=${MONITOR_VIEWER_USER:-viewer}
 MONITOR_VIEWER_PASSWORD="${MONITOR_VIEWER_PASSWORD:-}"
 MONITOR_SECRET_KEY="${MONITOR_SECRET_KEY}"
+
+# ==== Image build (optional) ====
+# PyPI mirror for the Python images when pypi.org is slow or blocked, e.g.
+# PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple  (blank = pypi.org).
+# PIP_MIRROR_HOST only for a plain-http mirror, e.g. 192.168.100.1
+PIP_MIRROR=${PIP_MIRROR:-}
+PIP_MIRROR_HOST=${PIP_MIRROR_HOST:-}
 EOF
   log "Wrote .env"
 }
@@ -503,9 +510,28 @@ maybe_clean_existing() {
   fi
 }
 
+# Build images, retrying: a download stall from PyPI / Docker Hub fails the
+# whole build, and a second attempt usually gets through (layers that already
+# built are cached). Extra args go to `docker compose build`.
+compose_build() {
+  local attempt max=3
+  for attempt in $(seq 1 "$max"); do
+    if docker_cli compose build "$@"; then
+      return 0
+    fi
+    if (( attempt < max )); then
+      warn "Image build failed (attempt ${attempt}/${max}) — retrying in $((attempt * 10))s..."
+      sleep $((attempt * 10))
+    fi
+  done
+  die "Image build failed ${max} times. If it is a network timeout (ReadTimeoutError from files.pythonhosted.org), set PIP_MIRROR in .env to a closer PyPI mirror, or configure the Docker proxy, then re-run."
+}
+
 compose_up() {
-  log "Starting stack: docker compose up -d --build"
-  docker_cli compose up -d --build
+  log "Building images: docker compose build"
+  compose_build
+  log "Starting stack: docker compose up -d"
+  docker_cli compose up -d
   log "Stack started. (restart: unless-stopped is set on all services)"
 }
 
@@ -902,7 +928,7 @@ cmd_rebuild() {
   log "Stopping stack..."
   docker_cli compose --profile https down --remove-orphans
   log "Rebuilding all images from scratch (--no-cache)..."
-  docker_cli compose build --no-cache
+  compose_build --no-cache
   docker_cli compose up -d
   check_stack
 }

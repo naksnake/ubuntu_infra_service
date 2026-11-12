@@ -634,9 +634,10 @@ def _run_hostname(job_id, spec, log):
     db.execute('UPDATE nodes SET name=? WHERE id=?', (new_name, node['id']))
     t = topology.apply(node['id'], new_name)
     if t['rack'] is not None:
-        placed = f"rack={t['rack']} sled={t['sled']} role={t['role'] or '-'}"
+        placed = (f"rack={t['rack']} sled={t['sled']} role={t['role'] or '-'}"
+                  f" from {'rack layout' if t.get('source') == 'layout' else 'hostname'}")
     else:
-        placed = 'no rack topology in name'
+        placed = 'no rack topology in name or rack layout'
     log.write(f'[ccp] inventory updated: name={new_name} ({placed})\n')
     return 0
 

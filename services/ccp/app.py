@@ -33,6 +33,7 @@ import ansible_sources
 import db
 import discovery
 import executor
+import rack_layout
 import topology
 
 app = Flask(__name__)
@@ -259,21 +260,40 @@ def deploy_page():
 
 @app.route('/rack')
 def rack_page():
-    """Rack view generated purely from hostname topology — nothing is drawn
-    or configured by hand."""
+    """Rack view generated from topology — an imported rack layout file
+    where one exists, else hostname parsing. Nothing is drawn by hand.
+    Layout rows no node matches yet show as expected (empty) slots."""
     nodes = db.query(
         'SELECT n.*, h.gpu_count, h.gpu_model, h.cpu_cores, h.mem_mb '
         'FROM nodes n LEFT JOIN hardware h ON h.node_id = n.id ORDER BY n.name')
+    layout = rack_layout.load()
+    idx = rack_layout.index(layout)
+    matched = set()
     racks = {}
     unracked = []
-    for n in nodes:
+    for row in nodes:
+        n = dict(row)
+        lr = rack_layout.match(idx, n['name'], n['mac'], n['address'])
+        if lr:
+            matched.add(lr['id'])
+            if lr['hostname'] and lr['hostname'] != n['name']:
+                n['planned_name'] = lr['hostname']
         if n['rack'] is None:
             unracked.append(n)
         else:
             racks.setdefault(n['rack'], []).append(n)
-    racks = {r: sorted(v, key=lambda n: (n['sled'] or 0))
+    for lr in layout:
+        if lr['id'] not in matched:
+            racks.setdefault(lr['rack'], []).append({
+                'expected': True, 'name': lr['hostname'] or lr['mac'] or lr['address'],
+                'sled': lr['sled'], 'role': lr['role'], 'mac': lr['mac'],
+                'address': lr['address'], 'notes': lr['notes']})
+    racks = {r: sorted(v, key=lambda n: (n['sled'] is None, n['sled'] or 0,
+                                         n['name']))
              for r, v in sorted(racks.items())}
-    return render_template('rack.html', racks=racks, unracked=unracked)
+    return render_template('rack.html', racks=racks, unracked=unracked,
+                           layout_meta=rack_layout.meta(),
+                           expected=len(layout) - len(matched))
 
 
 @app.route('/discovery')
@@ -420,6 +440,18 @@ def _placeholder_name(address):
     return name
 
 
+def _planned_name(mac, address, hostname='', idx=None):
+    """The hostname a rack layout file plans for this machine, if it is a
+    valid node name that no other node uses yet; '' otherwise."""
+    idx = rack_layout.index() if idx is None else idx
+    row = rack_layout.match(idx, hostname, mac, address)
+    want = row['hostname'] if row else ''
+    if want and NODE_NAME_RE.fullmatch(want) and not db.query(
+            'SELECT 1 FROM nodes WHERE name=?', (want,), one=True):
+        return want
+    return ''
+
+
 def _start_onboarding(node, password, set_hostname=True):
     """Queue the onboarding job for an ssh node and mark it in progress."""
     db.execute("UPDATE nodes SET state='onboarding', state_detail='' WHERE id=?",
@@ -452,6 +484,8 @@ def api_add_node():
                             'onboard an SSH node'}), 400
         if len(password) > 256:
             return jsonify({'error': 'password too long'}), 400
+    if not fields['name']:
+        fields['name'] = _planned_name(fields['mac'], fields['address'])
     auto_name = not fields['name']
     # default on: the node's own hostname should match its inventory name, so
     # the rack view and the machine describe the same box
@@ -635,6 +669,7 @@ def api_discovery_import():
         return jsonify({'error': 'password too long'}), 400
 
     results, seen = [], set()
+    layout_idx = rack_layout.index()
     for s in systems:
         ip = (s.get('ip') or '').strip()
         mac = (s.get('mac') or '').strip().upper()
@@ -658,10 +693,13 @@ def api_discovery_import():
             results.append({'ip': ip, 'node_id': existing['id'],
                             'status': 'exists', 'name': existing['name']})
             continue
-        # dnsmasq hostnames are client-supplied; use only if safe and unique
+        # a rack layout file's planned hostname wins; dnsmasq hostnames are
+        # client-supplied, so use them only if safe and unique
         auto_name = True
-        name = ''
-        if hostname and NODE_NAME_RE.fullmatch(hostname) and not db.query(
+        name = _planned_name(mac, ip, hostname, layout_idx)
+        if name:
+            auto_name = False
+        elif hostname and NODE_NAME_RE.fullmatch(hostname) and not db.query(
                 'SELECT 1 FROM nodes WHERE name=?', (hostname,), one=True):
             name, auto_name = hostname, False
         name = name or _placeholder_name(ip)
@@ -685,6 +723,115 @@ def api_discovery_import():
                         'status': 'onboarding' if username else 'imported',
                         'name': name})
     return jsonify({'results': results}), 201
+
+
+# ── rack layout API ───────────────────────────────────────────────────────────
+
+LAYOUT_FORMATS = ('xlsx', 'json', 'yaml')
+
+
+def _layout_download(body, fmt, stem):
+    return Response(body, mimetype=rack_layout.MIMETYPES[fmt], headers={
+        'Content-Disposition': f'attachment; filename="{stem}.{fmt}"'})
+
+
+def _layout_preview(rows):
+    """Annotate parsed layout rows with the inventory node each would place
+    and the topology that node has today."""
+    nodes = [dict(n) for n in db.query(
+        'SELECT id, name, mac, address, rack, sled, role, topo_source FROM nodes')]
+    by_mac = {}
+    for n in nodes:
+        m = rack_layout.norm_mac(n['mac'])
+        if m:
+            by_mac.setdefault(m, n)
+    by_name = {n['name'].lower(): n for n in nodes}
+    by_addr = {n['address']: n for n in nodes}
+    out = []
+    for r in rows:
+        n = ((r['mac'] and by_mac.get(r['mac']))
+             or (r['hostname'] and by_name.get(r['hostname'].lower()))
+             or (r['address'] and by_addr.get(r['address'])) or None)
+        item = {k: r[k] for k in rack_layout.FIELDS}
+        item['label'] = r.get('label', '')
+        item['node'] = n['name'] if n else ''
+        item['node_state'] = 'matched' if n else 'not in inventory yet'
+        if n and n['rack'] is not None and (n['rack'], n['sled']) != (r['rack'], r['sled']):
+            item['moves_from'] = f"rack {n['rack']} sled {n['sled']}"
+        if n and r['hostname'] and r['hostname'] != n['name']:
+            item['rename'] = r['hostname']
+        out.append(item)
+    return out
+
+
+@app.route('/api/rack/layout')
+def api_rack_layout():
+    """The imported rack layout as JSON, or ?format=xlsx|json|yaml to
+    download it as a file (round-trips through the importer)."""
+    rows = rack_layout.load()
+    fmt = (request.args.get('format') or '').lower()
+    if fmt:
+        if fmt not in LAYOUT_FORMATS:
+            return jsonify({'error': 'format must be xlsx, json or yaml'}), 400
+        return _layout_download(rack_layout.export(rows, fmt), fmt, 'rack-layout')
+    return jsonify({'rows': rows, 'meta': rack_layout.meta()})
+
+
+@app.route('/api/rack/layout/template')
+def api_rack_layout_template():
+    fmt = (request.args.get('format') or 'xlsx').lower()
+    if fmt not in LAYOUT_FORMATS:
+        return jsonify({'error': 'format must be xlsx, json or yaml'}), 400
+    return _layout_download(rack_layout.template(fmt), fmt, 'rack-layout-template')
+
+
+@app.route('/api/rack/layout', methods=['POST'])
+@require('operator')
+def api_rack_layout_import():
+    """Upload a rack layout (.xlsx, .csv, .json, .yaml) as multipart 'file'.
+    dry_run=1 validates and previews without storing; mode=replace (default)
+    swaps the whole layout, mode=merge updates only the rows it names. A file
+    with any invalid row is rejected as a whole."""
+    f = request.files.get('file')
+    if not f or not f.filename:
+        return jsonify({'error': 'choose a layout file to upload'}), 400
+    data = f.stream.read(rack_layout.MAX_FILE_BYTES + 1)
+    mode = (request.form.get('mode') or 'replace').lower()
+    if mode not in ('replace', 'merge'):
+        return jsonify({'error': 'mode must be replace or merge'}), 400
+    dry_run = (request.form.get('dry_run') or '').lower() in ('1', 'true', 'yes', 'on')
+    try:
+        rows, errors, warnings = rack_layout.parse(f.filename, data)
+    except rack_layout.LayoutError as exc:
+        return jsonify({'error': str(exc)}), 400
+    preview = _layout_preview(rows)
+    body = {'rows': preview, 'errors': errors[:200], 'error_count': len(errors),
+            'warnings': warnings, 'mode': mode, 'dry_run': dry_run,
+            'summary': {'rows': len(rows),
+                        'matched': sum(1 for p in preview if p['node']),
+                        'racks': len({r['rack'] for r in rows})}}
+    if errors:
+        body['error'] = (f'{len(errors)} problem(s) in the file — nothing was '
+                         'imported; fix them and upload again')
+        return jsonify(body), (200 if dry_run else 400)
+    if dry_run:
+        return jsonify(body)
+    source = secure_filename(f.filename) or 'upload'
+    rack_layout.save(rows, mode, session['username'], source)
+    body['placed'] = topology.refresh_all()
+    log_action('rack.layout.import',
+               f'{source}: {len(rows)} rows ({mode}), {body["placed"]} nodes placed')
+    return jsonify(body), 201
+
+
+@app.route('/api/rack/layout', methods=['DELETE'])
+@require('operator')
+def api_rack_layout_clear():
+    n = rack_layout.meta()['rows']
+    rack_layout.clear()
+    topology.refresh_all()
+    log_action('rack.layout.clear', f'{n} rows removed')
+    return jsonify({'ok': True, 'removed': n})
 
 
 # ── file deployment API ───────────────────────────────────────────────────────

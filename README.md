@@ -525,6 +525,14 @@ management panel for AI/HPC lab clusters (design docs in `docs/ccp/`):
   draws itself from them. One-click rename runs `hostnamectl set-hostname`
   (+ `/etc/hostname`, `/etc/hosts`) on the node and refreshes the inventory
   immediately.
+- **Rack layout files** — when hostnames can't carry the topology, import
+  the lab's rack plan on the Rack View page as **Excel (.xlsx)**, CSV, **JSON**
+  or **YAML** (templates downloadable there). Rows place machines by MAC,
+  hostname or IP (`hostname, mac, ip, rack, sled, role, notes`), override
+  hostname parsing, show not-yet-discovered machines as expected slots, and
+  supply the planned hostname used on Discovery import. Preview before
+  applying; any invalid row rejects the whole file. Replace or merge; export
+  the current layout in any of the three formats.
 - **Deploy files** — push staged files to groups or individual nodes with one
   click (Ansible copy or `clush --copy`), with per-host results.
 - **ClusterShell** — run a shell command across selected nodes/groups/clusters

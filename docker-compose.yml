@@ -105,7 +105,11 @@ services:
 
   # ── iPXE Manager (boot entry editor + file uploads) ───────────────────────
   ipxe-manager:
-    build: ./services/ipxe_manager
+    build:
+      context: ./services/ipxe_manager
+      args:
+        PIP_MIRROR: ${PIP_MIRROR:-}
+        PIP_MIRROR_HOST: ${PIP_MIRROR_HOST:-}
     container_name: lab_ipxe_manager
     ports:
       - "${UI_BIND:-0.0.0.0}:${IPXE_MANAGER_PORT:-8091}:8091"
@@ -161,7 +165,11 @@ services:
 
   # ── Monitor dashboard (service health + DHCP lookup) ──────────────────────
   monitor:
-    build: ./services/monitor
+    build:
+      context: ./services/monitor
+      args:
+        PIP_MIRROR: ${PIP_MIRROR:-}
+        PIP_MIRROR_HOST: ${PIP_MIRROR_HOST:-}
     container_name: lab_monitor
     ports:
       - "${UI_BIND:-0.0.0.0}:${MONITOR_PORT:-8090}:8090"
@@ -206,7 +214,11 @@ services:
 
   # ── Cluster Control Panel (ClusterShell + Ansible web UI) ──────────────────
   ccp:
-    build: ./services/ccp
+    build:
+      context: ./services/ccp
+      args:
+        PIP_MIRROR: ${PIP_MIRROR:-}
+        PIP_MIRROR_HOST: ${PIP_MIRROR_HOST:-}
     container_name: lab_ccp
     ports:
       - "${UI_BIND:-0.0.0.0}:${CCP_PORT:-8060}:8060"

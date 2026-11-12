@@ -2,9 +2,48 @@
 {% block title %}Rack View{% endblock %}
 {% block heading %}Rack View{% endblock %}
 {% block body %}
-<p class="muted">Generated automatically from hostnames (<span class="mono">rack0_sled1_gpu</span> →
-rack 0, sled 1, role gpu). Rename nodes on the <a href="{{ url_for('nodes_page') }}">Nodes</a>
-page to place them.</p>
+<p class="muted">Placed from the imported <b>rack layout file</b> when it lists a machine (by MAC,
+hostname or IP), otherwise parsed from the hostname (<span class="mono">rack0_sled1_gpu</span> →
+rack 0, sled 1, role gpu).</p>
+
+<div class="card">
+  <h2>Rack layout file</h2>
+  {% if layout_meta.rows %}
+  <p><b>{{ layout_meta.rows }}</b> rows from <span class="mono">{{ layout_meta.source or 'upload' }}</span>,
+  imported {{ layout_meta.imported_at|tstime }} by {{ layout_meta.imported_by or '—' }}
+  {% if expected %} · <span class="pill">{{ expected }} expected, not in inventory yet</span>{% endif %}</p>
+  {% else %}
+  <p class="muted">No layout imported — racks come from hostnames only. Import a spreadsheet,
+  JSON or YAML file to place machines by MAC without renaming them first.</p>
+  {% endif %}
+  <div class="ly-links">
+    <span class="muted">Template:</span>
+    <a class="btn btn-ghost btn-sm" href="/api/rack/layout/template?format=xlsx">Excel</a>
+    <a class="btn btn-ghost btn-sm" href="/api/rack/layout/template?format=yaml">YAML</a>
+    <a class="btn btn-ghost btn-sm" href="/api/rack/layout/template?format=json">JSON</a>
+    {% if layout_meta.rows %}
+    <span class="muted" style="margin-left:12px">Export current:</span>
+    <a class="btn btn-ghost btn-sm" href="/api/rack/layout?format=xlsx">Excel</a>
+    <a class="btn btn-ghost btn-sm" href="/api/rack/layout?format=yaml">YAML</a>
+    <a class="btn btn-ghost btn-sm" href="/api/rack/layout?format=json">JSON</a>
+    {% endif %}
+  </div>
+  {% if role_ok('operator') %}
+  <div class="row" style="margin-top:14px;align-items:flex-end">
+    <div><label>File (.xlsx, .csv, .json, .yaml)</label>
+      <input type="file" id="ly-file" accept=".xlsx,.xlsm,.csv,.json,.yaml,.yml"></div>
+    <div><label>Mode</label>
+      <select id="ly-mode">
+        <option value="replace">Replace the whole layout</option>
+        <option value="merge">Merge — update only the rows in this file</option>
+      </select></div>
+    <div><button class="btn" onclick="layoutUpload(true)">Preview</button>
+      {% if layout_meta.rows %}<button class="btn btn-danger btn-sm" onclick="layoutClear()"
+        title="Remove the layout; nodes fall back to hostname topology">Clear layout</button>{% endif %}</div>
+  </div>
+  <div id="ly-preview" style="margin-top:14px"></div>
+  {% endif %}
+</div>
 
 {% if racks %}
 <div class="rackrow">
@@ -12,10 +51,20 @@ page to place them.</p>
   <div class="rack">
     <div class="rack-title">Rack {{ rack }}</div>
     {% for n in sleds %}
-    <div class="sled ns-bg-{{ n.state }}" onclick="showDetail({{ n.id }})"
-         title="{{ n.name }} · {{ n.state }}{% if n.state_detail %} — {{ n.state_detail }}{% endif %}">
+    {% if n.expected %}
+    <div class="sled sled-expected" title="In the rack layout file, not in the inventory yet — PXE boot it and import it from Discovery">
       <div class="sled-head">
-        <span class="sled-no">{{ n.sled }}</span>
+        <span class="sled-no">{{ n.sled if n.sled is not none else '–' }}</span>
+        <b>{{ n.name }}</b>
+        {% if n.role %}<span class="pill">{{ n.role }}</span>{% endif %}
+      </div>
+      <div class="sled-sub mono">expected{% if n.mac %} · {{ n.mac }}{% endif %}{% if n.notes %} · {{ n.notes }}{% endif %}</div>
+    </div>
+    {% else %}
+    <div class="sled ns-bg-{{ n.state }}" onclick="showDetail({{ n.id }})"
+         title="{{ n.name }} · {{ n.state }}{% if n.state_detail %} — {{ n.state_detail }}{% endif %} · placed by {{ 'rack layout' if n.topo_source == 'layout' else 'hostname' }}">
+      <div class="sled-head">
+        <span class="sled-no">{{ n.sled if n.sled is not none else '–' }}</span>
         <b>{{ n.name }}</b>
         {% if n.role %}<span class="pill">{{ n.role }}</span>{% endif %}
       </div>
@@ -24,26 +73,97 @@ page to place them.</p>
         {% if n.cpu_cores %} · {{ n.cpu_cores }}c · {{ ((n.mem_mb or 0)/1024)|round(0)|int }}G{% endif %}
         {% if n.gpu_count %} · {{ n.gpu_count }}× GPU{% endif %}
       </div>
+      {% if n.planned_name %}
+      <div class="sled-sub">planned name <span class="mono">{{ n.planned_name }}</span>
+        {% if role_ok('operator') and n.state == 'managed' and n.conn != 'local' %}
+        <button class="btn btn-sm btn-ghost" data-id="{{ n.id }}" data-name="{{ n.planned_name }}"
+          onclick="event.stopPropagation();renamePlanned(this)">Apply</button>{% endif %}</div>
+      {% endif %}
     </div>
+    {% endif %}
     {% endfor %}
   </div>
   {% endfor %}
 </div>
 {% else %}
-<div class="card"><div class="empty">No rack-addressed nodes yet — rename nodes to the
-<span class="mono">rack&lt;N&gt;_sled&lt;M&gt;_&lt;role&gt;</span> scheme and they appear here automatically.</div></div>
+<div class="card"><div class="empty">No rack-addressed nodes yet — import a rack layout file above, or
+rename nodes to the <span class="mono">rack&lt;N&gt;_sled&lt;M&gt;_&lt;role&gt;</span> scheme.</div></div>
 {% endif %}
 
 {% if unracked %}
 <div class="card">
   <h2>Unracked ({{ unracked|length }})</h2>
-  <p class="muted">Names don't follow the rack scheme — they still work everywhere else.</p>
+  <p class="muted">Not in the rack layout and the name doesn't follow the rack scheme — they still work everywhere else.</p>
   <div class="unracked">
     {% for n in unracked %}
-    <span class="sled sled-mini ns-bg-{{ n.state }}" onclick="showDetail({{ n.id }})">
+    <span class="sled sled-mini ns-bg-{{ n.state }}" onclick="showDetail({{ n.id }})"
+      title="{{ n.address }}{% if n.mac %} · {{ n.mac }}{% endif %}">
       {{ n.name }}{% if n.role %} <span class="pill">{{ n.role }}</span>{% endif %}</span>
     {% endfor %}
   </div>
 </div>
 {% endif %}
 {% endblock %}
+
+{% block scripts %}<script>
+async function layoutUpload(dry){
+  const inp=document.getElementById('ly-file');
+  if(!inp.files.length){toast('Choose a layout file first',true);return;}
+  const fd=new FormData();
+  fd.append('file',inp.files[0]);
+  fd.append('mode',document.getElementById('ly-mode').value);
+  fd.append('dry_run',dry?'1':'0');
+  const box=document.getElementById('ly-preview');
+  try{
+    const res=await fetch('/api/rack/layout',{method:'POST',headers:{'X-CSRF-Token':CSRF},body:fd});
+    const d=await res.json();
+    if(!res.ok&&!d.rows)throw new Error(d.error||('HTTP '+res.status));
+    if(!dry&&res.ok){toast(`Imported ${d.summary.rows} rows — ${d.placed} node(s) placed`);location.reload();return;}
+    renderPreview(box,d);
+  }catch(e){box.innerHTML='';toast(e.message,true);}
+}
+
+function renderPreview(box,d){
+  let h='';
+  if(d.error_count){
+    h+=`<div class="warnbox"><b>${d.error_count} problem(s) — nothing will be imported until they are fixed:</b><ul>`+
+      d.errors.map(e=>`<li>${esc(e)}</li>`).join('')+
+      (d.error_count>d.errors.length?`<li>… and ${d.error_count-d.errors.length} more</li>`:'')+'</ul></div>';
+  }
+  (d.warnings||[]).forEach(w=>{h+=`<p class="muted"><small>${esc(w)}</small></p>`;});
+  const s=d.summary;
+  h+=`<p><b>${s.rows}</b> valid rows in <b>${s.racks}</b> rack(s); <b>${s.matched}</b> match a node in the inventory
+      (${d.mode==='merge'?'merge: other layout rows are kept':'replace: the current layout is discarded'}).</p>`;
+  h+='<div style="max-height:360px;overflow:auto"><table><thead><tr><th>Source</th><th>Rack</th><th>Sled</th><th>Role</th>'+
+     '<th>Hostname</th><th>MAC</th><th>IP</th><th>Inventory</th></tr></thead><tbody>';
+  d.rows.forEach(r=>{
+    const notes=[];
+    if(r.moves_from)notes.push('moves from '+r.moves_from);
+    if(r.rename)notes.push('planned name '+r.rename);
+    h+=`<tr><td><small>${esc(r.label)}</small></td><td>${esc(r.rack)}</td><td>${esc(r.sled??'—')}</td>
+      <td>${esc(r.role||'—')}</td><td class="mono">${esc(r.hostname||'—')}</td><td class="mono">${esc(r.mac||'—')}</td>
+      <td class="mono">${esc(r.address||'—')}</td>
+      <td>${r.node?'<b>'+esc(r.node)+'</b>':'<small class="muted">not in inventory yet</small>'}
+        ${notes.length?'<br><small class="muted">'+esc(notes.join(' · '))+'</small>':''}</td></tr>`;
+  });
+  h+='</tbody></table></div>';
+  if(!d.error_count)h+='<div style="margin-top:12px"><button class="btn btn-ok" onclick="layoutUpload(false)">Apply layout</button></div>';
+  box.innerHTML=h;
+}
+
+async function layoutClear(){
+  if(!confirm('Remove the rack layout? Nodes fall back to hostname-derived racks.'))return;
+  try{await api('DELETE','/api/rack/layout');toast('Layout cleared');location.reload();}
+  catch(e){toast(e.message,true);}
+}
+
+async function renamePlanned(btn){
+  const id=btn.dataset.id,name=btn.dataset.name;
+  if(!confirm(`Set the node's hostname to ${name}? (hostnamectl + /etc/hostname + /etc/hosts)`))return;
+  try{
+    const d=await api('POST','/api/nodes/'+id+'/hostname',{hostname:name});
+    toast('Renaming… job '+d.job_id);
+    setTimeout(()=>location.reload(),2500);
+  }catch(e){toast(e.message,true);}
+}
+</script>{% endblock %}

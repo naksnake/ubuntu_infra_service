@@ -1,0 +1,31 @@
+# Demo lab rack layout for CCP (Rack View -> Rack layout file -> Preview -> Apply).
+# 2 GPU racks x 8 sleds + 1 CPU/storage rack. Machines are matched by mac
+# (preferred), hostname or ip; hostname is the name given on Discovery import.
+# Storage nodes have no planned hostname: placed by MAC, keep their own name.
+racks:
+  - rack: 0
+    nodes:
+      - {sled: 1, hostname: rack0-sled1-gpu, mac: "02:CC:00:00:01:01", ip: 192.168.100.21, role: gpu, notes: "8x H100 HGX"}
+      - {sled: 2, hostname: rack0-sled2-gpu, mac: "02:CC:00:00:02:01", ip: 192.168.100.22, role: gpu, notes: "8x H100 HGX"}
+      - {sled: 3, hostname: rack0-sled3-gpu, mac: "02:CC:00:00:03:01", ip: 192.168.100.23, role: gpu, notes: "8x H100 HGX"}
+      - {sled: 4, hostname: rack0-sled4-gpu, mac: "02:CC:00:00:04:01", ip: 192.168.100.24, role: gpu, notes: "8x H100 HGX"}
+      - {sled: 5, hostname: rack0-sled5-gpu, mac: "02:CC:00:00:05:01", role: gpu, notes: "8x H100 HGX"}
+      - {sled: 6, hostname: rack0-sled6-gpu, mac: "02:CC:00:00:06:01", role: gpu, notes: "8x H100 HGX"}
+      - {sled: 7, hostname: rack0-sled7-gpu, mac: "02:CC:00:00:07:01", role: gpu, notes: "8x H100 HGX"}
+      - {sled: 8, hostname: rack0-sled8-gpu, mac: "02:CC:00:00:08:01", role: gpu, notes: "8x H100 HGX"}
+  - rack: 1
+    nodes:
+      - {sled: 1, hostname: rack1-sled1-gpu, mac: "02:CC:00:01:01:01", ip: 192.168.100.29, role: gpu, notes: "8x H200 HGX"}
+      - {sled: 2, hostname: rack1-sled2-gpu, mac: "02:CC:00:01:02:01", ip: 192.168.100.30, role: gpu, notes: "8x H200 HGX"}
+      - {sled: 3, hostname: rack1-sled3-gpu, mac: "02:CC:00:01:03:01", ip: 192.168.100.31, role: gpu, notes: "8x H200 HGX"}
+      - {sled: 4, hostname: rack1-sled4-gpu, mac: "02:CC:00:01:04:01", ip: 192.168.100.32, role: gpu, notes: "8x H200 HGX"}
+      - {sled: 5, hostname: rack1-sled5-gpu, mac: "02:CC:00:01:05:01", role: gpu, notes: "8x H200 HGX"}
+      - {sled: 6, hostname: rack1-sled6-gpu, mac: "02:CC:00:01:06:01", role: gpu, notes: "8x H200 HGX"}
+      - {sled: 7, hostname: rack1-sled7-gpu, mac: "02:CC:00:01:07:01", role: gpu, notes: "8x H200 HGX"}
+      - {sled: 8, hostname: rack1-sled8-gpu, mac: "02:CC:00:01:08:01", role: gpu, notes: "8x H200 HGX"}
+  - rack: 2
+    nodes:
+      - {sled: 1, hostname: rack2-sled1-cpu, mac: "02:CC:00:02:01:01", ip: 192.168.100.37, role: cpu, notes: "login / slurmctld"}
+      - {sled: 2, hostname: rack2-sled2-cpu, mac: "02:CC:00:02:02:01", ip: 192.168.100.38, role: cpu, notes: "compute"}
+      - {sled: 3, mac: "02:CC:00:02:03:01", ip: 192.168.100.39, role: storage, notes: "NFS home"}
+      - {sled: 4, mac: "02:CC:00:02:04:01", ip: 192.168.100.40, role: storage, notes: "scratch"}
