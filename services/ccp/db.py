@@ -43,11 +43,13 @@ CREATE TABLE IF NOT EXISTS nodes (
     state_detail TEXT NOT NULL DEFAULT '',
     mac          TEXT NOT NULL DEFAULT '',      -- from DHCP discovery, if known
     onboarded_at INTEGER,                       -- when the node became managed
-    -- topology derived from the hostname (rack0_sled1_gpu); NULL/'' when the
-    -- name doesn't follow the scheme. Never entered manually.
+    -- topology: from an imported rack layout row (topo_source='layout') or
+    -- parsed from the hostname rack0_sled1_gpu (topo_source='hostname');
+    -- NULL/'' when neither places the node. Recomputed, never typed in.
     rack         INTEGER,
     sled         INTEGER,
-    role         TEXT NOT NULL DEFAULT ''
+    role         TEXT NOT NULL DEFAULT '',
+    topo_source  TEXT NOT NULL DEFAULT ''
     -- databases created before 2026-09-10 also carry cluster_id and a
     -- clusters table (the Clusters feature was removed); both are ignored
 );
@@ -107,6 +109,23 @@ CREATE TABLE IF NOT EXISTS hardware (
     infiniband  TEXT NOT NULL DEFAULT '',
     raw_json    TEXT NOT NULL DEFAULT '{}',
     updated_at  INTEGER NOT NULL
+);
+
+-- Physical rack plan imported from an Excel / CSV / JSON / YAML file (see
+-- rack_layout.py). Each row places one machine, identified by MAC, hostname
+-- or IP; it overrides hostname-derived topology for the node it matches.
+CREATE TABLE IF NOT EXISTS rack_layout (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    hostname    TEXT NOT NULL DEFAULT '',    -- planned hostname, may be ''
+    mac         TEXT NOT NULL DEFAULT '',    -- normalised AA:BB:CC:DD:EE:FF
+    address     TEXT NOT NULL DEFAULT '',
+    rack        INTEGER NOT NULL,
+    sled        INTEGER,
+    role        TEXT NOT NULL DEFAULT '',
+    notes       TEXT NOT NULL DEFAULT '',
+    source      TEXT NOT NULL DEFAULT '',    -- uploaded file name
+    imported_at INTEGER NOT NULL,
+    imported_by TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS audit (
@@ -196,6 +215,13 @@ def init_db():
         conn.commit()
         import topology                # local import: topology imports db
         topology.backfill(conn)
+
+    # M7 — rack layout files: remember where each node's topology came from
+    ncols = [r['name'] for r in conn.execute('PRAGMA table_info(nodes)')]
+    if 'topo_source' not in ncols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN topo_source TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE nodes SET topo_source='hostname' WHERE rack IS NOT NULL")
+        conn.commit()
 
     # M4–M6 (clusters, Slurm settings) are retired: the Clusters feature was
     # removed on 2026-09-10. Existing databases keep nodes.cluster_id and the

@@ -109,6 +109,10 @@ input:focus,select,textarea:focus{outline:none;border-color:var(--accent)}
 .sled-no{color:var(--muted);font-family:var(--mono);font-size:11px}
 .sled-sub{color:var(--muted);font-size:11px;margin-top:3px}
 .sled-mini{display:inline-block;margin:3px 6px 3px 0;padding:5px 10px}
+.sled-expected{border-style:dashed;opacity:.65;cursor:default;background:transparent}
+.sled-expected:hover{border-color:var(--line)}
+.ly-links{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.ly-links .btn{flex:0 0 auto}
 .unracked{display:flex;flex-wrap:wrap}
 .ns-bg-managed{border-left-color:#2ea043}
 .ns-bg-onboarding{border-left-color:#4c8dff}

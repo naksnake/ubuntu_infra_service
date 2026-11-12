@@ -10,7 +10,7 @@
   {% if error %}<div class="warnbox">{{ error }}</div>{% endif %}
   <table>
     <thead><tr>{% if role_ok('operator') %}<th></th>{% endif %}
-      <th>IP</th><th>MAC</th><th>Hostname</th><th>Lease</th><th>Inventory</th></tr></thead>
+      <th>IP</th><th>MAC</th><th>Hostname</th><th>Planned (rack layout)</th><th>Lease</th><th>Inventory</th></tr></thead>
     <tbody>
       {% for l in leases %}
       <tr class="{{ 'lease-expired' if l.expired }}">
@@ -21,13 +21,16 @@
         <td class="mono">{{ l.ip }}</td>
         <td class="mono">{{ l.mac or '—' }}</td>
         <td>{{ l.hostname or '—' }}</td>
+        <td>{% if l.planned %}<b>{{ l.planned.hostname or '—' }}</b>
+            <small class="muted">rack {{ l.planned.rack }}{% if l.planned.sled is not none %} · sled {{ l.planned.sled }}{% endif %}{% if l.planned.role %} · {{ l.planned.role }}{% endif %}</small>
+          {% else %}<small class="muted">—</small>{% endif %}</td>
         <td><small>{{ 'expired' if l.expired else ('static' if l.expiry_ts == 0 else 'active') }}</small></td>
         <td>{% if l.node_id %}<span class="badge ns-{{ l.node_state }}">{{ l.node_state }}</span>
             <small>{{ l.node_name }}</small>
           {% else %}<span class="pill">new</span>{% endif %}</td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="empty">No DHCP leases yet — boot a machine on the lab network.</td></tr>
+      <tr><td colspan="7" class="empty">No DHCP leases yet — boot a machine on the lab network.</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -44,6 +47,8 @@
   </div>
   <label class="inlinechk" title="Applies each system's DHCP hostname to the machine itself so inventory and hostname agree">
     <input type="checkbox" id="d-sethost" checked> Set each node's hostname to its inventory name</label>
+  <p class="muted"><small>Systems listed in the <a href="{{ url_for('rack_page') }}">rack layout file</a>
+  are named after their planned hostname; others keep their DHCP hostname.</small></p>
   <div style="margin-top:14px">
     <button class="btn" onclick="importSelected(true)">Import &amp; onboard selected</button>
     <button class="btn btn-ghost" onclick="importSelected(false)"
