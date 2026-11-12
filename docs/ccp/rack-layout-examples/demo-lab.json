@@ -1,0 +1,174 @@
+{
+  "nodes": [
+    {
+      "hostname": "rack0-sled1-gpu",
+      "mac": "02:CC:00:00:01:01",
+      "ip": "192.168.100.21",
+      "rack": 0,
+      "sled": 1,
+      "role": "gpu",
+      "notes": "8x H100 HGX"
+    },
+    {
+      "hostname": "rack0-sled2-gpu",
+      "mac": "02:CC:00:00:02:01",
+      "ip": "192.168.100.22",
+      "rack": 0,
+      "sled": 2,
+      "role": "gpu",
+      "notes": "8x H100 HGX"
+    },
+    {
+      "hostname": "rack0-sled3-gpu",
+      "mac": "02:CC:00:00:03:01",
+      "ip": "192.168.100.23",
+      "rack": 0,
+      "sled": 3,
+      "role": "gpu",
+      "notes": "8x H100 HGX"
+    },
+    {
+      "hostname": "rack0-sled4-gpu",
+      "mac": "02:CC:00:00:04:01",
+      "ip": "192.168.100.24",
+      "rack": 0,
+      "sled": 4,
+      "role": "gpu",
+      "notes": "8x H100 HGX"
+    },
+    {
+      "hostname": "rack0-sled5-gpu",
+      "mac": "02:CC:00:00:05:01",
+      "rack": 0,
+      "sled": 5,
+      "role": "gpu",
+      "notes": "8x H100 HGX"
+    },
+    {
+      "hostname": "rack0-sled6-gpu",
+      "mac": "02:CC:00:00:06:01",
+      "rack": 0,
+      "sled": 6,
+      "role": "gpu",
+      "notes": "8x H100 HGX"
+    },
+    {
+      "hostname": "rack0-sled7-gpu",
+      "mac": "02:CC:00:00:07:01",
+      "rack": 0,
+      "sled": 7,
+      "role": "gpu",
+      "notes": "8x H100 HGX"
+    },
+    {
+      "hostname": "rack0-sled8-gpu",
+      "mac": "02:CC:00:00:08:01",
+      "rack": 0,
+      "sled": 8,
+      "role": "gpu",
+      "notes": "8x H100 HGX"
+    },
+    {
+      "hostname": "rack1-sled1-gpu",
+      "mac": "02:CC:00:01:01:01",
+      "ip": "192.168.100.29",
+      "rack": 1,
+      "sled": 1,
+      "role": "gpu",
+      "notes": "8x H200 HGX"
+    },
+    {
+      "hostname": "rack1-sled2-gpu",
+      "mac": "02:CC:00:01:02:01",
+      "ip": "192.168.100.30",
+      "rack": 1,
+      "sled": 2,
+      "role": "gpu",
+      "notes": "8x H200 HGX"
+    },
+    {
+      "hostname": "rack1-sled3-gpu",
+      "mac": "02:CC:00:01:03:01",
+      "ip": "192.168.100.31",
+      "rack": 1,
+      "sled": 3,
+      "role": "gpu",
+      "notes": "8x H200 HGX"
+    },
+    {
+      "hostname": "rack1-sled4-gpu",
+      "mac": "02:CC:00:01:04:01",
+      "ip": "192.168.100.32",
+      "rack": 1,
+      "sled": 4,
+      "role": "gpu",
+      "notes": "8x H200 HGX"
+    },
+    {
+      "hostname": "rack1-sled5-gpu",
+      "mac": "02:CC:00:01:05:01",
+      "rack": 1,
+      "sled": 5,
+      "role": "gpu",
+      "notes": "8x H200 HGX"
+    },
+    {
+      "hostname": "rack1-sled6-gpu",
+      "mac": "02:CC:00:01:06:01",
+      "rack": 1,
+      "sled": 6,
+      "role": "gpu",
+      "notes": "8x H200 HGX"
+    },
+    {
+      "hostname": "rack1-sled7-gpu",
+      "mac": "02:CC:00:01:07:01",
+      "rack": 1,
+      "sled": 7,
+      "role": "gpu",
+      "notes": "8x H200 HGX"
+    },
+    {
+      "hostname": "rack1-sled8-gpu",
+      "mac": "02:CC:00:01:08:01",
+      "rack": 1,
+      "sled": 8,
+      "role": "gpu",
+      "notes": "8x H200 HGX"
+    },
+    {
+      "hostname": "rack2-sled1-cpu",
+      "mac": "02:CC:00:02:01:01",
+      "ip": "192.168.100.37",
+      "rack": 2,
+      "sled": 1,
+      "role": "cpu",
+      "notes": "login / slurmctld"
+    },
+    {
+      "hostname": "rack2-sled2-cpu",
+      "mac": "02:CC:00:02:02:01",
+      "ip": "192.168.100.38",
+      "rack": 2,
+      "sled": 2,
+      "role": "cpu",
+      "notes": "compute"
+    },
+    {
+      "mac": "02:CC:00:02:03:01",
+      "ip": "192.168.100.39",
+      "rack": 2,
+      "sled": 3,
+      "role": "storage",
+      "notes": "NFS home"
+    },
+    {
+      "mac": "02:CC:00:02:04:01",
+      "ip": "192.168.100.40",
+      "rack": 2,
+      "sled": 4,
+      "role": "storage",
+      "notes": "scratch"
+    }
+  ]
+}

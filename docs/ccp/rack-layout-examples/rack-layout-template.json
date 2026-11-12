@@ -1,0 +1,27 @@
+{
+  "nodes": [
+    {
+      "hostname": "rack0-sled1-gpu",
+      "mac": "00:1A:2B:3C:4D:01",
+      "ip": "192.168.100.21",
+      "rack": 0,
+      "sled": 1,
+      "role": "gpu",
+      "notes": "HGX node"
+    },
+    {
+      "hostname": "rack0-sled2-gpu",
+      "mac": "00:1A:2B:3C:4D:02",
+      "rack": 0,
+      "sled": 2,
+      "role": "gpu"
+    },
+    {
+      "mac": "00:1A:2B:3C:4D:11",
+      "rack": 1,
+      "sled": 1,
+      "role": "cpu",
+      "notes": "placed by MAC only"
+    }
+  ]
+}
